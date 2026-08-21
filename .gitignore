@@ -1,0 +1,10 @@
+.vs/
+out/
+obj/
+dist/
+*.user
+*.suo
+*.aps
+*.VC.db
+*.VC.opendb
+*.log

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="app"><UniqueIdentifier>{19510EFC-913F-47C8-98D7-A9CBEE771880}</UniqueIdentifier></Filter>
+    <Filter Include="core"><UniqueIdentifier>{5E820F35-7B1B-4642-8D4D-B8774EAA01E4}</UniqueIdentifier></Filter>
+    <Filter Include="render"><UniqueIdentifier>{8F352D48-F76E-41FD-84AA-E3D5628F4913}</UniqueIdentifier></Filter>
+    <Filter Include="shell"><UniqueIdentifier>{20A78913-F3C8-48F2-ABDA-3FA88DE80B58}</UniqueIdentifier></Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\app\main.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\app\WallpaperApplication.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\core\Logger.cpp"><Filter>core</Filter></ClCompile>
+    <ClCompile Include="src\render\D3DRenderer.cpp"><Filter>render</Filter></ClCompile>
+    <ClCompile Include="src\shell\DesktopHost.cpp"><Filter>shell</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\app\WallpaperApplication.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="src\core\Logger.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\render\D3DRenderer.h"><Filter>render</Filter></ClInclude>
+    <ClInclude Include="src\shell\DesktopHost.h"><Filter>shell</Filter></ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="src\app\app.manifest"><Filter>app</Filter></Manifest>
+    <ResourceCompile Include="src\app\version.rc"><Filter>app</Filter></ResourceCompile>
+  </ItemGroup>
+</Project>

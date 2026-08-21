@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-2022
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate tag and changelog
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$') {
+              throw "Release tag '$tag' must use vMAJOR.MINOR.PATCH."
+          }
+          $version = $Matches.version
+          $escapedVersion = [regex]::Escape($version)
+          $entry = Select-String -LiteralPath 'CHANGELOG.md' `
+              -Pattern "^## \[$escapedVersion\] - \d{4}-\d{2}-\d{2}$"
+          if ($null -eq $entry) {
+              throw "CHANGELOG.md has no dated section for $version."
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build release installer
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: .\tools\build-release.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $version = $env:RELEASE_VERSION
+          $installer = ".\dist\LiveWallpaperEngine-$version-x64-setup.exe"
+          gh release create $env:RELEASE_TAG `
+              "$installer#Windows x64 installer" `
+              '.\dist\SHA256SUMS.txt#SHA-256 checksums' `
+              --repo $env:RELEASE_REPOSITORY `
+              --verify-tag `
+              --fail-on-no-commits `
+              --generate-notes `
+              --title "Live Wallpaper Engine $version"

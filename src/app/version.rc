@@ -1,0 +1,50 @@
+#include <windows.h>
+
+#ifndef LWE_VERSION_MAJOR
+#define LWE_VERSION_MAJOR 0
+#endif
+#ifndef LWE_VERSION_MINOR
+#define LWE_VERSION_MINOR 0
+#endif
+#ifndef LWE_VERSION_PATCH
+#define LWE_VERSION_PATCH 0
+#endif
+
+#define LWE_STRINGIZE_INNER(value) #value
+#define LWE_STRINGIZE(value) LWE_STRINGIZE_INNER(value)
+#define LWE_VERSION_TEXT                                                        \
+    LWE_STRINGIZE(LWE_VERSION_MAJOR) "." LWE_STRINGIZE(LWE_VERSION_MINOR) "." \
+        LWE_STRINGIZE(LWE_VERSION_PATCH) ".0"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION LWE_VERSION_MAJOR,LWE_VERSION_MINOR,LWE_VERSION_PATCH,0
+ PRODUCTVERSION LWE_VERSION_MAJOR,LWE_VERSION_MINOR,LWE_VERSION_PATCH,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "Live Wallpaper Engine contributors\0"
+            VALUE "FileDescription", "Live Wallpaper Engine\0"
+            VALUE "FileVersion", LWE_VERSION_TEXT "\0"
+            VALUE "InternalName", "LiveWallpaperEngine\0"
+            VALUE "LegalCopyright", "Licensed under Apache-2.0\0"
+            VALUE "OriginalFilename", "LiveWallpaperEngine.exe\0"
+            VALUE "ProductName", "Live Wallpaper Engine\0"
+            VALUE "ProductVersion", LWE_VERSION_TEXT "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
