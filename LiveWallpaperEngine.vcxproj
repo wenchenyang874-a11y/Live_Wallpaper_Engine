@@ -69,7 +69,7 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;shell32.lib;ole32.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;windowscodecs.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;shlwapi.lib;bcrypt.lib;dwmapi.lib;uxtheme.lib;comctl32.lib;wtsapi32.lib;powrprof.lib;shell32.lib;ole32.lib;oleaut32.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -90,19 +90,38 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;shell32.lib;ole32.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;windowscodecs.lib;mfplat.lib;mfreadwrite.lib;mfuuid.lib;shlwapi.lib;bcrypt.lib;dwmapi.lib;uxtheme.lib;comctl32.lib;wtsapi32.lib;powrprof.lib;shell32.lib;ole32.lib;oleaut32.lib;user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="src\app\main.cpp" />
+    <ClCompile Include="src\app\ModernMainWindow.cpp" />
     <ClCompile Include="src\app\WallpaperApplication.cpp" />
+    <ClCompile Include="src\core\InstanceCoordinator.cpp" />
     <ClCompile Include="src\core\Logger.cpp" />
+    <ClCompile Include="src\core\SettingsStore.cpp" />
+    <ClCompile Include="src\core\WallpaperLibrary.cpp" />
+    <ClCompile Include="src\core\WallpaperLibrarySelfTest.cpp" />
+    <ClCompile Include="src\media\MediaProbe.cpp" />
+    <ClCompile Include="src\media\image\GifPlayer.cpp" />
+    <ClCompile Include="src\media\image\WicImageLoader.cpp" />
+    <ClCompile Include="src\media\video\MediaEnginePlayer.cpp" />
     <ClCompile Include="src\render\D3DRenderer.cpp" />
     <ClCompile Include="src\shell\DesktopHost.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\app\WallpaperApplication.h" />
+    <ClInclude Include="src\app\ModernMainWindow.h" />
+    <ClInclude Include="src\core\InstanceCoordinator.h" />
     <ClInclude Include="src\core\Logger.h" />
+    <ClInclude Include="src\core\SettingsStore.h" />
+    <ClInclude Include="src\core\WallpaperLibrary.h" />
+    <ClInclude Include="src\core\WallpaperLibrarySelfTest.h" />
+    <ClInclude Include="src\media\MediaProbe.h" />
+    <ClInclude Include="src\media\MediaTypes.h" />
+    <ClInclude Include="src\media\image\GifPlayer.h" />
+    <ClInclude Include="src\media\image\WicImageLoader.h" />
+    <ClInclude Include="src\media\video\MediaEnginePlayer.h" />
     <ClInclude Include="src\render\D3DRenderer.h" />
     <ClInclude Include="src\shell\DesktopHost.h" />
   </ItemGroup>

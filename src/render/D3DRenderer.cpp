@@ -160,12 +160,14 @@ bool D3DRenderer::Render(const std::chrono::steady_clock::duration elapsed) {
     }
 
     const float seconds = std::chrono::duration<float>(elapsed).count();
-    const float slowWave = (std::sin(seconds * 0.35F) + 1.0F) * 0.5F;
-    const float secondWave = (std::sin(seconds * 0.21F + 1.7F) + 1.0F) * 0.5F;
+    // The spike used to change so slowly that a successful launch looked inert.
+    // A brighter five-second blue/teal pulse makes rendering visibly testable.
+    const float slowWave = (std::sin(seconds * 1.25F) + 1.0F) * 0.5F;
+    const float secondWave = (std::sin(seconds * 0.85F + 1.7F) + 1.0F) * 0.5F;
     const float clearColor[4]{
-        0.025F + slowWave * 0.035F,
-        0.055F + secondWave * 0.075F,
-        0.095F + slowWave * 0.10F,
+        0.020F + slowWave * 0.040F,
+        0.080F + secondWave * 0.220F,
+        0.150F + slowWave * 0.300F,
         1.0F,
     };
 
@@ -182,6 +184,41 @@ bool D3DRenderer::Render(const std::chrono::steady_clock::duration elapsed) {
         core::LogError(L"DXGI Present failed.", result);
         return false;
     }
+    return true;
+}
+
+bool D3DRenderer::PresentStaticImage(const std::span<const std::uint8_t> bgraPixels,
+                                     const UINT width, const UINT height,
+                                     const UINT stride) {
+    const std::uint64_t requiredStride = static_cast<std::uint64_t>(width) * 4U;
+    const std::uint64_t requiredBytes = static_cast<std::uint64_t>(stride) * height;
+    if (!IsInitialized() || width == 0 || height == 0 || stride < requiredStride ||
+        requiredBytes > bgraPixels.size()) {
+        return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
+    HRESULT result = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    if (FAILED(result)) {
+        core::LogError(L"Unable to acquire the static wallpaper back buffer.", result);
+        return false;
+    }
+
+    D3D11_TEXTURE2D_DESC description{};
+    backBuffer->GetDesc(&description);
+    if (description.Width != width || description.Height != height ||
+        description.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+        core::LogError(L"Static wallpaper dimensions do not match the swap chain.");
+        return false;
+    }
+
+    context_->UpdateSubresource(backBuffer.Get(), 0, nullptr, bgraPixels.data(), stride, 0);
+    result = swapChain_->Present(1, 0);
+    if (FAILED(result)) {
+        core::LogError(L"Static wallpaper Present failed.", result);
+        return false;
+    }
+
     return true;
 }
 

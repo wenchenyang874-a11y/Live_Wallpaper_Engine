@@ -1,12 +1,11 @@
 #include "core/Logger.h"
 
 #include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <iterator>
-#include <memory>
 #include <mutex>
 #include <sstream>
+#include <string>
 
 #include <shlobj.h>
 
@@ -14,7 +13,7 @@ namespace lwe::core {
 namespace {
 
 std::mutex g_logMutex;
-std::unique_ptr<std::wofstream> g_logFile;
+HANDLE g_logFile = INVALID_HANDLE_VALUE;
 
 std::wstring Timestamp() {
     SYSTEMTIME value{};
@@ -37,10 +36,29 @@ void Write(std::wstring_view level, std::wstring_view message) {
     OutputDebugStringW(line.c_str());
 
     std::scoped_lock lock(g_logMutex);
-    if (g_logFile && g_logFile->is_open()) {
-        *g_logFile << line;
-        g_logFile->flush();
+    if (g_logFile == INVALID_HANDLE_VALUE) {
+        return;
     }
+
+    // std::wofstream uses the process locale and entered a permanent failed
+    // state when a selected path contained Chinese characters. Convert every
+    // complete line to UTF-8 and append it in one Win32 write instead.
+    const int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, line.data(),
+                                             static_cast<int>(line.size()), nullptr, 0,
+                                             nullptr, nullptr);
+    if (required <= 0) {
+        return;
+    }
+    std::string utf8(static_cast<std::size_t>(required), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, line.data(),
+                            static_cast<int>(line.size()), utf8.data(), required, nullptr,
+                            nullptr) != required) {
+        return;
+    }
+
+    DWORD written = 0;
+    WriteFile(g_logFile, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+    FlushFileBuffers(g_logFile);
 }
 
 std::filesystem::path LogDirectory() {
@@ -73,22 +91,22 @@ bool InitializeLogging() {
         return false;
     }
 
-    auto file = std::make_unique<std::wofstream>();
-    file->open(directory / L"LiveWallpaperEngine.log", std::ios::out | std::ios::app);
-    if (!file->is_open()) {
+    const std::filesystem::path path = directory / L"LiveWallpaperEngine.log";
+    g_logFile = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (g_logFile == INVALID_HANDLE_VALUE) {
         return false;
     }
-
-    g_logFile = std::move(file);
     return true;
 }
 
 void ShutdownLogging() {
     std::scoped_lock lock(g_logMutex);
-    if (g_logFile) {
-        g_logFile->flush();
-        g_logFile->close();
-        g_logFile.reset();
+    if (g_logFile != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(g_logFile);
+        CloseHandle(g_logFile);
+        g_logFile = INVALID_HANDLE_VALUE;
     }
 }
 

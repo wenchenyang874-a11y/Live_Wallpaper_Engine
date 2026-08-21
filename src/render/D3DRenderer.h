@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
+#include <span>
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -20,6 +22,8 @@ public:
     bool Initialize(HWND targetWindow);
     bool Resize(UINT width, UINT height);
     bool Render(std::chrono::steady_clock::duration elapsed);
+    bool PresentStaticImage(std::span<const std::uint8_t> bgraPixels, UINT width,
+                            UINT height, UINT stride);
     void Shutdown();
 
     [[nodiscard]] bool IsInitialized() const noexcept;

@@ -42,6 +42,7 @@ function Find-InnoCompiler {
     }
 
     $candidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'),
         (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'),
         (Join-Path $env:ProgramFiles 'Inno Setup 6\ISCC.exe')
     )
@@ -53,8 +54,31 @@ function Find-InnoCompiler {
     throw 'ISCC.exe was not found. Install Inno Setup 6 before building an installer.'
 }
 
+function Get-ChineseMessagesFile {
+    $translationCommit = '69a2554fc9551f1d3da8df8ba659007dea3f906f'
+    $expectedHash = 'E0B0B350E2245F3C5E65586DFE43D574F6E7F06F2261149ABA284954B3FC9A8D'
+    $translationPath = Join-Path $env:TEMP `
+        "LiveWallpaperEngine-ChineseSimplified-$translationCommit.isl"
+    $downloadPath = $translationPath + '.download'
+
+    if (-not (Test-Path -LiteralPath $translationPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $translationPath -Algorithm SHA256).Hash -ne
+            $expectedHash) {
+        $url = "https://raw.githubusercontent.com/jrsoftware/issrc/$translationCommit/Files/Languages/ChineseSimplified.isl"
+        Invoke-WebRequest -Uri $url -OutFile $downloadPath
+        $actualHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash
+        if ($actualHash -ne $expectedHash) {
+            Remove-Item -LiteralPath $downloadPath -Force
+            throw "Chinese installer translation SHA-256 mismatch: $actualHash"
+        }
+        Move-Item -LiteralPath $downloadPath -Destination $translationPath -Force
+    }
+    return $translationPath
+}
+
 $msBuild = Find-MSBuild
 $innoCompiler = Find-InnoCompiler
+$chineseMessagesFile = Get-ChineseMessagesFile
 $solution = Join-Path $repositoryRoot 'LiveWallpaperEngine.sln'
 $installerScript = Join-Path $repositoryRoot 'installer\LiveWallpaperEngine.iss'
 $releaseExecutable = Join-Path $repositoryRoot 'out\x64\Release\LiveWallpaperEngine.exe'
@@ -82,7 +106,8 @@ foreach ($artifact in @($installerPath, $checksumPath)) {
     }
 }
 
-& $innoCompiler "/DMyAppVersion=$Version" $installerScript
+& $innoCompiler "/DMyAppVersion=$Version" `
+    "/DChineseMessagesFile=$chineseMessagesFile" $installerScript
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath)) {
     throw "Inno Setup failed to create '$installerName'."
 }
