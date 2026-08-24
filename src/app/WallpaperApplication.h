@@ -1,12 +1,16 @@
 #pragma once
 
 #include <chrono>
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <windows.h>
@@ -71,9 +75,14 @@ private:
     void ChooseExport();
     void ApplySelectedWallpaper();
     void PreviewSelectedWallpaper();
+    void PreviewWallpaper(const core::WallpaperItem& item);
     void CommitWallpaperRename();
     void ShowLibraryContextMenu(POINT screenPoint);
+    void ShowActiveWallpaperContextMenu(POINT screenPoint);
     void CancelActiveWallpaper(bool persistSelection = true);
+    void CancelWallpaper(const core::WallpaperItem& item,
+                         bool confirmCancellation = true,
+                         bool persistSelection = true);
     bool ApplyWallpaperWithTargetPrompt(std::wstring_view path,
                                         bool persistSelection = true,
                                         bool showErrors = true);
@@ -86,6 +95,7 @@ private:
     void StopAllPlayback();
     bool RemoveFailedPlaybackSessions();
     void ToggleSound();
+    void ToggleManualPlaybackPause();
     HRESULT SaveCurrentSelection() const;
     void RefreshDisplayTargets(bool preserveSelection);
     void ApplyDisplayModeFromUi();
@@ -96,6 +106,11 @@ private:
     std::vector<std::wstring> ActiveWallpaperPaths() const;
     std::wstring ActivePlaybackStatus() const;
     bool HasDynamicPlayback() const;
+    std::uint64_t VideoTransferredFrameCount() const;
+    bool RenderPlaybackFrame();
+    void StartPlaybackRenderThread();
+    void StopPlaybackRenderThread();
+    void WakePlaybackRenderThread();
     WallpaperSession* FindSession(std::uint32_t token);
     void UpdateResourceUsage();
     void InitializePlaybackPolicy();
@@ -125,7 +140,10 @@ private:
     bool displayOff_ = false;
     bool fullScreenActive_ = false;
     bool dynamicPlaybackPaused_ = false;
+    bool manualPlaybackPaused_ = false;
     bool pendingWallpaperReveal_ = false;
+    std::atomic_int runtimeExitCode_{0};
+    std::atomic_bool playbackFailurePending_{false};
     bool sessionNotificationsRegistered_ = false;
     HPOWERNOTIFY displayPowerNotification_ = nullptr;
     bool soundEnabled_ = false;
@@ -135,6 +153,9 @@ private:
     std::vector<std::wstring> selectedDisplayIds_;
     std::vector<core::WallpaperAssignmentSetting> assignments_;
     std::vector<std::unique_ptr<WallpaperSession>> playbackSessions_;
+    mutable std::recursive_mutex playbackMutex_;
+    std::condition_variable_any playbackWake_;
+    std::jthread playbackRenderThread_;
     std::uint32_t nextSessionToken_ = 1;
     bool spanAcrossDisplays_ = true;
     ModernMainWindow mainWindow_;

@@ -253,15 +253,13 @@ try {
     # text encoding convention.
     $expectedFilterText = -join @(
         [char]0x5206, [char]0x7C7B, [char]0xFF1A,
-        [char]0x5168, [char]0x90E8, ' ', ' ', [char]0x25BC)
+        [char]0x5168, [char]0x90E8)
     if ($filterText -ne $expectedFilterText) {
         throw "Unexpected filter selector text: '$filterText'."
     }
-    $legacyFilterCount = @(1109, 1110, 1111 | Where-Object {
-        [LweStaticOverlayProbe]::GetDlgItem($control, $_) -ne [IntPtr]::Zero
-    }).Count
-    if ($legacyFilterCount -ne 0) {
-        throw "Legacy segmented filter controls are still present."
+    $dropdownControl = [LweStaticOverlayProbe]::GetDlgItem($control, 1109)
+    if ($dropdownControl -eq [IntPtr]::Zero) {
+        throw "The in-app filter/display dropdown list was not created."
     }
     $searchRectangle = New-Object LweStaticOverlayProbe+Rect
     $filterRectangle = New-Object LweStaticOverlayProbe+Rect
@@ -320,7 +318,7 @@ try {
     "SINGLE_INSTANCE_COUNT=$instanceCount"
     "CONTROL_WINDOW_CHILD_CLIPPING=True"
     "FILTER_DROPDOWN_TEXT=$filterText"
-    "LEGACY_FILTER_SEGMENT_COUNT=$legacyFilterCount"
+    "IN_APP_DROPDOWN_CREATED=$($dropdownControl -ne [IntPtr]::Zero)"
     "SEARCH_CENTER_DELTA_PX=$searchCenterDelta"
     "SYSTEM_WALLPAPER_UNCHANGED=True"
     "SETTINGS_UNCHANGED=True"

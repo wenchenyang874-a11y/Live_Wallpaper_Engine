@@ -31,8 +31,16 @@ public:
         Sound = 1106,
         CancelApplication = 1107,
         RenameCommit = 1108,
+        DropdownList = 1109,
+        ActiveStatus = 1110,
+        ActiveList = 1111,
+        ActiveDrawerHeader = 1112,
+        DisplayModeChanged = 1113,
+        CancelSelectedWallpaper = 1114,
         DisplayMode = 1199,
     };
+
+    static constexpr UINT_PTR AnimationTimerId = 50;
 
     ModernMainWindow() = default;
     ~ModernMainWindow();
@@ -47,7 +55,8 @@ public:
     bool DrawItem(const DRAWITEMSTRUCT& draw) const;
     HBRUSH ColorControl(HDC deviceContext, HWND control) const;
     bool HandleFilterCommand(WORD controlId, WORD notificationCode);
-    bool ShowDisplayModeMenu();
+    void HandleAnimationTimer();
+    void CloseTransientUi();
     std::optional<std::vector<std::wstring>> ChooseDisplayTargets();
 
     void SetItems(std::vector<core::WallpaperItem> items);
@@ -58,11 +67,15 @@ public:
     void SetResourceUsage(std::wstring usage);
     [[nodiscard]] bool SpanAcrossDisplays() const noexcept;
     std::optional<core::WallpaperItem> SelectedItem() const;
+    std::optional<core::WallpaperItem> SelectedActiveItem() const;
     bool SelectItemAtScreenPoint(POINT screenPoint);
+    bool SelectActiveItemAtScreenPoint(POINT screenPoint);
     void BeginRenameSelected();
+    void BeginRenameActiveSelected();
     std::optional<std::pair<core::WallpaperItem, std::wstring>> FinishRename();
     HWND SearchControl() const noexcept;
     HWND LibraryControl() const noexcept;
+    HWND ActiveLibraryControl() const noexcept;
 
 private:
     enum class FilterKind {
@@ -72,14 +85,39 @@ private:
         Video,
     };
 
+    enum class DropdownKind {
+        None,
+        Filter,
+        DisplayMode,
+    };
+
     void RecreateFonts();
     void RefreshVisibleItems();
+    void RefreshActiveItems();
     void InvalidateFooter() const;
     bool ShowFilterMenu();
+    bool ShowDisplayModeMenu();
+    bool ToggleDropdown(DropdownKind kind);
+    void HideDropdown();
+    void ToggleActiveDrawer();
+    void HideActiveDrawer();
     bool MatchesFilter(const core::WallpaperItem& item,
                        std::wstring_view search) const;
     void DrawButton(const DRAWITEMSTRUCT& draw) const;
     void DrawLibraryItem(const DRAWITEMSTRUCT& draw) const;
+    void DrawActiveItem(const DRAWITEMSTRUCT& draw) const;
+    void DrawDropdownItem(const DRAWITEMSTRUCT& draw) const;
+    void DrawWallpaperCard(const DRAWITEMSTRUCT& draw,
+                           const core::WallpaperItem& item, bool active,
+                           bool showCancelButton, float hoverProgress) const;
+    void BeginRenameItem(const core::WallpaperItem& item, HWND list,
+                         LRESULT selection);
+    bool HitLibraryActiveBadge(POINT clientPoint, UINT& itemIndex) const;
+    bool HitActiveCancelButton(POINT clientPoint, UINT& itemIndex) const;
+    void SetControlHovered(HWND control, bool hovered);
+    void SetListHovered(HWND list, POINT clientPoint, bool hovered);
+    void StartHoverAnimation();
+    float ControlHoverProgress(HWND control) const;
     HBITMAP LoadThumbnail(std::wstring_view path) const;
     void ClearThumbnails();
     void CancelRename();
@@ -87,6 +125,9 @@ private:
                                                 WPARAM wParam, LPARAM lParam,
                                                 UINT_PTR subclassId,
                                                 DWORD_PTR referenceData);
+    static LRESULT CALLBACK InteractiveControlProcedure(
+        HWND window, UINT message, WPARAM wParam, LPARAM lParam,
+        UINT_PTR subclassId, DWORD_PTR referenceData);
 
     HWND parent_ = nullptr;
     HWND search_ = nullptr;
@@ -99,6 +140,10 @@ private:
     HWND cancelApplication_ = nullptr;
     HWND renameEdit_ = nullptr;
     HWND displayMode_ = nullptr;
+    HWND dropdownList_ = nullptr;
+    HWND activeStatus_ = nullptr;
+    HWND activeList_ = nullptr;
+    HWND activeDrawerHeader_ = nullptr;
     std::vector<DisplayOption> displayOptions_;
     HFONT titleFont_ = nullptr;
     HFONT headingFont_ = nullptr;
@@ -106,8 +151,10 @@ private:
     HFONT smallFont_ = nullptr;
     HBRUSH editBrush_ = nullptr;
     HBRUSH panelBrush_ = nullptr;
+    HICON appIcon_ = nullptr;
     std::vector<core::WallpaperItem> items_;
     std::vector<std::size_t> visibleIndices_;
+    std::vector<std::size_t> activeVisibleIndices_;
     std::vector<std::wstring> activePaths_;
     std::wstring status_ = L"准备就绪";
     std::wstring resourceUsage_ = L"CPU --  GPU --  内存 --  显存 --";
@@ -116,6 +163,25 @@ private:
     FilterKind filterKind_ = FilterKind::All;
     bool soundEnabled_ = false;
     bool spanAcrossDisplays_ = true;
+    bool activeDrawerVisible_ = false;
+    bool dropdownUpdating_ = false;
+    bool dropdownSuppressSelectionNotification_ = false;
+    DropdownKind dropdownKind_ = DropdownKind::None;
+    std::vector<std::wstring> dropdownLabels_;
+    std::vector<std::wstring> dropdownDescriptions_;
+    std::unordered_map<HWND, float> hoverProgress_;
+    std::unordered_map<HWND, bool> hoverTargets_;
+    int libraryHoverIndex_ = -1;
+    int activeHoverIndex_ = -1;
+    int dropdownHoverIndex_ = -1;
+    int libraryBadgeHoverIndex_ = -1;
+    int activeCancelHoverIndex_ = -1;
+    float libraryHoverProgress_ = 0.0F;
+    float activeHoverProgress_ = 0.0F;
+    float dropdownHoverProgress_ = 0.0F;
+    bool libraryHoverTarget_ = false;
+    bool activeHoverTarget_ = false;
+    bool dropdownHoverTarget_ = false;
 
     void UpdateFilterSelectorText();
     void UpdateDisplayModeText();

@@ -131,6 +131,10 @@
     <Manifest Include="src\app\app.manifest" />
     <ResourceCompile Include="src\app\version.rc" />
   </ItemGroup>
+  <ItemGroup>
+    <Image Include="assets\app-icon.ico" />
+    <Image Include="assets\app-icon.png" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />
 </Project>

@@ -104,6 +104,10 @@ MediaEnginePlayer::~MediaEnginePlayer() {
     Shutdown();
 }
 
+std::uint64_t MediaEnginePlayer::TransferredFrameCount() const noexcept {
+    return transferredFrameCount_;
+}
+
 HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
                                 const HWND notificationWindow,
                                 const UINT notificationMessage,

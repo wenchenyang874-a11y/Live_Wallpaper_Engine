@@ -1,5 +1,7 @@
 #include <windows.h>
 
+101 ICON "../../assets/app-icon.ico"
+
 #ifndef LWE_VERSION_MAJOR
 #define LWE_VERSION_MAJOR 0
 #endif

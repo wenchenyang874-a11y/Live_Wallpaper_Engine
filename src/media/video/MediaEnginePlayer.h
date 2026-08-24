@@ -40,6 +40,7 @@ public:
     [[nodiscard]] bool IsPlaying() const noexcept;
     [[nodiscard]] bool HasFailed() const noexcept;
     [[nodiscard]] bool SoundEnabled() const noexcept;
+    [[nodiscard]] std::uint64_t TransferredFrameCount() const noexcept;
 
 private:
     class EventCallback final : public IMFMediaEngineNotify {

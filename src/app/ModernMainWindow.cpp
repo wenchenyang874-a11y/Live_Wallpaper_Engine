@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cwctype>
 #include <string>
 #include <utility>
@@ -11,6 +12,7 @@
 #include <shobjidl.h>
 #include <uxtheme.h>
 #include <wrl/client.h>
+#include <windowsx.h>
 
 namespace lwe::app {
 namespace {
@@ -30,6 +32,18 @@ constexpr wchar_t kScreenSelectionWindowClass[] =
 constexpr int kScreenSelectionList = 3100;
 constexpr int kScreenSelectionApply = 3101;
 constexpr int kScreenSelectionCancel = 3102;
+
+COLORREF BlendColor(const COLORREF from, const COLORREF to, const float amount) {
+    const float value = std::clamp(amount, 0.0F, 1.0F);
+    const auto channel = [value](const BYTE start, const BYTE end) {
+        return static_cast<BYTE>(std::lround(
+            static_cast<float>(start) +
+            (static_cast<float>(end) - static_cast<float>(start)) * value));
+    };
+    return RGB(channel(GetRValue(from), GetRValue(to)),
+               channel(GetGValue(from), GetGValue(to)),
+               channel(GetBValue(from), GetBValue(to)));
+}
 
 int Scale(const HWND window, const int value) {
     return MulDiv(value, GetDpiForWindow(window), 96);
@@ -98,7 +112,7 @@ RECT SearchPanelRectangle(const HWND parent) {
     const int gap = Scale(parent, 12);
     const int filterWidth = Scale(parent, 166);
     const int width = std::max(1, contentRight - contentLeft - filterWidth - gap);
-    const int top = Scale(parent, 104);
+    const int top = Scale(parent, 28);
     return RECT{contentLeft, top, contentLeft + width, top + Scale(parent, 40)};
 }
 
@@ -512,6 +526,14 @@ ModernMainWindow::~ModernMainWindow() {
     if (renameEdit_ != nullptr) {
         RemoveWindowSubclass(renameEdit_, &ModernMainWindow::RenameEditProcedure, 1);
     }
+    for (const HWND control : {filter_, library_, import_, export_, apply_, sound_,
+                               cancelApplication_, displayMode_, dropdownList_,
+                               activeStatus_, activeList_, activeDrawerHeader_}) {
+        if (control != nullptr) {
+            RemoveWindowSubclass(control,
+                                 &ModernMainWindow::InteractiveControlProcedure, 2);
+        }
+    }
     ClearThumbnails();
     for (const HFONT font : {titleFont_, headingFont_, bodyFont_, smallFont_}) {
         if (font != nullptr) {
@@ -534,6 +556,7 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
 
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(parent_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    appIcon_ = LoadIconW(instance, MAKEINTRESOURCEW(101));
 
     search_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                               0, 0, 1, 1, parent_,
@@ -541,14 +564,29 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
                               instance, nullptr);
     library_ = CreateWindowExW(
         0, L"LISTBOX", L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED |
-            LBS_NOINTEGRALHEIGHT,
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL | LBS_NOTIFY |
+            LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT,
         0, 0, 1, 1, parent_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(Library)), instance, nullptr);
+    dropdownList_ = CreateWindowExW(
+        WS_EX_TOOLWINDOW, L"LISTBOX", L"",
+        WS_CHILD | WS_CLIPSIBLINGS | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS |
+            LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT,
+        0, 0, 1, 1, parent_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(DropdownList)), instance,
+        nullptr);
+    activeList_ = CreateWindowExW(
+        0, L"LISTBOX", L"",
+        WS_CHILD | WS_CLIPSIBLINGS | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED |
+            LBS_NOINTEGRALHEIGHT,
+        0, 0, 1, 1, parent_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(ActiveList)), instance,
+        nullptr);
 
     const auto createButton = [&](const int identifier, const wchar_t* text) {
         return CreateWindowExW(
-            0, L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 1, 1,
+            0, L"BUTTON", text,
+            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW, 0, 0, 1, 1,
             parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier)), instance,
             nullptr);
     };
@@ -559,6 +597,8 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     sound_ = createButton(Sound, L"声音：关闭");
     cancelApplication_ = createButton(CancelApplication, L"取消应用");
     displayMode_ = createButton(DisplayMode, L"显示方式：跨屏扩展");
+    activeStatus_ = createButton(ActiveStatus, L"");
+    activeDrawerHeader_ = createButton(ActiveDrawerHeader, L"正在应用");
     renameEdit_ = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 1, 1,
         parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(RenameCommit)),
@@ -567,15 +607,27 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     if (search_ == nullptr || filter_ == nullptr || library_ == nullptr ||
         import_ == nullptr || export_ == nullptr || apply_ == nullptr ||
         sound_ == nullptr || cancelApplication_ == nullptr ||
-        displayMode_ == nullptr || renameEdit_ == nullptr) {
+        displayMode_ == nullptr || renameEdit_ == nullptr ||
+        dropdownList_ == nullptr || activeStatus_ == nullptr ||
+        activeList_ == nullptr || activeDrawerHeader_ == nullptr) {
         return false;
     }
 
     SetWindowTheme(search_, L"DarkMode_Explorer", nullptr);
     SetWindowTheme(library_, L"DarkMode_Explorer", nullptr);
+    SetWindowTheme(dropdownList_, L"DarkMode_Explorer", nullptr);
+    SetWindowTheme(activeList_, L"DarkMode_Explorer", nullptr);
     SetWindowTheme(renameEdit_, L"DarkMode_Explorer", nullptr);
     SetWindowSubclass(renameEdit_, &ModernMainWindow::RenameEditProcedure, 1,
                       reinterpret_cast<DWORD_PTR>(this));
+    for (const HWND control : {filter_, library_, import_, export_, apply_, sound_,
+                               cancelApplication_, displayMode_, dropdownList_,
+                               activeStatus_, activeList_, activeDrawerHeader_}) {
+        SetWindowSubclass(control, &ModernMainWindow::InteractiveControlProcedure, 2,
+                          reinterpret_cast<DWORD_PTR>(this));
+        hoverProgress_.emplace(control, 0.0F);
+        hoverTargets_.emplace(control, false);
+    }
     SendMessageW(search_, EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(L"搜索名称、格式或路径"));
 
@@ -613,10 +665,12 @@ void ModernMainWindow::RecreateFonts() {
 
     for (const HWND control : {search_, filter_, library_, import_, export_, apply_,
                                sound_, cancelApplication_, displayMode_,
-                               renameEdit_}) {
+                               renameEdit_, dropdownList_, activeStatus_, activeList_,
+                               activeDrawerHeader_}) {
         SetControlFont(control, bodyFont_);
     }
     SendMessageW(library_, LB_SETITEMHEIGHT, 0, Scale(parent_, 78));
+    SendMessageW(activeList_, LB_SETITEMHEIGHT, 0, Scale(parent_, 78));
 }
 
 void ModernMainWindow::Layout() {
@@ -632,7 +686,7 @@ void ModernMainWindow::Layout() {
     const int gap = Scale(parent_, 12);
     const int contentLeft = sidebar + margin;
     const int contentWidth = std::max(1, width - contentLeft - margin);
-    const int searchTop = Scale(parent_, 104);
+    const int searchTop = Scale(parent_, 28);
     const int controlHeight = Scale(parent_, 40);
     const int filterWidth = Scale(parent_, 166);
     const RECT searchPanel = SearchPanelRectangle(parent_);
@@ -688,7 +742,48 @@ void ModernMainWindow::Layout() {
     const int cancelHeight = Scale(parent_, 40);
     MoveWindow(cancelApplication_, statusRight - cancelWidth - Scale(parent_, 8),
                statusTop + (statusCardHeight - cancelHeight) / 2, cancelWidth,
-               cancelHeight, TRUE);
+                cancelHeight, TRUE);
+    MoveWindow(activeStatus_, contentLeft, statusTop,
+               statusRight - contentLeft, statusCardHeight, TRUE);
+    SetWindowPos(cancelApplication_, HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+    if (activeDrawerVisible_ && !activeVisibleIndices_.empty()) {
+        const int rowHeight = Scale(parent_, 78);
+        const int headerHeight = Scale(parent_, 44);
+        const int visibleRows = std::clamp(
+            static_cast<int>(activeVisibleIndices_.size()), 1, 4);
+        const int drawerHeight = headerHeight + rowHeight * visibleRows;
+        const int drawerBottom = statusTop - Scale(parent_, 8);
+        const int drawerTop = std::max(listTop, drawerBottom - drawerHeight);
+        SetWindowPos(activeDrawerHeader_, HWND_TOP, contentLeft, drawerTop,
+                     statusRight - contentLeft, headerHeight, SWP_SHOWWINDOW);
+        SetWindowPos(activeList_, HWND_TOP, contentLeft, drawerTop + headerHeight,
+                     statusRight - contentLeft,
+                     drawerBottom - drawerTop - headerHeight, SWP_SHOWWINDOW);
+    } else {
+        ShowWindow(activeDrawerHeader_, SW_HIDE);
+        ShowWindow(activeList_, SW_HIDE);
+    }
+
+    if (dropdownKind_ != DropdownKind::None) {
+        const HWND anchor = dropdownKind_ == DropdownKind::Filter
+                                ? filter_
+                                : displayMode_;
+        RECT anchorRectangle{};
+        GetWindowRect(anchor, &anchorRectangle);
+        MapWindowPoints(nullptr, parent_,
+                        reinterpret_cast<POINT*>(&anchorRectangle), 2);
+        const int rows = static_cast<int>(dropdownLabels_.size());
+        const int rowHeight = dropdownKind_ == DropdownKind::DisplayMode
+                                  ? Scale(parent_, 58)
+                                  : Scale(parent_, 42);
+        SendMessageW(dropdownList_, LB_SETITEMHEIGHT, 0, rowHeight);
+        SetWindowPos(dropdownList_, HWND_TOP, anchorRectangle.left,
+                     anchorRectangle.bottom + Scale(parent_, 4),
+                     anchorRectangle.right - anchorRectangle.left,
+                     rowHeight * rows + Scale(parent_, 4), SWP_SHOWWINDOW);
+    }
     InvalidateRect(parent_, nullptr, FALSE);
 }
 
@@ -707,9 +802,11 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
 
     RECT logo{Scale(parent_, 22), Scale(parent_, 24), Scale(parent_, 62),
               Scale(parent_, 64)};
-    FillRoundedRectangle(deviceContext, logo, kAccent, kAccent, Scale(parent_, 14));
-    DrawTextLine(deviceContext, L"L", logo, headingFont_, RGB(255, 255, 255),
-                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (appIcon_ != nullptr) {
+        DrawIconEx(deviceContext, logo.left, logo.top, appIcon_,
+                   logo.right - logo.left, logo.bottom - logo.top, 0, nullptr,
+                   DI_NORMAL);
+    }
 
     RECT brand{Scale(parent_, 74), Scale(parent_, 23), Scale(parent_, 202),
                Scale(parent_, 66)};
@@ -723,17 +820,6 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
     RECT navigationText = navigation;
     navigationText.left += Scale(parent_, 18);
     DrawTextLine(deviceContext, L"我的壁纸", navigationText, bodyFont_, kTextPrimary,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    RECT title{Scale(parent_, 246), Scale(parent_, 28), client.right - Scale(parent_, 30),
-               Scale(parent_, 72)};
-    DrawTextLine(deviceContext, L"我的壁纸", title, titleFont_, kTextPrimary,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    RECT subtitle{Scale(parent_, 248), Scale(parent_, 70),
-                  client.right - Scale(parent_, 30), Scale(parent_, 98)};
-    const std::wstring countText = L"本地、安全地管理与分享 · " +
-                                   std::to_wstring(visibleIndices_.size()) + L" 项";
-    DrawTextLine(deviceContext, countText, subtitle, smallFont_, kTextSecondary,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     const RECT searchPanel = SearchPanelRectangle(parent_);
@@ -750,12 +836,6 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
     RECT statusCard{contentLeft, client.bottom - Scale(parent_, 82),
                     contentRight - resourceWidth - gap,
                     client.bottom - Scale(parent_, 28)};
-    FillRoundedRectangle(deviceContext, statusCard, kPanel, kBorder, Scale(parent_, 12));
-    RECT statusText = statusCard;
-    statusText.left += Scale(parent_, 16);
-    statusText.right -= Scale(parent_, 116);
-    DrawTextLine(deviceContext, status_, statusText, smallFont_, kTextSecondary,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     RECT resourceCard{statusCard.right + gap, statusCard.top, contentRight,
                       statusCard.bottom};
@@ -774,6 +854,14 @@ bool ModernMainWindow::DrawItem(const DRAWITEMSTRUCT& draw) const {
         DrawLibraryItem(draw);
         return true;
     }
+    if (draw.CtlID == ActiveList) {
+        DrawActiveItem(draw);
+        return true;
+    }
+    if (draw.CtlID == DropdownList) {
+        DrawDropdownItem(draw);
+        return true;
+    }
     if (draw.CtlType == ODT_BUTTON) {
         DrawButton(draw);
         return true;
@@ -786,22 +874,71 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
     GetWindowTextW(draw.hwndItem, text, static_cast<int>(std::size(text)));
     const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
     const bool disabled = (draw.itemState & ODS_DISABLED) != 0;
+    const float hover = ControlHoverProgress(draw.hwndItem);
     COLORREF fill = kPanel;
     COLORREF outline = kBorder;
     COLORREF foreground = disabled ? RGB(90, 98, 114) : kTextPrimary;
     if (draw.CtlID == Apply || draw.CtlID == Import) {
-        fill = pressed ? RGB(72, 99, 207) : kAccent;
+        fill = pressed ? RGB(72, 99, 207)
+                       : BlendColor(kAccent, kAccentHover, hover);
         outline = fill;
     } else if (draw.CtlID == CancelApplication) {
         foreground = disabled ? foreground : kDanger;
+        fill = BlendColor(kPanel, RGB(54, 36, 45), hover);
     } else if (pressed) {
         fill = kPanelHover;
+    } else {
+        fill = BlendColor(kPanel, kPanelHover, hover);
     }
     FillRectangle(draw.hDC, draw.rcItem, kBackground);
     RECT button = draw.rcItem;
     InflateRect(&button, -1, -1);
     FillRoundedRectangle(draw.hDC, button, fill, outline, Scale(parent_, 10));
     RECT textRectangle = button;
+    if (draw.CtlID == ActiveStatus) {
+        textRectangle.left += Scale(parent_, 16);
+        textRectangle.right -= Scale(parent_, 132);
+        DrawTextLine(draw.hDC, status_, textRectangle, smallFont_, kTextSecondary,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        const int centerX = button.right - Scale(parent_, 114);
+        const int centerY = (button.top + button.bottom) / 2;
+        const int halfWidth = Scale(parent_, 5);
+        const int halfHeight = Scale(parent_, 3);
+        const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(parent_, 2)),
+                                   kTextSecondary);
+        const HGDIOBJ previous = SelectObject(draw.hDC, pen);
+        MoveToEx(draw.hDC, centerX - halfWidth,
+                 centerY + (activeDrawerVisible_ ? halfHeight : -halfHeight),
+                 nullptr);
+        LineTo(draw.hDC, centerX,
+               centerY + (activeDrawerVisible_ ? -halfHeight : halfHeight));
+        LineTo(draw.hDC, centerX + halfWidth,
+               centerY + (activeDrawerVisible_ ? halfHeight : -halfHeight));
+        SelectObject(draw.hDC, previous);
+        DeleteObject(pen);
+        return;
+    }
+    if (draw.CtlID == ActiveDrawerHeader) {
+        std::wstring header = L"正在应用（" +
+                              std::to_wstring(activeVisibleIndices_.size()) + L"）";
+        textRectangle.left += Scale(parent_, 16);
+        textRectangle.right -= Scale(parent_, 40);
+        DrawTextLine(draw.hDC, header, textRectangle, headingFont_, kTextPrimary,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        const int centerX = button.right - Scale(parent_, 22);
+        const int centerY = (button.top + button.bottom) / 2;
+        const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(parent_, 2)),
+                                   kTextSecondary);
+        const HGDIOBJ previous = SelectObject(draw.hDC, pen);
+        MoveToEx(draw.hDC, centerX - Scale(parent_, 5),
+                 centerY + Scale(parent_, 3), nullptr);
+        LineTo(draw.hDC, centerX, centerY - Scale(parent_, 3));
+        LineTo(draw.hDC, centerX + Scale(parent_, 5),
+               centerY + Scale(parent_, 3));
+        SelectObject(draw.hDC, previous);
+        DeleteObject(pen);
+        return;
+    }
     const bool dropdown = draw.CtlID == Filter || draw.CtlID == DisplayMode;
     if (dropdown) {
         const int arrowSpace = Scale(parent_, 38);
@@ -818,9 +955,15 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
         const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(parent_, 2)),
                                    foreground);
         const HGDIOBJ previous = SelectObject(draw.hDC, pen);
-        MoveToEx(draw.hDC, centerX - halfWidth, centerY - halfHeight, nullptr);
-        LineTo(draw.hDC, centerX, centerY + halfHeight);
-        LineTo(draw.hDC, centerX + halfWidth, centerY - halfHeight);
+        const bool open = (draw.CtlID == Filter &&
+                           dropdownKind_ == DropdownKind::Filter) ||
+                          (draw.CtlID == DisplayMode &&
+                           dropdownKind_ == DropdownKind::DisplayMode);
+        MoveToEx(draw.hDC, centerX - halfWidth,
+                 centerY + (open ? halfHeight : -halfHeight), nullptr);
+        LineTo(draw.hDC, centerX, centerY + (open ? -halfHeight : halfHeight));
+        LineTo(draw.hDC, centerX + halfWidth,
+               centerY + (open ? halfHeight : -halfHeight));
         SelectObject(draw.hDC, previous);
         DeleteObject(pen);
     }
@@ -838,10 +981,35 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
         activePaths_, [&](const std::wstring& path) {
             return _wcsicmp(item.path.c_str(), path.c_str()) == 0;
         });
+    const float hover = static_cast<int>(draw.itemID) == libraryHoverIndex_
+                            ? libraryHoverProgress_
+                            : 0.0F;
+    DrawWallpaperCard(draw, item, active, false,
+                      std::max(hover, selected ? 1.0F : 0.0F));
+}
 
+void ModernMainWindow::DrawActiveItem(const DRAWITEMSTRUCT& draw) const {
+    FillRectangle(draw.hDC, draw.rcItem, kBackground);
+    if (draw.itemID == static_cast<UINT>(-1) ||
+        draw.itemID >= activeVisibleIndices_.size()) {
+        return;
+    }
+    const core::WallpaperItem& item = items_[activeVisibleIndices_[draw.itemID]];
+    const bool selected = (draw.itemState & ODS_SELECTED) != 0;
+    const float hover = static_cast<int>(draw.itemID) == activeHoverIndex_
+                            ? activeHoverProgress_
+                            : 0.0F;
+    DrawWallpaperCard(draw, item, true, true,
+                      std::max(hover, selected ? 1.0F : 0.0F));
+}
+
+void ModernMainWindow::DrawWallpaperCard(
+    const DRAWITEMSTRUCT& draw, const core::WallpaperItem& item, const bool active,
+    const bool showCancelButton, const float hoverProgress) const {
     RECT card = draw.rcItem;
     InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
-    FillRoundedRectangle(draw.hDC, card, selected ? kPanelHover : kPanel,
+    const COLORREF cardFill = BlendColor(kPanel, kPanelHover, hoverProgress);
+    FillRoundedRectangle(draw.hDC, card, cardFill,
                          active ? kAccent : kBorder, Scale(parent_, 12),
                          active ? 2 : 1);
 
@@ -889,17 +1057,94 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
         details += item.hasAudio ? L"  ·  含音轨" : L"  ·  无音轨";
     }
     RECT detail{name.left, card.top + Scale(parent_, 37),
-                card.right - Scale(parent_, 20), card.bottom - Scale(parent_, 7)};
+                card.right - Scale(parent_, showCancelButton ? 126 : 20),
+                card.bottom - Scale(parent_, 7)};
     DrawTextLine(draw.hDC, details, detail, smallFont_, kTextSecondary,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    if (active) {
+    if (showCancelButton) {
+        RECT cancel{card.right - Scale(parent_, 112),
+                    card.top + Scale(parent_, 17),
+                    card.right - Scale(parent_, 14),
+                    card.bottom - Scale(parent_, 17)};
+        FillRoundedRectangle(draw.hDC, cancel,
+                             BlendColor(
+                                 RGB(45, 37, 48), RGB(82, 43, 55),
+                                 static_cast<int>(draw.itemID) ==
+                                         activeCancelHoverIndex_
+                                     ? 1.0F
+                                     : hoverProgress * 0.35F),
+                             RGB(90, 55, 67), Scale(parent_, 8));
+        DrawTextLine(draw.hDC, L"取消应用", cancel, smallFont_, kDanger,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else if (active) {
         RECT badge{card.right - Scale(parent_, 92), card.top + Scale(parent_, 20),
                    card.right - Scale(parent_, 14), card.top + Scale(parent_, 48)};
-        FillRoundedRectangle(draw.hDC, badge, RGB(47, 62, 108), RGB(47, 62, 108),
+        const COLORREF badgeFill =
+            static_cast<int>(draw.itemID) == libraryBadgeHoverIndex_
+                ? RGB(61, 82, 145)
+                : RGB(47, 62, 108);
+        FillRoundedRectangle(draw.hDC, badge, badgeFill, badgeFill,
                              Scale(parent_, 9));
         DrawTextLine(draw.hDC, L"使用中", badge, smallFont_, RGB(190, 204, 255),
                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+void ModernMainWindow::DrawDropdownItem(const DRAWITEMSTRUCT& draw) const {
+    FillRectangle(draw.hDC, draw.rcItem, kPanel);
+    if (draw.itemID == static_cast<UINT>(-1) ||
+        draw.itemID >= dropdownLabels_.size()) {
+        return;
+    }
+    const bool selected = (draw.itemState & ODS_SELECTED) != 0;
+    const float hover = static_cast<int>(draw.itemID) == dropdownHoverIndex_
+                            ? dropdownHoverProgress_
+                            : 0.0F;
+    RECT row = draw.rcItem;
+    InflateRect(&row, -Scale(parent_, 4), -Scale(parent_, 3));
+    FillRoundedRectangle(draw.hDC, row,
+                         BlendColor(kPanel, RGB(42, 50, 68),
+                                    std::max(hover, selected ? 1.0F : 0.0F)),
+                         selected ? kAccent : kPanel, Scale(parent_, 8));
+
+    const bool checked =
+        (dropdownKind_ == DropdownKind::Filter &&
+         draw.itemID == static_cast<UINT>(filterKind_)) ||
+        (dropdownKind_ == DropdownKind::DisplayMode &&
+         draw.itemID == static_cast<UINT>(spanAcrossDisplays_ ? 0 : 1));
+    RECT indicator{row.left + Scale(parent_, 14),
+                   row.top + (row.bottom - row.top - Scale(parent_, 16)) / 2,
+                   row.left + Scale(parent_, 30),
+                   row.top + (row.bottom - row.top + Scale(parent_, 16)) / 2};
+    FillRoundedRectangle(draw.hDC, indicator, checked ? kAccent : kPanel,
+                         checked ? kAccent : kTextSecondary,
+                         Scale(parent_, 8));
+    if (checked) {
+        RECT dot = indicator;
+        InflateRect(&dot, -Scale(parent_, 5), -Scale(parent_, 5));
+        FillRoundedRectangle(draw.hDC, dot, RGB(255, 255, 255),
+                             RGB(255, 255, 255), Scale(parent_, 4));
+    }
+
+    RECT label{indicator.right + Scale(parent_, 12), row.top,
+               row.right - Scale(parent_, 12), row.bottom};
+    if (dropdownKind_ == DropdownKind::DisplayMode &&
+        draw.itemID < dropdownDescriptions_.size()) {
+        label.bottom = row.top + (row.bottom - row.top) / 2 + Scale(parent_, 4);
+        DrawTextLine(draw.hDC, dropdownLabels_[draw.itemID], label, bodyFont_,
+                     kTextPrimary,
+                     DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT description = label;
+        description.top = label.bottom - Scale(parent_, 2);
+        description.bottom = row.bottom;
+        DrawTextLine(draw.hDC, dropdownDescriptions_[draw.itemID], description,
+                     smallFont_, kTextSecondary,
+                     DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else {
+        DrawTextLine(draw.hDC, dropdownLabels_[draw.itemID], label, bodyFont_,
+                     kTextPrimary,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 }
 
@@ -925,83 +1170,117 @@ bool ModernMainWindow::HandleFilterCommand(const WORD controlId,
         ShowFilterMenu();
         return true;
     }
+    if (controlId == DisplayMode && notificationCode == BN_CLICKED) {
+        ShowDisplayModeMenu();
+        return true;
+    }
+    if (controlId == ActiveStatus && notificationCode == BN_CLICKED) {
+        ToggleActiveDrawer();
+        return true;
+    }
+    if (controlId == ActiveDrawerHeader && notificationCode == BN_CLICKED) {
+        HideActiveDrawer();
+        return true;
+    }
+    if (controlId == DropdownList && notificationCode == LBN_SELCHANGE) {
+        if (dropdownUpdating_ || dropdownSuppressSelectionNotification_) {
+            return true;
+        }
+        const LRESULT selected = SendMessageW(dropdownList_, LB_GETCURSEL, 0, 0);
+        if (selected < 0 ||
+            static_cast<std::size_t>(selected) >= dropdownLabels_.size()) {
+            return true;
+        }
+        const DropdownKind kind = dropdownKind_;
+        HideDropdown();
+        if (kind == DropdownKind::Filter) {
+            filterKind_ = static_cast<FilterKind>(selected);
+            UpdateFilterSelectorText();
+            RefreshVisibleItems();
+        } else if (kind == DropdownKind::DisplayMode) {
+            const bool nextSpan = selected == 0;
+            if (nextSpan != spanAcrossDisplays_) {
+                spanAcrossDisplays_ = nextSpan;
+                UpdateDisplayModeText();
+                PostMessageW(parent_, WM_COMMAND,
+                             MAKEWPARAM(DisplayModeChanged, BN_CLICKED),
+                             reinterpret_cast<LPARAM>(displayMode_));
+            }
+        }
+        return true;
+    }
     return false;
 }
 
 bool ModernMainWindow::ShowFilterMenu() {
-    if (!IsWindow(filter_)) {
-        return false;
-    }
-    HMENU menu = CreatePopupMenu();
-    if (menu == nullptr) {
-        return false;
-    }
-
-    // A single Unicode popup selector provides the requested dropdown without
-    // returning to the old owner-draw ComboBox path that previously corrupted
-    // Chinese item text in installed builds.
-    constexpr std::array labels{L"全部", L"图片", L"GIF", L"视频"};
-    for (std::size_t index = 0; index < labels.size(); ++index) {
-        const UINT flags = MF_STRING |
-                           (index == static_cast<std::size_t>(filterKind_)
-                                ? MF_CHECKED
-                                : 0);
-        AppendMenuW(menu, flags, static_cast<UINT>(index + 1U), labels[index]);
-    }
-
-    RECT selector{};
-    GetWindowRect(filter_, &selector);
-    const UINT command = TrackPopupMenu(
-        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN,
-        selector.right, selector.bottom, 0, parent_, nullptr);
-    DestroyMenu(menu);
-    if (command == 0 || command > static_cast<UINT>(labels.size())) {
-        return false;
-    }
-
-    filterKind_ = static_cast<FilterKind>(command - 1U);
-    UpdateFilterSelectorText();
-    RefreshVisibleItems();
-    return true;
+    return ToggleDropdown(DropdownKind::Filter);
 }
 
 bool ModernMainWindow::ShowDisplayModeMenu() {
-    if (!IsWindow(displayMode_)) {
-        return false;
-    }
-    HMENU menu = CreatePopupMenu();
-    if (menu == nullptr) {
-        return false;
-    }
-    constexpr UINT kSpanCommand = 1;
-    constexpr UINT kSplitCommand = 2;
-    AppendMenuW(menu, MF_STRING, kSpanCommand,
-                L"跨屏扩展（一个画面横跨全部屏幕）");
-    AppendMenuW(menu, MF_STRING, kSplitCommand,
-                L"分屏显示（应用时选择一个或多个屏幕）");
-    CheckMenuRadioItem(menu, kSpanCommand, kSplitCommand,
-                       spanAcrossDisplays_ ? kSpanCommand : kSplitCommand,
-                       MF_BYCOMMAND);
+    return ToggleDropdown(DropdownKind::DisplayMode);
+}
 
-    RECT selector{};
-    GetWindowRect(displayMode_, &selector);
-    const UINT command = TrackPopupMenu(
-        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
-        selector.left, selector.bottom, 0, parent_, nullptr);
-    DestroyMenu(menu);
-    if (command == 0) {
+bool ModernMainWindow::ToggleDropdown(const DropdownKind kind) {
+    if (!IsWindow(dropdownList_)) {
         return false;
     }
-    const bool previous = spanAcrossDisplays_;
-    if (command == kSpanCommand) {
-        spanAcrossDisplays_ = true;
-    } else if (command == kSplitCommand) {
-        spanAcrossDisplays_ = false;
+    if (dropdownKind_ == kind && IsWindowVisible(dropdownList_)) {
+        HideDropdown();
+        return false;
+    }
+
+    dropdownKind_ = kind;
+    dropdownLabels_.clear();
+    dropdownDescriptions_.clear();
+    if (kind == DropdownKind::Filter) {
+        dropdownLabels_ = {L"全部", L"图片", L"GIF", L"视频"};
     } else {
-        return false;
+        dropdownLabels_ = {L"跨屏扩展", L"分屏显示"};
+        dropdownDescriptions_ = {L"一个画面横跨全部屏幕",
+                                 L"应用时选择一个或多个屏幕"};
     }
-    UpdateDisplayModeText();
-    return previous != spanAcrossDisplays_;
+
+    dropdownUpdating_ = true;
+    SendMessageW(dropdownList_, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(dropdownList_, LB_RESETCONTENT, 0, 0);
+    for (const std::wstring& label : dropdownLabels_) {
+        SendMessageW(dropdownList_, LB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(label.c_str()));
+    }
+    const int selection = kind == DropdownKind::Filter
+                              ? static_cast<int>(filterKind_)
+                              : (spanAcrossDisplays_ ? 0 : 1);
+    SendMessageW(dropdownList_, LB_SETCURSEL, selection, 0);
+    SendMessageW(dropdownList_, WM_SETREDRAW, TRUE, 0);
+    dropdownUpdating_ = false;
+    dropdownSuppressSelectionNotification_ = true;
+    dropdownHoverIndex_ = -1;
+    dropdownHoverProgress_ = 0.0F;
+    dropdownHoverTarget_ = false;
+    Layout();
+    if (GetForegroundWindow() == parent_) {
+        SetFocus(dropdownList_);
+    }
+    InvalidateRect(dropdownList_, nullptr, FALSE);
+    InvalidateRect(kind == DropdownKind::Filter ? filter_ : displayMode_, nullptr,
+                   FALSE);
+    StartHoverAnimation();
+    return true;
+}
+
+void ModernMainWindow::HideDropdown() {
+    if (dropdownKind_ == DropdownKind::None) {
+        return;
+    }
+    const DropdownKind previous = dropdownKind_;
+    dropdownKind_ = DropdownKind::None;
+    ShowWindow(dropdownList_, SW_HIDE);
+    InvalidateRect(previous == DropdownKind::Filter ? filter_ : displayMode_,
+                   nullptr, FALSE);
+}
+
+void ModernMainWindow::CloseTransientUi() {
+    HideDropdown();
 }
 
 std::optional<std::vector<std::wstring>>
@@ -1030,12 +1309,19 @@ void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
         }
     }
     RefreshVisibleItems();
+    RefreshActiveItems();
 }
 
 void ModernMainWindow::SetActivePaths(std::vector<std::wstring> paths) {
     activePaths_ = std::move(paths);
     EnableWindow(cancelApplication_, !activePaths_.empty());
+    EnableWindow(activeStatus_, !activePaths_.empty());
+    RefreshActiveItems();
+    if (activePaths_.empty()) {
+        HideActiveDrawer();
+    }
     InvalidateRect(library_, nullptr, FALSE);
+    InvalidateRect(activeStatus_, nullptr, FALSE);
 }
 
 void ModernMainWindow::SetStatus(std::wstring status) {
@@ -1044,6 +1330,7 @@ void ModernMainWindow::SetStatus(std::wstring status) {
     }
     status_ = std::move(status);
     InvalidateFooter();
+    InvalidateRect(activeStatus_, nullptr, FALSE);
 }
 
 void ModernMainWindow::SetSoundEnabled(const bool enabled) {
@@ -1103,6 +1390,7 @@ void ModernMainWindow::InvalidateFooter() const {
                 client.right - Scale(parent_, 28),
                 client.bottom - Scale(parent_, 26)};
     InvalidateRect(parent_, &footer, FALSE);
+    InvalidateRect(activeStatus_, nullptr, FALSE);
 }
 
 bool ModernMainWindow::SpanAcrossDisplays() const noexcept {
@@ -1115,6 +1403,15 @@ std::optional<core::WallpaperItem> ModernMainWindow::SelectedItem() const {
         return std::nullopt;
     }
     return items_[visibleIndices_[static_cast<std::size_t>(selection)]];
+}
+
+std::optional<core::WallpaperItem> ModernMainWindow::SelectedActiveItem() const {
+    const LRESULT selection = SendMessageW(activeList_, LB_GETCURSEL, 0, 0);
+    if (selection < 0 ||
+        static_cast<std::size_t>(selection) >= activeVisibleIndices_.size()) {
+        return std::nullopt;
+    }
+    return items_[activeVisibleIndices_[static_cast<std::size_t>(selection)]];
 }
 
 bool ModernMainWindow::SelectItemAtScreenPoint(const POINT screenPoint) {
@@ -1134,6 +1431,24 @@ bool ModernMainWindow::SelectItemAtScreenPoint(const POINT screenPoint) {
     return true;
 }
 
+bool ModernMainWindow::SelectActiveItemAtScreenPoint(const POINT screenPoint) {
+    POINT clientPoint = screenPoint;
+    if (!ScreenToClient(activeList_, &clientPoint)) {
+        return false;
+    }
+    const LRESULT itemFromPoint = SendMessageW(
+        activeList_, LB_ITEMFROMPOINT, 0,
+        MAKELPARAM(clientPoint.x, clientPoint.y));
+    const UINT index = LOWORD(itemFromPoint);
+    const bool outside = HIWORD(itemFromPoint) != 0;
+    if (outside || index >= activeVisibleIndices_.size()) {
+        return false;
+    }
+    SendMessageW(activeList_, LB_SETCURSEL, index, 0);
+    InvalidateRect(activeList_, nullptr, FALSE);
+    return true;
+}
+
 void ModernMainWindow::BeginRenameSelected() {
     const LRESULT selection = SendMessageW(library_, LB_GETCURSEL, 0, 0);
     if (selection < 0 ||
@@ -1142,12 +1457,29 @@ void ModernMainWindow::BeginRenameSelected() {
     }
     const core::WallpaperItem& item =
         items_[visibleIndices_[static_cast<std::size_t>(selection)]];
+    BeginRenameItem(item, library_, selection);
+}
+
+void ModernMainWindow::BeginRenameActiveSelected() {
+    const LRESULT selection = SendMessageW(activeList_, LB_GETCURSEL, 0, 0);
+    if (selection < 0 ||
+        static_cast<std::size_t>(selection) >= activeVisibleIndices_.size()) {
+        return;
+    }
+    const core::WallpaperItem& item =
+        items_[activeVisibleIndices_[static_cast<std::size_t>(selection)]];
+    BeginRenameItem(item, activeList_, selection);
+}
+
+void ModernMainWindow::BeginRenameItem(const core::WallpaperItem& item,
+                                       const HWND list,
+                                       const LRESULT selection) {
     RECT itemRectangle{};
-    if (SendMessageW(library_, LB_GETITEMRECT, selection,
+    if (SendMessageW(list, LB_GETITEMRECT, selection,
                      reinterpret_cast<LPARAM>(&itemRectangle)) == LB_ERR) {
         return;
     }
-    MapWindowPoints(library_, parent_, reinterpret_cast<POINT*>(&itemRectangle), 2);
+    MapWindowPoints(list, parent_, reinterpret_cast<POINT*>(&itemRectangle), 2);
     const int left = itemRectangle.left + Scale(parent_, 108);
     const int top = itemRectangle.top + Scale(parent_, 14);
     const int right = itemRectangle.right - Scale(parent_, 122);
@@ -1183,6 +1515,10 @@ HWND ModernMainWindow::SearchControl() const noexcept {
 
 HWND ModernMainWindow::LibraryControl() const noexcept {
     return library_;
+}
+
+HWND ModernMainWindow::ActiveLibraryControl() const noexcept {
+    return activeList_;
 }
 
 HBITMAP ModernMainWindow::LoadThumbnail(const std::wstring_view path) const {
@@ -1245,6 +1581,223 @@ LRESULT CALLBACK ModernMainWindow::RenameEditProcedure(
     return DefSubclassProc(window, message, wParam, lParam);
 }
 
+LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
+    const HWND window, const UINT message, const WPARAM wParam,
+    const LPARAM lParam, const UINT_PTR, const DWORD_PTR referenceData) {
+    auto* self = reinterpret_cast<ModernMainWindow*>(referenceData);
+    if (self == nullptr) {
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+
+    if (message == WM_MOUSEMOVE) {
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+        TrackMouseEvent(&tracking);
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (window == self->library_ || window == self->activeList_ ||
+            window == self->dropdownList_) {
+            self->SetListHovered(window, point, true);
+        } else {
+            self->SetControlHovered(window, true);
+        }
+    } else if (message == WM_MOUSELEAVE) {
+        if (window == self->library_ || window == self->activeList_ ||
+            window == self->dropdownList_) {
+            self->SetListHovered(window, POINT{}, false);
+        } else {
+            self->SetControlHovered(window, false);
+        }
+    } else if (message == WM_LBUTTONUP && window == self->library_) {
+        UINT index = 0;
+        if (self->HitLibraryActiveBadge(
+                POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, index)) {
+            SendMessageW(window, LB_SETCURSEL, index, 0);
+            InvalidateRect(window, nullptr, FALSE);
+            PostMessageW(self->parent_, WM_COMMAND,
+                         MAKEWPARAM(CancelSelectedWallpaper, BN_CLICKED),
+                         reinterpret_cast<LPARAM>(window));
+            return 0;
+        }
+    } else if (message == WM_LBUTTONUP && window == self->activeList_) {
+        UINT index = 0;
+        if (self->HitActiveCancelButton(
+                POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, index)) {
+            SendMessageW(window, LB_SETCURSEL, index, 0);
+            InvalidateRect(window, nullptr, FALSE);
+            PostMessageW(self->parent_, WM_COMMAND,
+                         MAKEWPARAM(CancelSelectedWallpaper, BN_CLICKED),
+                         reinterpret_cast<LPARAM>(window));
+            return 0;
+        }
+    } else if (message == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        self->HideDropdown();
+    }
+    return DefSubclassProc(window, message, wParam, lParam);
+}
+
+void ModernMainWindow::SetControlHovered(const HWND control, const bool hovered) {
+    const auto target = hoverTargets_.find(control);
+    if (target == hoverTargets_.end() || target->second == hovered) {
+        return;
+    }
+    target->second = hovered;
+    StartHoverAnimation();
+}
+
+void ModernMainWindow::SetListHovered(const HWND list, const POINT clientPoint,
+                                      const bool hovered) {
+    int index = -1;
+    if (hovered) {
+        const LRESULT item = SendMessageW(
+            list, LB_ITEMFROMPOINT, 0,
+            MAKELPARAM(clientPoint.x, clientPoint.y));
+        if (HIWORD(item) == 0) {
+            index = LOWORD(item);
+        }
+    }
+
+    int* hoveredIndex = nullptr;
+    float* progress = nullptr;
+    bool* target = nullptr;
+    if (list == library_) {
+        hoveredIndex = &libraryHoverIndex_;
+        progress = &libraryHoverProgress_;
+        target = &libraryHoverTarget_;
+        UINT badgeIndex = 0;
+        libraryBadgeHoverIndex_ =
+            hovered && HitLibraryActiveBadge(clientPoint, badgeIndex)
+                ? static_cast<int>(badgeIndex)
+                : -1;
+    } else if (list == activeList_) {
+        hoveredIndex = &activeHoverIndex_;
+        progress = &activeHoverProgress_;
+        target = &activeHoverTarget_;
+        UINT cancelIndex = 0;
+        activeCancelHoverIndex_ =
+            hovered && HitActiveCancelButton(clientPoint, cancelIndex)
+                ? static_cast<int>(cancelIndex)
+                : -1;
+    } else if (list == dropdownList_) {
+        hoveredIndex = &dropdownHoverIndex_;
+        progress = &dropdownHoverProgress_;
+        target = &dropdownHoverTarget_;
+    }
+
+    if (hoveredIndex == nullptr) {
+        return;
+    }
+    if (index != *hoveredIndex) {
+        *hoveredIndex = index;
+        *progress = 0.0F;
+    }
+    *target = hovered && index >= 0;
+    InvalidateRect(list, nullptr, FALSE);
+    StartHoverAnimation();
+}
+
+void ModernMainWindow::StartHoverAnimation() {
+    if (IsWindow(parent_)) {
+        SetTimer(parent_, AnimationTimerId, 16, nullptr);
+    }
+}
+
+void ModernMainWindow::HandleAnimationTimer() {
+    dropdownSuppressSelectionNotification_ = false;
+    bool animating = false;
+    constexpr float step = 0.18F;
+    for (auto& [control, progress] : hoverProgress_) {
+        const bool target = hoverTargets_.contains(control) && hoverTargets_[control];
+        const float next = std::clamp(progress + (target ? step : -step),
+                                      0.0F, 1.0F);
+        if (next != progress) {
+            progress = next;
+            InvalidateRect(control, nullptr, FALSE);
+        }
+        animating = animating || (target ? progress < 1.0F : progress > 0.0F);
+    }
+
+    const auto animateList = [&](const HWND list, float& progress,
+                                 const bool target, int& index) {
+        const float next = std::clamp(progress + (target ? step : -step),
+                                      0.0F, 1.0F);
+        if (next != progress) {
+            progress = next;
+            InvalidateRect(list, nullptr, FALSE);
+        }
+        if (!target && progress == 0.0F) {
+            index = -1;
+        }
+        return target ? progress < 1.0F : progress > 0.0F;
+    };
+    animating = animateList(library_, libraryHoverProgress_, libraryHoverTarget_,
+                            libraryHoverIndex_) ||
+                animating;
+    animating = animateList(activeList_, activeHoverProgress_, activeHoverTarget_,
+                            activeHoverIndex_) ||
+                animating;
+    animating = animateList(dropdownList_, dropdownHoverProgress_,
+                            dropdownHoverTarget_, dropdownHoverIndex_) ||
+                animating;
+    if (!animating && IsWindow(parent_)) {
+        KillTimer(parent_, AnimationTimerId);
+    }
+}
+
+float ModernMainWindow::ControlHoverProgress(const HWND control) const {
+    const auto found = hoverProgress_.find(control);
+    return found == hoverProgress_.end() ? 0.0F : found->second;
+}
+
+bool ModernMainWindow::HitLibraryActiveBadge(const POINT clientPoint,
+                                             UINT& itemIndex) const {
+    const LRESULT item = SendMessageW(
+        library_, LB_ITEMFROMPOINT, 0,
+        MAKELPARAM(clientPoint.x, clientPoint.y));
+    itemIndex = LOWORD(item);
+    if (HIWORD(item) != 0 || itemIndex >= visibleIndices_.size()) {
+        return false;
+    }
+    const core::WallpaperItem& wallpaper = items_[visibleIndices_[itemIndex]];
+    const bool active = std::ranges::any_of(
+        activePaths_, [&](const std::wstring& path) {
+            return _wcsicmp(wallpaper.path.c_str(), path.c_str()) == 0;
+        });
+    RECT itemRectangle{};
+    if (!active || SendMessageW(library_, LB_GETITEMRECT, itemIndex,
+                                reinterpret_cast<LPARAM>(&itemRectangle)) == LB_ERR) {
+        return false;
+    }
+    RECT card = itemRectangle;
+    InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
+    const RECT badge{card.right - Scale(parent_, 92),
+                     card.top + Scale(parent_, 20),
+                     card.right - Scale(parent_, 14),
+                     card.top + Scale(parent_, 48)};
+    return PtInRect(&badge, clientPoint) != FALSE;
+}
+
+bool ModernMainWindow::HitActiveCancelButton(const POINT clientPoint,
+                                             UINT& itemIndex) const {
+    const LRESULT item = SendMessageW(
+        activeList_, LB_ITEMFROMPOINT, 0,
+        MAKELPARAM(clientPoint.x, clientPoint.y));
+    itemIndex = LOWORD(item);
+    if (HIWORD(item) != 0 || itemIndex >= activeVisibleIndices_.size()) {
+        return false;
+    }
+    RECT itemRectangle{};
+    if (SendMessageW(activeList_, LB_GETITEMRECT, itemIndex,
+                     reinterpret_cast<LPARAM>(&itemRectangle)) == LB_ERR) {
+        return false;
+    }
+    RECT card = itemRectangle;
+    InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
+    const RECT cancel{card.right - Scale(parent_, 112),
+                      card.top + Scale(parent_, 17),
+                      card.right - Scale(parent_, 14),
+                      card.bottom - Scale(parent_, 17)};
+    return PtInRect(&cancel, clientPoint) != FALSE;
+}
+
 void ModernMainWindow::RefreshVisibleItems() {
     wchar_t searchText[512]{};
     GetWindowTextW(search_, searchText, static_cast<int>(std::size(searchText)));
@@ -1266,6 +1819,52 @@ void ModernMainWindow::RefreshVisibleItems() {
     SendMessageW(library_, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(library_, nullptr, TRUE);
     InvalidateRect(parent_, nullptr, FALSE);
+}
+
+void ModernMainWindow::RefreshActiveItems() {
+    activeVisibleIndices_.clear();
+    SendMessageW(activeList_, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(activeList_, LB_RESETCONTENT, 0, 0);
+    for (const std::wstring& path : activePaths_) {
+        const auto item = std::ranges::find_if(
+            items_, [&](const core::WallpaperItem& candidate) {
+                return _wcsicmp(candidate.path.c_str(), path.c_str()) == 0;
+            });
+        if (item == items_.end()) {
+            continue;
+        }
+        const std::size_t index =
+            static_cast<std::size_t>(std::distance(items_.begin(), item));
+        if (SendMessageW(activeList_, LB_ADDSTRING, 0,
+                         reinterpret_cast<LPARAM>(L"")) >= 0) {
+            activeVisibleIndices_.push_back(index);
+        }
+    }
+    SendMessageW(activeList_, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(activeList_, nullptr, TRUE);
+    if (activeDrawerVisible_) {
+        Layout();
+    }
+}
+
+void ModernMainWindow::ToggleActiveDrawer() {
+    if (activeVisibleIndices_.empty()) {
+        return;
+    }
+    HideDropdown();
+    activeDrawerVisible_ = !activeDrawerVisible_;
+    Layout();
+    InvalidateRect(activeStatus_, nullptr, FALSE);
+}
+
+void ModernMainWindow::HideActiveDrawer() {
+    if (!activeDrawerVisible_) {
+        return;
+    }
+    activeDrawerVisible_ = false;
+    ShowWindow(activeList_, SW_HIDE);
+    ShowWindow(activeDrawerHeader_, SW_HIDE);
+    InvalidateRect(activeStatus_, nullptr, FALSE);
 }
 
 bool ModernMainWindow::MatchesFilter(const core::WallpaperItem& item,

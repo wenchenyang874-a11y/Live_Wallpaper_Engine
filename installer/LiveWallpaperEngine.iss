@@ -49,6 +49,7 @@ CloseApplications=force
 RestartApplications=no
 SetupLogging=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=..\assets\app-icon.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
