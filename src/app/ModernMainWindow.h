@@ -31,9 +31,6 @@ public:
         Sound = 1106,
         CancelApplication = 1107,
         RenameCommit = 1108,
-        FilterStatic = 1109,
-        FilterGif = 1110,
-        FilterVideo = 1111,
         DisplaySelector = 1199,
     };
 
@@ -78,6 +75,7 @@ private:
     void RecreateFonts();
     void RefreshVisibleItems();
     void InvalidateFooter() const;
+    bool ShowFilterMenu();
     bool MatchesFilter(const core::WallpaperItem& item,
                        std::wstring_view search) const;
     void DrawButton(const DRAWITEMSTRUCT& draw) const;
@@ -93,9 +91,6 @@ private:
     HWND parent_ = nullptr;
     HWND search_ = nullptr;
     HWND filter_ = nullptr;
-    HWND filterStatic_ = nullptr;
-    HWND filterGif_ = nullptr;
-    HWND filterVideo_ = nullptr;
     HWND library_ = nullptr;
     HWND import_ = nullptr;
     HWND export_ = nullptr;
@@ -122,6 +117,7 @@ private:
     bool soundEnabled_ = false;
     bool spanAcrossDisplays_ = true;
 
+    void UpdateFilterSelectorText();
     void UpdateDisplaySelectorText();
 };
 

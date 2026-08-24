@@ -84,6 +84,31 @@ std::wstring FormatBytes(const std::uint64_t bytes) {
     return std::to_wstring(kibibytes) + L" KiB";
 }
 
+RECT SearchPanelRectangle(const HWND parent) {
+    RECT client{};
+    GetClientRect(parent, &client);
+    const int contentLeft = Scale(parent, 246);
+    const int contentRight = client.right - Scale(parent, 30);
+    const int gap = Scale(parent, 12);
+    const int filterWidth = Scale(parent, 166);
+    const int width = std::max(1, contentRight - contentLeft - filterWidth - gap);
+    const int top = Scale(parent, 104);
+    return RECT{contentLeft, top, contentLeft + width, top + Scale(parent, 40)};
+}
+
+int FontPixelHeight(const HWND window, const HFONT font) {
+    const HDC context = GetDC(window);
+    if (context == nullptr) {
+        return Scale(window, 17);
+    }
+    const HGDIOBJ previous = SelectObject(context, font);
+    TEXTMETRICW metrics{};
+    const bool measured = GetTextMetricsW(context, &metrics) != FALSE;
+    SelectObject(context, previous);
+    ReleaseDC(window, context);
+    return measured ? metrics.tmHeight : Scale(window, 17);
+}
+
 }  // namespace
 
 ModernMainWindow::~ModernMainWindow() {
@@ -130,10 +155,7 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
             parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier)), instance,
             nullptr);
     };
-    filter_ = createButton(Filter, L"全部");
-    filterStatic_ = createButton(FilterStatic, L"图片");
-    filterGif_ = createButton(FilterGif, L"GIF");
-    filterVideo_ = createButton(FilterVideo, L"视频");
+    filter_ = createButton(Filter, L"分类：全部  ▼");
     import_ = createButton(Import, L"＋  导入壁纸");
     export_ = createButton(Export, L"导出分享包");
     apply_ = createButton(Apply, L"应用到桌面");
@@ -145,8 +167,7 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
         parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(RenameCommit)),
         instance, nullptr);
 
-    if (search_ == nullptr || filter_ == nullptr || filterStatic_ == nullptr ||
-        filterGif_ == nullptr || filterVideo_ == nullptr || library_ == nullptr ||
+    if (search_ == nullptr || filter_ == nullptr || library_ == nullptr ||
         import_ == nullptr || export_ == nullptr || apply_ == nullptr ||
         sound_ == nullptr || cancelApplication_ == nullptr ||
         displaySelector_ == nullptr || renameEdit_ == nullptr) {
@@ -193,8 +214,7 @@ void ModernMainWindow::RecreateFonts() {
                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
                              L"Segoe UI Variable Text");
 
-    for (const HWND control : {search_, filter_, filterStatic_, filterGif_,
-                               filterVideo_, library_, import_, export_, apply_,
+    for (const HWND control : {search_, filter_, library_, import_, export_, apply_,
                                sound_, cancelApplication_, displaySelector_,
                                renameEdit_}) {
         SetControlFont(control, bodyFont_);
@@ -217,20 +237,25 @@ void ModernMainWindow::Layout() {
     const int contentWidth = std::max(1, width - contentLeft - margin);
     const int searchTop = Scale(parent_, 104);
     const int controlHeight = Scale(parent_, 40);
-    const int filterWidth = Scale(parent_, 282);
-    const int searchWidth = std::max(1, contentWidth - filterWidth - gap);
+    const int filterWidth = Scale(parent_, 166);
+    const RECT searchPanel = SearchPanelRectangle(parent_);
 
-    MoveWindow(search_, contentLeft, searchTop, searchWidth, controlHeight, TRUE);
-    const int filterLeft = contentLeft + searchWidth + gap;
-    const int segmentGap = Scale(parent_, 4);
-    const int segmentWidth = std::max(1, (filterWidth - segmentGap * 3) / 4);
-    MoveWindow(filter_, filterLeft, searchTop, segmentWidth, controlHeight, TRUE);
-    MoveWindow(filterStatic_, filterLeft + segmentWidth + segmentGap, searchTop,
-               segmentWidth, controlHeight, TRUE);
-    MoveWindow(filterGif_, filterLeft + (segmentWidth + segmentGap) * 2, searchTop,
-               segmentWidth, controlHeight, TRUE);
-    MoveWindow(filterVideo_, filterLeft + (segmentWidth + segmentGap) * 3, searchTop,
-               filterWidth - (segmentWidth + segmentGap) * 3, controlHeight, TRUE);
+    // A native single-line EDIT pins text to its own client area and ignores
+    // EM_SETRECT. Keep the searchable/cue-banner control single-line, but size
+    // that inner client from the actual font metrics and center it inside the
+    // painted 40-DIP search container. This keeps both cue text and the caret
+    // vertically aligned at every DPI without losing EM_SETCUEBANNER support.
+    const int searchInset = Scale(parent_, 12);
+    const int searchPanelHeight = searchPanel.bottom - searchPanel.top;
+    const int searchPanelWidth = searchPanel.right - searchPanel.left;
+    const int searchEditHeight = std::min(
+        searchPanelHeight, FontPixelHeight(parent_, bodyFont_) + Scale(parent_, 6));
+    MoveWindow(search_, searchPanel.left + searchInset,
+               searchPanel.top + (searchPanelHeight - searchEditHeight) / 2,
+               std::max(1, searchPanelWidth - searchInset * 2),
+               searchEditHeight, TRUE);
+    MoveWindow(filter_, searchPanel.right + gap, searchTop, filterWidth,
+               controlHeight, TRUE);
 
     const int actionTop = searchTop + controlHeight + gap;
     const int actionWidth = std::max(1, (contentWidth - gap * 2) / 3);
@@ -314,6 +339,10 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
     DrawTextLine(deviceContext, countText, subtitle, smallFont_, kTextSecondary,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+    const RECT searchPanel = SearchPanelRectangle(parent_);
+    FillRoundedRectangle(deviceContext, searchPanel, kPanel, kPanel,
+                         Scale(parent_, 8));
+
     const int contentLeft = Scale(parent_, 246);
     const int contentRight = client.right - Scale(parent_, 30);
     const int contentWidth = std::max(1, contentRight - contentLeft);
@@ -363,19 +392,7 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
     COLORREF fill = kPanel;
     COLORREF outline = kBorder;
     COLORREF foreground = disabled ? RGB(90, 98, 114) : kTextPrimary;
-    const bool filterButton =
-        draw.CtlID == Filter || draw.CtlID == FilterStatic ||
-        draw.CtlID == FilterGif || draw.CtlID == FilterVideo;
-    const bool selectedFilter =
-        (draw.CtlID == Filter && filterKind_ == FilterKind::All) ||
-        (draw.CtlID == FilterStatic && filterKind_ == FilterKind::StaticImage) ||
-        (draw.CtlID == FilterGif && filterKind_ == FilterKind::AnimatedGif) ||
-        (draw.CtlID == FilterVideo && filterKind_ == FilterKind::Video);
-    if (filterButton && selectedFilter) {
-        fill = pressed ? RGB(72, 99, 207) : RGB(47, 62, 108);
-        outline = kAccent;
-        foreground = RGB(210, 219, 255);
-    } else if (draw.CtlID == Apply || draw.CtlID == Import) {
+    if (draw.CtlID == Apply || draw.CtlID == Import) {
         fill = pressed ? RGB(72, 99, 207) : kAccent;
         outline = fill;
     } else if (draw.CtlID == CancelApplication) {
@@ -486,25 +503,48 @@ bool ModernMainWindow::HandleFilterCommand(const WORD controlId,
         RefreshVisibleItems();
         return true;
     }
-    if (notificationCode == BN_CLICKED &&
-        (controlId == Filter || controlId == FilterStatic ||
-         controlId == FilterGif || controlId == FilterVideo)) {
-        if (controlId == Filter) {
-            filterKind_ = FilterKind::All;
-        } else if (controlId == FilterStatic) {
-            filterKind_ = FilterKind::StaticImage;
-        } else if (controlId == FilterGif) {
-            filterKind_ = FilterKind::AnimatedGif;
-        } else {
-            filterKind_ = FilterKind::Video;
-        }
-        for (const HWND control : {filter_, filterStatic_, filterGif_, filterVideo_}) {
-            InvalidateRect(control, nullptr, FALSE);
-        }
-        RefreshVisibleItems();
+    if (controlId == Filter && notificationCode == BN_CLICKED) {
+        ShowFilterMenu();
         return true;
     }
     return false;
+}
+
+bool ModernMainWindow::ShowFilterMenu() {
+    if (!IsWindow(filter_)) {
+        return false;
+    }
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return false;
+    }
+
+    // A single Unicode popup selector provides the requested dropdown without
+    // returning to the old owner-draw ComboBox path that previously corrupted
+    // Chinese item text in installed builds.
+    constexpr std::array labels{L"全部", L"图片", L"GIF", L"视频"};
+    for (std::size_t index = 0; index < labels.size(); ++index) {
+        const UINT flags = MF_STRING |
+                           (index == static_cast<std::size_t>(filterKind_)
+                                ? MF_CHECKED
+                                : 0);
+        AppendMenuW(menu, flags, static_cast<UINT>(index + 1U), labels[index]);
+    }
+
+    RECT selector{};
+    GetWindowRect(filter_, &selector);
+    const UINT command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN | TPM_TOPALIGN,
+        selector.right, selector.bottom, 0, parent_, nullptr);
+    DestroyMenu(menu);
+    if (command == 0 || command > static_cast<UINT>(labels.size())) {
+        return false;
+    }
+
+    filterKind_ = static_cast<FilterKind>(command - 1U);
+    UpdateFilterSelectorText();
+    RefreshVisibleItems();
+    return true;
 }
 
 bool ModernMainWindow::ShowDisplaySelectorMenu() {
@@ -601,6 +641,15 @@ void ModernMainWindow::SetDisplayOptions(std::vector<DisplayOption> displays,
 
     UpdateDisplaySelectorText();
     Layout();
+}
+
+void ModernMainWindow::UpdateFilterSelectorText() {
+    constexpr std::array labels{L"全部", L"图片", L"GIF", L"视频"};
+    const std::wstring text =
+        std::wstring(L"分类：") +
+        labels[static_cast<std::size_t>(filterKind_)] + L"  ▼";
+    SetWindowTextW(filter_, text.c_str());
+    InvalidateRect(filter_, nullptr, FALSE);
 }
 
 void ModernMainWindow::UpdateDisplaySelectorText() {

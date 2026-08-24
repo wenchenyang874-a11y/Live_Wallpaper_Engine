@@ -12,6 +12,15 @@ using System.Text;
 
 public static class LweStaticOverlayProbe
 {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct Rect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
     public delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
     public delegate bool EnumChildProc(IntPtr window, IntPtr parameter);
 
@@ -37,6 +46,15 @@ public static class LweStaticOverlayProbe
 
     [DllImport("user32.dll")]
     public static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetDlgItem(IntPtr parent, int identifier);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr window, out Rect rectangle);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr window, StringBuilder text, int count);
 
     public static IntPtr FindTopLevel(uint processId, string targetClass)
     {
@@ -80,6 +98,13 @@ public static class LweStaticOverlayProbe
             return true;
         }, IntPtr.Zero);
         return found;
+    }
+
+    public static string ReadWindowText(IntPtr window)
+    {
+        var text = new StringBuilder(256);
+        GetWindowText(window, text, text.Capacity);
+        return text.ToString();
     }
 }
 '@
@@ -216,6 +241,43 @@ try {
         throw "Control window is missing child/sibling clipping styles."
     }
 
+    $searchControl = [LweStaticOverlayProbe]::GetDlgItem($control, 1100)
+    $filterControl = [LweStaticOverlayProbe]::GetDlgItem($control, 1101)
+    if ($searchControl -eq [IntPtr]::Zero -or $filterControl -eq [IntPtr]::Zero) {
+        throw "Search or filter selector control was not created."
+    }
+    $filterText = [LweStaticOverlayProbe]::ReadWindowText($filterControl)
+    # Windows PowerShell 5 reads UTF-8 scripts without a BOM using the active
+    # ANSI code page. Build the expected Unicode label from code points so this
+    # regression script remains portable without changing the repository-wide
+    # text encoding convention.
+    $expectedFilterText = -join @(
+        [char]0x5206, [char]0x7C7B, [char]0xFF1A,
+        [char]0x5168, [char]0x90E8, ' ', ' ', [char]0x25BC)
+    if ($filterText -ne $expectedFilterText) {
+        throw "Unexpected filter selector text: '$filterText'."
+    }
+    $legacyFilterCount = @(1109, 1110, 1111 | Where-Object {
+        [LweStaticOverlayProbe]::GetDlgItem($control, $_) -ne [IntPtr]::Zero
+    }).Count
+    if ($legacyFilterCount -ne 0) {
+        throw "Legacy segmented filter controls are still present."
+    }
+    $searchRectangle = New-Object LweStaticOverlayProbe+Rect
+    $filterRectangle = New-Object LweStaticOverlayProbe+Rect
+    if (-not [LweStaticOverlayProbe]::GetWindowRect(
+            $searchControl, [ref]$searchRectangle) -or
+        -not [LweStaticOverlayProbe]::GetWindowRect(
+            $filterControl, [ref]$filterRectangle)) {
+        throw "Unable to inspect search/filter geometry."
+    }
+    $searchCenter = ($searchRectangle.Top + $searchRectangle.Bottom) / 2.0
+    $filterCenter = ($filterRectangle.Top + $filterRectangle.Bottom) / 2.0
+    $searchCenterDelta = [Math]::Abs($searchCenter - $filterCenter)
+    if ($searchCenterDelta -gt 1.0) {
+        throw "Search text client is not vertically centered: delta=$searchCenterDelta px."
+    }
+
     $wallpaperWindow = [LweStaticOverlayProbe]::FindProcessChild(
         [uint32]$activeProcess.Id, "LiveWallpaperEngine.Wallpaper")
     if ($wallpaperWindow -eq [IntPtr]::Zero) {
@@ -257,6 +319,9 @@ try {
     "TEST_IMAGE_GPU_SHARED_BYTES=$($firstMetrics.SharedGpuBytes)"
     "SINGLE_INSTANCE_COUNT=$instanceCount"
     "CONTROL_WINDOW_CHILD_CLIPPING=True"
+    "FILTER_DROPDOWN_TEXT=$filterText"
+    "LEGACY_FILTER_SEGMENT_COUNT=$legacyFilterCount"
+    "SEARCH_CENTER_DELTA_PX=$searchCenterDelta"
     "SYSTEM_WALLPAPER_UNCHANGED=True"
     "SETTINGS_UNCHANGED=True"
 
