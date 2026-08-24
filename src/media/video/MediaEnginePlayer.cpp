@@ -1,5 +1,7 @@
 #include "media/video/MediaEnginePlayer.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <iomanip>
 #include <new>
@@ -119,8 +121,12 @@ HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
         return result;
     }
 
-    EventCallback* callback =
-        new (std::nothrow) EventCallback(this, notificationWindow, notificationMessage);
+    ++generation_;
+    if (generation_ == 0) {
+        ++generation_;
+    }
+    EventCallback* callback = new (std::nothrow) EventCallback(
+        this, notificationWindow, notificationMessage, generation_);
     if (callback == nullptr) {
         return E_OUTOFMEMORY;
     }
@@ -196,9 +202,17 @@ HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
     return S_OK;
 }
 
-HRESULT MediaEnginePlayer::PresentFrame(render::D3DRenderer& renderer,
-                                        const UINT width, const UINT height) {
-    if (!engine_ || !playing_ || width == 0 || height == 0) {
+HRESULT MediaEnginePlayer::PresentFrame(
+    render::D3DRenderer& renderer, const std::span<const RECT> destinations) {
+    if (!engine_ || !playing_ || destinations.empty()) {
+        return S_FALSE;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    constexpr std::uint64_t kFullHdPixels = 1920ULL * 1080ULL;
+    if (static_cast<std::uint64_t>(nativeWidth_) * nativeHeight_ >
+            kFullHdPixels &&
+        now < nextFrameTransferAt_) {
         return S_FALSE;
     }
 
@@ -226,48 +240,77 @@ HRESULT MediaEnginePlayer::PresentFrame(render::D3DRenderer& renderer,
         }
     }
 
-    MFVideoNormalizedRect source{0.0F, 0.0F, 1.0F, 1.0F};
-    const float sourceAspect =
-        static_cast<float>(nativeWidth_) / static_cast<float>(nativeHeight_);
-    const float destinationAspect = static_cast<float>(width) / static_cast<float>(height);
-    if (sourceAspect > destinationAspect) {
-        const float normalizedWidth = destinationAspect / sourceAspect;
-        source.left = (1.0F - normalizedWidth) * 0.5F;
-        source.right = source.left + normalizedWidth;
-    } else if (sourceAspect < destinationAspect) {
-        const float normalizedHeight = sourceAspect / destinationAspect;
-        source.top = (1.0F - normalizedHeight) * 0.5F;
-        source.bottom = source.top + normalizedHeight;
+    UINT maximumDestinationWidth = 0;
+    UINT maximumDestinationHeight = 0;
+    for (const RECT& destination : destinations) {
+        maximumDestinationWidth = std::max(
+            maximumDestinationWidth,
+            static_cast<UINT>(std::max(0L, destination.right - destination.left)));
+        maximumDestinationHeight = std::max(
+            maximumDestinationHeight,
+            static_cast<UINT>(std::max(0L, destination.bottom - destination.top)));
     }
+    if (maximumDestinationWidth == 0 || maximumDestinationHeight == 0) {
+        return E_INVALIDARG;
+    }
+    const double transferScale = std::min(
+        1.0, std::max(static_cast<double>(maximumDestinationWidth) / nativeWidth_,
+                      static_cast<double>(maximumDestinationHeight) / nativeHeight_));
+    const UINT transferWidth = std::max(
+        2U, static_cast<UINT>(std::lround(nativeWidth_ * transferScale)) & ~1U);
+    const UINT transferHeight = std::max(
+        2U, static_cast<UINT>(std::lround(nativeHeight_ * transferScale)) & ~1U);
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
-    result = renderer.AcquireBackBuffer(backBuffer);
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> transferSurface;
+    result = renderer.AcquireVideoTransferSurface(
+        transferWidth, transferHeight, transferSurface);
     if (FAILED(result)) {
         failed_ = true;
-        core::LogError(L"Unable to acquire the video destination back buffer.", result);
+        core::LogError(L"Unable to acquire the off-screen video surface.", result);
         return result;
     }
 
-    const RECT destination{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    // Transfer once at the largest selected monitor's useful resolution.
+    // D3DRenderer performs the aspect-correct, opaque fan-out to every selected
+    // monitor in a single GPU composition pass; repeating TransferVideoFrame
+    // per monitor doubled GPU utilization and exposed intermediate frames on
+    // layered desktop windows.
+    const MFVideoNormalizedRect source{0.0F, 0.0F, 1.0F, 1.0F};
+    const RECT transferDestination{0, 0, static_cast<LONG>(transferWidth),
+                                   static_cast<LONG>(transferHeight)};
     const MFARGB border{0, 0, 0, 255};
-    result = engine_->TransferVideoFrame(backBuffer.Get(), &source, &destination, &border);
+    result = engine_->TransferVideoFrame(transferSurface.Get(), &source,
+                                         &transferDestination, &border);
     if (FAILED(result)) {
         failed_ = true;
-        core::LogError(L"Media Engine could not transfer a decoded video frame.", result);
+        core::LogError(L"Media Engine could not transfer a decoded video frame.",
+                       result);
         return result;
     }
-    if (!renderer.PresentCurrentFrame(false)) {
+    if (!renderer.CommitVideoTransferSurface(destinations, nativeWidth_,
+                                             nativeHeight_)) {
         failed_ = true;
         return E_FAIL;
     }
     lastPresentationTime_ = presentationTime;
     hasPresentationTime_ = true;
+    if (static_cast<std::uint64_t>(nativeWidth_) * nativeHeight_ >
+        kFullHdPixels) {
+        // 4K/greater wallpaper presentation is capped at 30 FPS. The media
+        // engine remains hardware-decoded, while halving conversion, shader
+        // and layered-window Present work that has little desktop benefit.
+        nextFrameTransferAt_ = now + std::chrono::milliseconds(33);
+    }
     ++transferredFrameCount_;
     return S_OK;
 }
 
-void MediaEnginePlayer::HandleEvent(const DWORD eventCode) {
-    if (!engine_) {
+void MediaEnginePlayer::HandleEvent(const DWORD eventCode,
+                                    const std::uint32_t generation) {
+    if (!engine_ || generation != generation_) {
+        if (generation != generation_) {
+            core::LogInfo(L"Ignored a delayed event from an older video session.");
+        }
         return;
     }
 
@@ -396,6 +439,7 @@ void MediaEnginePlayer::Shutdown() {
     transferredFrameCount_ = 0;
     lastPresentationTime_ = 0;
     hasPresentationTime_ = false;
+    nextFrameTransferAt_ = {};
 }
 
 bool MediaEnginePlayer::IsActive() const noexcept {
@@ -414,9 +458,10 @@ bool MediaEnginePlayer::SoundEnabled() const noexcept {
     return soundEnabled_;
 }
 
-MediaEnginePlayer::EventCallback::EventCallback(MediaEnginePlayer* owner, const HWND window,
-                                                const UINT message)
-    : owner_(owner), window_(window), message_(message) {}
+MediaEnginePlayer::EventCallback::EventCallback(
+    MediaEnginePlayer* owner, const HWND window, const UINT message,
+    const std::uint32_t generation)
+    : owner_(owner), window_(window), message_(message), generation_(generation) {}
 
 HRESULT STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::QueryInterface(
     REFIID interfaceId, void** object) {
@@ -448,7 +493,8 @@ ULONG STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::Release() {
 HRESULT STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::EventNotify(
     const DWORD eventCode, DWORD_PTR, DWORD) {
     if (owner_ != nullptr && IsWindow(window_)) {
-        PostMessageW(window_, message_, eventCode, 0);
+        PostMessageW(window_, message_, eventCode,
+                     static_cast<LPARAM>(generation_));
     }
     return S_OK;
 }
@@ -457,6 +503,7 @@ void MediaEnginePlayer::EventCallback::Detach() noexcept {
     owner_ = nullptr;
     window_ = nullptr;
     message_ = 0;
+    generation_ = 0;
 }
 
 }  // namespace lwe::media::video

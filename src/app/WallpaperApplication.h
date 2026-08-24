@@ -15,6 +15,7 @@
 #include "media/image/GifPlayer.h"
 #include "media/image/WicImageLoader.h"
 #include "media/video/MediaEnginePlayer.h"
+#include "platform/ProcessResourceMonitor.h"
 #include "render/D3DRenderer.h"
 #include "shell/DesktopHost.h"
 
@@ -33,6 +34,7 @@ public:
 
 private:
     enum class PlaybackMode {
+        Stopped,
         TechnicalTest,
         StaticImage,
         AnimatedGif,
@@ -58,6 +60,10 @@ private:
     void ImportPaths(const std::vector<std::wstring>& paths);
     void ChooseExport();
     void ApplySelectedWallpaper();
+    void PreviewSelectedWallpaper();
+    void CommitWallpaperRename();
+    void ShowLibraryContextMenu(POINT screenPoint);
+    void CancelActiveWallpaper(bool persistSelection = true);
     bool ApplyWallpaper(std::wstring_view path, bool persistSelection = true,
                         bool showErrors = true);
     HRESULT ApplyStaticImage(std::wstring_view path);
@@ -67,6 +73,12 @@ private:
     void StopActivePlayback();
     void ToggleSound();
     HRESULT SaveCurrentSelection() const;
+    HRESULT SaveClearedSelection() const;
+    void RefreshDisplayTargets(bool preserveSelection);
+    void ApplyDisplaySelectionFromUi();
+    bool ConfigureWallpaperWindowRegion();
+    void UpdateRenderDestinations();
+    void UpdateResourceUsage();
     void InitializePlaybackPolicy();
     void RefreshPlaybackPolicy();
     std::wstring PlaybackPauseReason() const;
@@ -94,6 +106,7 @@ private:
     bool displayOff_ = false;
     bool fullScreenActive_ = false;
     bool dynamicPlaybackPaused_ = false;
+    bool pendingWallpaperReveal_ = false;
     bool sessionNotificationsRegistered_ = false;
     HPOWERNOTIFY displayPowerNotification_ = nullptr;
     bool soundEnabled_ = false;
@@ -101,6 +114,10 @@ private:
     media::WallpaperKind activeKind_ = media::WallpaperKind::StaticImage;
     std::wstring activeWallpaperPath_;
     shell::DesktopTarget desktopTarget_{};
+    std::vector<shell::DisplayTarget> displayTargets_;
+    std::vector<std::wstring> selectedDisplayIds_;
+    std::vector<RECT> renderDestinations_;
+    bool spanAcrossDisplays_ = true;
     ModernMainWindow mainWindow_;
     core::SettingsStore settingsStore_;
     core::WallpaperLibrary wallpaperLibrary_;
@@ -108,6 +125,7 @@ private:
     media::image::GifPlayer gifPlayer_;
     media::video::MediaEnginePlayer videoPlayer_;
     render::D3DRenderer renderer_;
+    platform::ProcessResourceMonitor resourceMonitor_;
 };
 
 }  // namespace lwe::app

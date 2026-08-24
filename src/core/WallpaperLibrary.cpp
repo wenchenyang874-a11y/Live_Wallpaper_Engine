@@ -391,6 +391,51 @@ HRESULT WallpaperLibrary::ImportFile(const std::wstring_view sourcePath,
     return S_OK;
 }
 
+HRESULT WallpaperLibrary::Rename(const WallpaperItem& item,
+                                 const std::wstring_view newDisplayName,
+                                 WallpaperItem& renamed) const {
+    if (rootDirectory_.empty() || item.path.empty() || item.external ||
+        newDisplayName.empty() || item.path.parent_path() != rootDirectory_) {
+        return E_INVALIDARG;
+    }
+
+    std::wstring stem(newDisplayName);
+    const std::wstring extension = item.path.extension().native();
+    if (stem.size() > extension.size() &&
+        _wcsicmp(stem.c_str() + stem.size() - extension.size(),
+                 extension.c_str()) == 0) {
+        stem.resize(stem.size() - extension.size());
+    }
+    while (!stem.empty() && (stem.back() == L' ' || stem.back() == L'.')) {
+        stem.pop_back();
+    }
+    const std::wstring fileName = stem + extension;
+    if (stem.empty() || !IsSafePackageFileName(fileName)) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    }
+
+    const std::filesystem::path destination = rootDirectory_ / fileName;
+    if (_wcsicmp(destination.c_str(), item.path.c_str()) == 0) {
+        return DescribeFile(item.path, false, renamed);
+    }
+    std::error_code error;
+    if (std::filesystem::exists(destination, error)) {
+        return HRESULT_FROM_WIN32(ERROR_FILE_EXISTS);
+    }
+    if (!MoveFileExW(item.path.c_str(), destination.c_str(),
+                     MOVEFILE_WRITE_THROUGH)) {
+        return LastErrorResult();
+    }
+    const HRESULT result = DescribeFile(destination, false, renamed);
+    if (FAILED(result)) {
+        MoveFileExW(destination.c_str(), item.path.c_str(), MOVEFILE_WRITE_THROUGH);
+        return result;
+    }
+    LogInfo(L"Renamed a local wallpaper: " + item.path.native() + L" -> " +
+            destination.native());
+    return S_OK;
+}
+
 HRESULT WallpaperLibrary::ExportPackage(const WallpaperItem& item,
                                         const std::wstring_view destinationPath) const {
     if (item.path.empty() || destinationPath.empty()) {

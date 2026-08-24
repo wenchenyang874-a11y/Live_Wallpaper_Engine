@@ -25,6 +25,7 @@ public:
                     std::chrono::steady_clock::time_point now);
     DWORD WaitMilliseconds(std::chrono::steady_clock::time_point now) const noexcept;
     void Resize(UINT targetWidth, UINT targetHeight);
+    void SetTargetRects(std::vector<RECT> targetRects);
     void Reset();
 
     [[nodiscard]] bool IsLoaded() const noexcept;
@@ -52,6 +53,7 @@ private:
     UINT canvasHeight_ = 0;
     UINT targetWidth_ = 0;
     UINT targetHeight_ = 0;
+    std::vector<RECT> targetRects_;
     UINT frameCount_ = 0;
     UINT nextFrameIndex_ = 0;
     FrameMetadata previousFrame_{};

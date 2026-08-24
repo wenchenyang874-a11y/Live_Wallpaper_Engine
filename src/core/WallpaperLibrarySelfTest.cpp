@@ -165,6 +165,19 @@ int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
         result = sourceLibrary.ImportFile(sourcePath, importedSource);
     }
     if (SUCCEEDED(result)) {
+        WallpaperItem renamed;
+        result = sourceLibrary.Rename(importedSource, L"renamed wallpaper", renamed);
+        if (SUCCEEDED(result) &&
+            (renamed.path.stem().native() != L"renamed wallpaper" ||
+             std::filesystem::exists(importedSource.path))) {
+            result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        }
+        if (SUCCEEDED(result)) {
+            importedSource = std::move(renamed);
+            LogInfo(L"SELF_TEST_LIBRARY_RENAME=True");
+        }
+    }
+    if (SUCCEEDED(result)) {
         result = sourceLibrary.ExportPackage(importedSource, package.native());
     }
     if (SUCCEEDED(result)) {

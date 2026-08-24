@@ -119,7 +119,7 @@ function Exit-Lwe {
 
     # WM_COMMAND with the exit button identifier exercises the application's
     # normal shutdown path instead of forcefully terminating the process.
-    [void][LweStaticOverlayProbe]::PostMessage($Control, 0x0111, [IntPtr]1108,
+    [void][LweStaticOverlayProbe]::PostMessage($Control, 0x0111, [IntPtr]2199,
                                                [IntPtr]::Zero)
     if (-not $Process.WaitForExit(5000)) {
         throw "Application did not exit normally."

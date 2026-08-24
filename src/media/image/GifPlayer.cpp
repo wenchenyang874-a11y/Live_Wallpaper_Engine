@@ -212,14 +212,40 @@ bool GifPlayer::PresentDue(render::D3DRenderer& renderer,
         return false;
     }
 
-    DecodedImage scaled;
+    const std::vector<RECT> fallback{
+        RECT{0, 0, static_cast<LONG>(targetWidth_), static_cast<LONG>(targetHeight_)}};
+    const std::vector<RECT>& destinations =
+        targetRects_.empty() ? fallback : targetRects_;
+    std::vector<DecodedImage> scaledFrames;
+    scaledFrames.reserve(destinations.size());
     const UINT canvasStride = canvasWidth_ * 4U;
-    HRESULT scaleResult = scaler_.ScaleFillBgra(canvas_, canvasWidth_, canvasHeight_,
-                                                canvasStride, targetWidth_, targetHeight_,
-                                                scaled);
-    if (FAILED(scaleResult) ||
-        !renderer.PresentStaticImage(scaled.pixels, scaled.width, scaled.height,
-                                     scaled.stride)) {
+    HRESULT scaleResult = S_OK;
+    for (const RECT& destination : destinations) {
+        const LONG width = destination.right - destination.left;
+        const LONG height = destination.bottom - destination.top;
+        if (width <= 0 || height <= 0) {
+            continue;
+        }
+        DecodedImage scaled;
+        scaleResult = scaler_.ScaleFillBgra(
+            canvas_, canvasWidth_, canvasHeight_, canvasStride,
+            static_cast<UINT>(width), static_cast<UINT>(height), scaled);
+        if (FAILED(scaleResult)) {
+            break;
+        }
+        scaledFrames.push_back(std::move(scaled));
+    }
+    std::vector<render::ImageRegion> regions;
+    regions.reserve(scaledFrames.size());
+    for (std::size_t index = 0; index < scaledFrames.size(); ++index) {
+        const DecodedImage& scaled = scaledFrames[index];
+        const RECT& destination = destinations[index];
+        regions.push_back(render::ImageRegion{scaled.pixels, scaled.width,
+                                              scaled.height, scaled.stride,
+                                              destination.left, destination.top});
+    }
+    if (FAILED(scaleResult) || regions.empty() ||
+        !renderer.PresentImageRegions(regions)) {
         core::LogError(L"Unable to scale or present a GIF frame.", scaleResult);
         return false;
     }
@@ -254,6 +280,11 @@ void GifPlayer::Resize(const UINT targetWidth, const UINT targetHeight) {
     nextFrameAt_ = std::chrono::steady_clock::time_point::min();
 }
 
+void GifPlayer::SetTargetRects(std::vector<RECT> targetRects) {
+    targetRects_ = std::move(targetRects);
+    nextFrameAt_ = std::chrono::steady_clock::time_point::min();
+}
+
 void GifPlayer::Reset() {
     if (presentedFrames_ > 0) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -267,6 +298,7 @@ void GifPlayer::Reset() {
     canvasHeight_ = 0;
     targetWidth_ = 0;
     targetHeight_ = 0;
+    targetRects_.clear();
     frameCount_ = 0;
     nextFrameIndex_ = 0;
     previousFrame_ = {};

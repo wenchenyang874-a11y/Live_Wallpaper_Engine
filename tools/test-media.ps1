@@ -111,7 +111,10 @@ function Start-MediaTest([string] $path) {
     @($process, $control)
 }
 function Stop-MediaTest($process, [IntPtr] $control) {
-    [void][LweMediaProbe]::PostMessage($control, 0x0111, [IntPtr]1108, [IntPtr]::Zero)
+    # 2199 is accepted only in controlled test mode. Keeping test lifecycle
+    # separate from visible control IDs prevents UI additions from silently
+    # changing the meaning of this shutdown request.
+    [void][LweMediaProbe]::PostMessage($control, 0x0111, [IntPtr]2199, [IntPtr]::Zero)
     if (-not $process.WaitForExit(5000) -or $process.ExitCode -ne 0) {
         throw 'Media wallpaper process did not exit normally.'
     }

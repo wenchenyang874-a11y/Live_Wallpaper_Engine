@@ -369,7 +369,8 @@ std::optional<AppSettings> SettingsStore::Load() const {
     const std::optional version = ParseVersionField(json);
     const std::optional wallpaperType = ParseStringField(json, L"wallpaperType");
     if (!version.has_value() || !wallpaperType.has_value() ||
-        (*version != 1 && *version != AppSettings::kCurrentSchemaVersion)) {
+        (*version != 1 && *version != 2 &&
+         *version != AppSettings::kCurrentSchemaVersion)) {
         LogWarning(L"The local settings file is invalid or uses an unsupported version.");
         return std::nullopt;
     }
@@ -384,6 +385,12 @@ std::optional<AppSettings> SettingsStore::Load() const {
             ParseStringField(json, L"wallpaperPath").value_or(L"");
         settings.soundEnabled =
             ParseBooleanField(json, L"soundEnabled").value_or(false);
+        if (*version >= 3) {
+            settings.displayTargets =
+                ParseStringField(json, L"displayTargets").value_or(L"");
+            settings.spanAcrossDisplays =
+                ParseBooleanField(json, L"spanAcrossDisplays").value_or(true);
+        }
     }
 
     if (*wallpaperType == L"static_image" && !settings.wallpaperPath.empty()) {
@@ -425,11 +432,15 @@ HRESULT SettingsStore::Save(const AppSettings& settings) const {
         case WallpaperSelectionKind::DynamicTest:
             break;
     }
-    std::wstring json = L"{\r\n  \"version\": 2,\r\n  \"wallpaperType\": \"";
+    std::wstring json = L"{\r\n  \"version\": 3,\r\n  \"wallpaperType\": \"";
     json += wallpaperType;
     json += L"\",\r\n  \"wallpaperPath\": \"";
     json += EscapeJsonString(settings.wallpaperPath);
-    json += L"\",\r\n  \"soundEnabled\": ";
+    json += L"\",\r\n  \"displayTargets\": \"";
+    json += EscapeJsonString(settings.displayTargets);
+    json += L"\",\r\n  \"spanAcrossDisplays\": ";
+    json += settings.spanAcrossDisplays ? L"true" : L"false";
+    json += L",\r\n  \"soundEnabled\": ";
     json += settings.soundEnabled ? L"true" : L"false";
     json += L"\r\n}\r\n";
 

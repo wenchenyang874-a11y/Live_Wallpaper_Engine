@@ -8,6 +8,7 @@
     <Filter Include="media\video"><UniqueIdentifier>{F6290485-677D-420D-A293-AFE3692A2E21}</UniqueIdentifier></Filter>
     <Filter Include="render"><UniqueIdentifier>{8F352D48-F76E-41FD-84AA-E3D5628F4913}</UniqueIdentifier></Filter>
     <Filter Include="shell"><UniqueIdentifier>{20A78913-F3C8-48F2-ABDA-3FA88DE80B58}</UniqueIdentifier></Filter>
+    <Filter Include="platform"><UniqueIdentifier>{798A4B97-9BCA-48F6-B265-6D29F01749A7}</UniqueIdentifier></Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\app\main.cpp"><Filter>app</Filter></ClCompile>
@@ -24,6 +25,7 @@
     <ClCompile Include="src\media\video\MediaEnginePlayer.cpp"><Filter>media\video</Filter></ClCompile>
     <ClCompile Include="src\render\D3DRenderer.cpp"><Filter>render</Filter></ClCompile>
     <ClCompile Include="src\shell\DesktopHost.cpp"><Filter>shell</Filter></ClCompile>
+    <ClCompile Include="src\platform\ProcessResourceMonitor.cpp"><Filter>platform</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\app\WallpaperApplication.h"><Filter>app</Filter></ClInclude>
@@ -40,6 +42,7 @@
     <ClInclude Include="src\media\video\MediaEnginePlayer.h"><Filter>media\video</Filter></ClInclude>
     <ClInclude Include="src\render\D3DRenderer.h"><Filter>render</Filter></ClInclude>
     <ClInclude Include="src\shell\DesktopHost.h"><Filter>shell</Filter></ClInclude>
+    <ClInclude Include="src\platform\ProcessResourceMonitor.h"><Filter>platform</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="src\app\app.manifest"><Filter>app</Filter></Manifest>

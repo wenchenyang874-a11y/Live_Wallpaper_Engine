@@ -1,7 +1,9 @@
 #include "shell/DesktopHost.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <sstream>
+#include <vector>
 
 #include "core/Logger.h"
 
@@ -14,6 +16,48 @@ constexpr LONG_PTR kNoRedirectionBitmap = 0x00200000L;
 struct ClassicSearchContext {
     HWND worker = nullptr;
 };
+
+struct MonitorEnumerationContext final {
+    HWND desktopParent = nullptr;
+    std::vector<DisplayTarget>* displays = nullptr;
+};
+
+BOOL CALLBACK AppendMonitor(const HMONITOR monitor, HDC, RECT*,
+                            const LPARAM parameter) {
+    auto* context = reinterpret_cast<MonitorEnumerationContext*>(parameter);
+    if (context == nullptr || context->displays == nullptr ||
+        !IsWindow(context->desktopParent)) {
+        return FALSE;
+    }
+
+    MONITORINFOEXW information{};
+    information.cbSize = sizeof(information);
+    if (!GetMonitorInfoW(monitor, &information)) {
+        return TRUE;
+    }
+
+    POINT corners[2]{{information.rcMonitor.left, information.rcMonitor.top},
+                     {information.rcMonitor.right, information.rcMonitor.bottom}};
+    SetLastError(ERROR_SUCCESS);
+    const int mapped = MapWindowPoints(HWND_DESKTOP, context->desktopParent,
+                                       corners, 2);
+    if (mapped == 0 && GetLastError() != ERROR_SUCCESS) {
+        return TRUE;
+    }
+
+    DisplayTarget display;
+    display.deviceId = information.szDevice;
+    display.clientBounds =
+        RECT{corners[0].x, corners[0].y, corners[1].x, corners[1].y};
+    display.primary = (information.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    const LONG width = display.clientBounds.right - display.clientBounds.left;
+    const LONG height = display.clientBounds.bottom - display.clientBounds.top;
+    display.label = display.deviceId + (display.primary ? L"（主屏）" : L"") +
+                    L" · " + std::to_wstring(width) + L"×" +
+                    std::to_wstring(height);
+    context->displays->push_back(std::move(display));
+    return TRUE;
+}
 
 std::wstring HandleText(const HWND window) {
     std::wostringstream stream;
@@ -151,9 +195,9 @@ bool AttachWallpaperWindow(const HWND wallpaperWindow, const DesktopTarget& targ
         return false;
     }
 
-    // A fully opaque layered child is required by Windows 11's raised desktop
-    // compositor. Alpha 255 preserves the rendered pixels while allowing DWM to
-    // place this child under the layered icon view.
+    // Windows 11's raised desktop requires this fully opaque child to remain a
+    // layered sibling under the layered icon view. Alpha 255 preserves every
+    // rendered pixel while the DXGI swap chain supplies the actual frame.
     if (!SetLayeredWindowAttributes(wallpaperWindow, 0, 255, LWA_ALPHA)) {
         core::LogError(L"SetLayeredWindowAttributes failed.",
                        HRESULT_FROM_WIN32(GetLastError()));
@@ -187,6 +231,27 @@ bool AttachWallpaperWindow(const HWND wallpaperWindow, const DesktopTarget& targ
             << width << L'x' << height << L'.';
     core::LogInfo(message.str());
     return true;
+}
+
+std::vector<DisplayTarget> EnumerateDisplayTargets(const HWND desktopParent) {
+    std::vector<DisplayTarget> displays;
+    MonitorEnumerationContext context{desktopParent, &displays};
+    if (!EnumDisplayMonitors(nullptr, nullptr, &AppendMonitor,
+                             reinterpret_cast<LPARAM>(&context))) {
+        core::LogWarning(L"Display enumeration failed.");
+        return {};
+    }
+    std::ranges::sort(displays, [](const DisplayTarget& left,
+                                  const DisplayTarget& right) {
+        if (left.primary != right.primary) {
+            return left.primary;
+        }
+        if (left.clientBounds.left != right.clientBounds.left) {
+            return left.clientBounds.left < right.clientBounds.left;
+        }
+        return left.clientBounds.top < right.clientBounds.top;
+    });
+    return displays;
 }
 
 std::wstring_view LayoutName(const DesktopLayout layout) {

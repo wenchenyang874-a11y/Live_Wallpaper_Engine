@@ -34,6 +34,8 @@ public:
     HRESULT ImportPackage(std::wstring_view packagePath, WallpaperItem& imported) const;
     HRESULT ExportPackage(const WallpaperItem& item,
                           std::wstring_view destinationPath) const;
+    HRESULT Rename(const WallpaperItem& item, std::wstring_view newDisplayName,
+                   WallpaperItem& renamed) const;
 
     [[nodiscard]] const std::filesystem::path& RootDirectory() const noexcept;
 

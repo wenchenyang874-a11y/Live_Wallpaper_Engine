@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -27,8 +28,9 @@ public:
     HRESULT Open(ID3D11Device* device, HWND notificationWindow,
                  UINT notificationMessage, std::wstring_view path,
                  bool soundEnabled);
-    HRESULT PresentFrame(render::D3DRenderer& renderer, UINT width, UINT height);
-    void HandleEvent(DWORD eventCode);
+    HRESULT PresentFrame(render::D3DRenderer& renderer,
+                         std::span<const RECT> destinations);
+    void HandleEvent(DWORD eventCode, std::uint32_t generation);
     HRESULT SetSoundEnabled(bool enabled);
     HRESULT SetPaused(bool paused);
     void Shutdown();
@@ -41,7 +43,8 @@ public:
 private:
     class EventCallback final : public IMFMediaEngineNotify {
     public:
-        EventCallback(MediaEnginePlayer* owner, HWND window, UINT message);
+        EventCallback(MediaEnginePlayer* owner, HWND window, UINT message,
+                      std::uint32_t generation);
 
         HRESULT STDMETHODCALLTYPE QueryInterface(REFIID interfaceId,
                                                  void** object) override;
@@ -58,6 +61,7 @@ private:
         MediaEnginePlayer* owner_ = nullptr;
         HWND window_ = nullptr;
         UINT message_ = 0;
+        std::uint32_t generation_ = 0;
     };
 
     Microsoft::WRL::ComPtr<IMFMediaEngineClassFactory> factory_;
@@ -74,8 +78,10 @@ private:
     bool failed_ = false;
     bool soundEnabled_ = false;
     bool pauseRequested_ = false;
+    std::uint32_t generation_ = 0;
     std::chrono::steady_clock::time_point statisticsStartedAt_{};
     std::chrono::steady_clock::time_point statisticsPauseStartedAt_{};
+    std::chrono::steady_clock::time_point nextFrameTransferAt_{};
     std::chrono::steady_clock::duration statisticsPausedDuration_{};
 };
 

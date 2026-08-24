@@ -16,12 +16,14 @@ enum class WallpaperSelectionKind {
 };
 
 struct AppSettings final {
-    static constexpr std::uint32_t kCurrentSchemaVersion = 2;
+    static constexpr std::uint32_t kCurrentSchemaVersion = 3;
 
     std::uint32_t schemaVersion = kCurrentSchemaVersion;
     WallpaperSelectionKind wallpaperKind = WallpaperSelectionKind::DynamicTest;
     std::wstring wallpaperPath;
+    std::wstring displayTargets;
     bool soundEnabled = false;
+    bool spanAcrossDisplays = true;
 };
 
 class SettingsStore final {
