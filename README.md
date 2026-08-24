@@ -54,7 +54,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\build-release.ps1 -Version 0.1.0
 ```
 
-安装包输出到 `dist\`，默认安装到当前用户的 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`，不请求管理员权限。`v0.x.y` 会发布为 GitHub 预发布版，`v1.0.0` 起才视为稳定正式版。
+安装包输出到 `dist\`，默认安装到当前用户的 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`，不请求管理员权限。项目当前仍处于 `0.x` 预览阶段，但每次发布的最新三段式版本会标记为 GitHub Latest Release，方便从仓库首页直接下载；`v1.0.0` 起视为稳定版本。
 
 日常开发中的当前代码应构建为名称明确的未发布安装包，避免与已经发布且不可变的版本资产混淆：
 

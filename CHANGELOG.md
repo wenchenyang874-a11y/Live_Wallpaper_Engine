@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 三段式 tag 发布后默认创建 GitHub Latest Release，不再把所有 `0.x` 版本自动标记为 Pre-release，方便从仓库首页直接进入最新版本下载页。
+
 ## [0.3.0] - 2026-08-24
 
 ### Added

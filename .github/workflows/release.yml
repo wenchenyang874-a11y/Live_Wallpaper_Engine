@@ -38,8 +38,6 @@ jobs:
             throw "CHANGELOG.md has no dated section for $version."
           }
           "version=$version" >> $env:GITHUB_OUTPUT
-          $isPrerelease = [int]($version.Split('.')[0]) -eq 0
-          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
       - name: Build release installer
         shell: pwsh
@@ -54,26 +52,18 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_REPOSITORY: ${{ github.repository }}
-          IS_PRERELEASE: ${{ steps.version.outputs.prerelease }}
         run: |
           $version = $env:RELEASE_VERSION
           $installer = ".\dist\LiveWallpaperEngine-$version-x64-setup.exe"
-          $title = if ($env:IS_PRERELEASE -eq 'true') {
-            "Live Wallpaper Engine $version Preview"
-          } else {
-            "Live Wallpaper Engine $version"
-          }
+          $title = "Live Wallpaper Engine $version"
           $arguments = @(
             'release', 'create', $env:RELEASE_TAG,
             "$installer#Windows x64 installer",
             '.\dist\SHA256SUMS.txt#SHA-256 checksums',
             '--repo', $env:RELEASE_REPOSITORY,
             '--verify-tag', '--fail-on-no-commits', '--generate-notes',
-            '--title', $title
+            '--latest', '--title', $title
           )
-          if ($env:IS_PRERELEASE -eq 'true') {
-            $arguments += '--prerelease'
-          }
           & gh @arguments
           if ($LASTEXITCODE -ne 0) {
             throw "gh release create failed with exit code $LASTEXITCODE."
