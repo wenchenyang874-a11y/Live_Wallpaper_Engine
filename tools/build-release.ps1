@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string] $Version
+    [string] $Version,
+
+    [switch] $Unreleased
 )
 
 Set-StrictMode -Version Latest
@@ -83,9 +85,21 @@ $solution = Join-Path $repositoryRoot 'LiveWallpaperEngine.sln'
 $installerScript = Join-Path $repositoryRoot 'installer\LiveWallpaperEngine.iss'
 $releaseExecutable = Join-Path $repositoryRoot 'out\x64\Release\LiveWallpaperEngine.exe'
 $distributionDirectory = Join-Path $repositoryRoot 'dist'
-$installerName = "LiveWallpaperEngine-$Version-x64-setup.exe"
+if ($Unreleased) {
+    # Keep development packages visibly separate from immutable tagged assets.
+    # The numeric base version remains suitable for Windows version resources.
+    $displayVersion = "$Version-unreleased"
+    $outputBaseFilename = 'LiveWallpaperEngine-Unreleased-x64-setup'
+    $checksumName = 'SHA256SUMS-Unreleased.txt'
+}
+else {
+    $displayVersion = $Version
+    $outputBaseFilename = "LiveWallpaperEngine-$Version-x64-setup"
+    $checksumName = 'SHA256SUMS.txt'
+}
+$installerName = "$outputBaseFilename.exe"
 $installerPath = Join-Path $distributionDirectory $installerName
-$checksumPath = Join-Path $distributionDirectory 'SHA256SUMS.txt'
+$checksumPath = Join-Path $distributionDirectory $checksumName
 
 & $msBuild $solution /m /p:Configuration=Release /p:Platform=x64 `
     "/p:LweVersionMajor=$versionMajor" "/p:LweVersionMinor=$versionMinor" `
@@ -107,6 +121,8 @@ foreach ($artifact in @($installerPath, $checksumPath)) {
 }
 
 & $innoCompiler "/DMyAppVersion=$Version" `
+    "/DMyAppDisplayVersion=$displayVersion" `
+    "/DMyOutputBaseFilename=$outputBaseFilename" `
     "/DChineseMessagesFile=$chineseMessagesFile" $installerScript
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath)) {
     throw "Inno Setup failed to create '$installerName'."
@@ -115,5 +131,5 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $installerPath)) {
 $hash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
 Set-Content -LiteralPath $checksumPath -Value "$hash *$installerName" -Encoding ascii
 
-Write-Host "Release installer: $installerPath"
+Write-Host "Installer: $installerPath"
 Write-Host "SHA-256 manifest: $checksumPath"

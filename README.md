@@ -54,6 +54,14 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 
 安装包输出到 `dist\`，默认安装到当前用户的 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`，不请求管理员权限。`v0.x.y` 会发布为 GitHub 预发布版，`v1.0.0` 起才视为稳定正式版。
 
+日常开发中的当前代码应构建为名称明确的未发布安装包，避免与已经发布且不可变的版本资产混淆：
+
+```powershell
+.\tools\build-release.ps1 -Version 0.1.0 -Unreleased
+```
+
+若检测到相同 AppId 的已安装版本，交互式安装会询问是否覆盖，选择“否”立即退出；确认覆盖后，安装器会关闭仍在运行的旧程序再替换文件。安装目录中只有主程序、许可和说明文档以及 Inno Setup 卸载文件是正常现象：Release 程序静态链接 MSVC 运行库，D3D11、WIC 和 Media Foundation 等运行依赖由 Windows 10/11 提供，不需要附带第三方 DLL。
+
 ## 受控运行
 
 以下命令呈现十秒测试画面后自动退出：
@@ -85,6 +93,14 @@ GIF/视频回归需要传入一个 GIF 和一个系统可解码的视频：
 ```
 
 ## 常见问题（FAQ）
+
+### 导入的壁纸和程序设置存在哪里？
+
+导入操作会复制媒体文件到 `%LOCALAPPDATA%\LiveWallpaperEngine\library`，不是只保存原文件路径。设置位于 `%LOCALAPPDATA%\LiveWallpaperEngine\settings.json`，日志位于 `%LOCALAPPDATA%\LiveWallpaperEngine\logs`；覆盖安装程序不会删除这些当前用户数据。
+
+### 为什么安装目录里看起来只有一个 exe，其他电脑能运行吗？
+
+这是原生轻量化打包的预期结果。主程序已经静态包含 MSVC C/C++ 运行库，其余动态依赖都是 Windows 10/11 自带的系统 DLL；壁纸和设置属于当前用户数据，因此不会放在安装目录。发布前仍需要按兼容矩阵在干净的 Windows 10/11 x64 环境验证，当前安装包也尚未代码签名。
 
 ### 使用腾讯桌面整理后，壁纸不显示或视频一直闪烁怎么办？
 
