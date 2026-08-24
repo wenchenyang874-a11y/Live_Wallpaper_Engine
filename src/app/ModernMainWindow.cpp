@@ -399,7 +399,10 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
     }
     const core::WallpaperItem& item = items_[visibleIndices_[draw.itemID]];
     const bool selected = (draw.itemState & ODS_SELECTED) != 0;
-    const bool active = _wcsicmp(item.path.c_str(), activePath_.c_str()) == 0;
+    const bool active = std::ranges::any_of(
+        activePaths_, [&](const std::wstring& path) {
+            return _wcsicmp(item.path.c_str(), path.c_str()) == 0;
+        });
 
     RECT card = draw.rcItem;
     InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
@@ -565,9 +568,9 @@ void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
     RefreshVisibleItems();
 }
 
-void ModernMainWindow::SetActivePath(const std::wstring_view path) {
-    activePath_.assign(path);
-    EnableWindow(cancelApplication_, !activePath_.empty());
+void ModernMainWindow::SetActivePaths(std::vector<std::wstring> paths) {
+    activePaths_ = std::move(paths);
+    EnableWindow(cancelApplication_, !activePaths_.empty());
     InvalidateRect(library_, nullptr, FALSE);
 }
 

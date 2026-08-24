@@ -53,7 +53,7 @@ public:
     bool ShowDisplaySelectorMenu();
 
     void SetItems(std::vector<core::WallpaperItem> items);
-    void SetActivePath(std::wstring_view path);
+    void SetActivePaths(std::vector<std::wstring> paths);
     void SetStatus(std::wstring status);
     void SetSoundEnabled(bool enabled);
     void SetDisplayOptions(std::vector<DisplayOption> displays, bool spanDisplays);
@@ -113,7 +113,7 @@ private:
     HBRUSH panelBrush_ = nullptr;
     std::vector<core::WallpaperItem> items_;
     std::vector<std::size_t> visibleIndices_;
-    std::wstring activePath_;
+    std::vector<std::wstring> activePaths_;
     std::wstring status_ = L"准备就绪";
     std::wstring resourceUsage_ = L"CPU --  GPU --  内存 --  显存 --";
     std::wstring renamingPath_;

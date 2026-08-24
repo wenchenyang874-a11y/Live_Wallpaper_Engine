@@ -108,7 +108,8 @@ HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
                                 const HWND notificationWindow,
                                 const UINT notificationMessage,
                                 const std::wstring_view path,
-                                const bool soundEnabled) {
+                                const bool soundEnabled,
+                                const std::uint32_t notificationToken) {
     Shutdown();
     if (device == nullptr || !IsWindow(notificationWindow) ||
         notificationMessage < WM_APP || path.empty()) {
@@ -126,7 +127,8 @@ HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
         ++generation_;
     }
     EventCallback* callback = new (std::nothrow) EventCallback(
-        this, notificationWindow, notificationMessage, generation_);
+        this, notificationWindow, notificationMessage, generation_,
+        notificationToken);
     if (callback == nullptr) {
         return E_OUTOFMEMORY;
     }
@@ -203,7 +205,8 @@ HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
 }
 
 HRESULT MediaEnginePlayer::PresentFrame(
-    render::D3DRenderer& renderer, const std::span<const RECT> destinations) {
+    render::D3DRenderer& renderer, const std::span<const RECT> destinations,
+    const bool present) {
     if (!engine_ || !playing_ || destinations.empty()) {
         return S_FALSE;
     }
@@ -261,13 +264,20 @@ HRESULT MediaEnginePlayer::PresentFrame(
     const UINT transferHeight = std::max(
         2U, static_cast<UINT>(std::lround(nativeHeight_ * transferScale)) & ~1U);
 
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> transferSurface;
-    result = renderer.AcquireVideoTransferSurface(
-        transferWidth, transferHeight, transferSurface);
-    if (FAILED(result)) {
-        failed_ = true;
-        core::LogError(L"Unable to acquire the off-screen video surface.", result);
-        return result;
+    bool recreateSurface = !transferSurface_ || !transferSourceView_;
+    if (!recreateSurface) {
+        D3D11_TEXTURE2D_DESC existing{};
+        transferSurface_->GetDesc(&existing);
+        recreateSurface = existing.Width != transferWidth ||
+                          existing.Height != transferHeight;
+    }
+    if (recreateSurface) {
+        result = renderer.CreateVideoTransferSurface(
+            transferWidth, transferHeight, transferSurface_, transferSourceView_);
+        if (FAILED(result)) {
+            failed_ = true;
+            return result;
+        }
     }
 
     // Transfer once at the largest selected monitor's useful resolution.
@@ -279,7 +289,7 @@ HRESULT MediaEnginePlayer::PresentFrame(
     const RECT transferDestination{0, 0, static_cast<LONG>(transferWidth),
                                    static_cast<LONG>(transferHeight)};
     const MFARGB border{0, 0, 0, 255};
-    result = engine_->TransferVideoFrame(transferSurface.Get(), &source,
+    result = engine_->TransferVideoFrame(transferSurface_.Get(), &source,
                                          &transferDestination, &border);
     if (FAILED(result)) {
         failed_ = true;
@@ -287,8 +297,9 @@ HRESULT MediaEnginePlayer::PresentFrame(
                        result);
         return result;
     }
-    if (!renderer.CommitVideoTransferSurface(destinations, nativeWidth_,
-                                             nativeHeight_)) {
+    if (!renderer.CommitVideoTransferSurface(
+            transferSourceView_.Get(), destinations, nativeWidth_, nativeHeight_,
+            present)) {
         failed_ = true;
         return E_FAIL;
     }
@@ -430,6 +441,8 @@ void MediaEnginePlayer::Shutdown() {
     deviceManager_.Reset();
     factory_.Reset();
     callback_.Reset();
+    transferSourceView_.Reset();
+    transferSurface_.Reset();
     statisticsStartedAt_ = {};
     statisticsPauseStartedAt_ = {};
     statisticsPausedDuration_ = {};
@@ -460,8 +473,12 @@ bool MediaEnginePlayer::SoundEnabled() const noexcept {
 
 MediaEnginePlayer::EventCallback::EventCallback(
     MediaEnginePlayer* owner, const HWND window, const UINT message,
-    const std::uint32_t generation)
-    : owner_(owner), window_(window), message_(message), generation_(generation) {}
+    const std::uint32_t generation, const std::uint32_t notificationToken)
+    : owner_(owner),
+      window_(window),
+      message_(message),
+      generation_(generation),
+      notificationToken_(notificationToken) {}
 
 HRESULT STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::QueryInterface(
     REFIID interfaceId, void** object) {
@@ -493,7 +510,11 @@ ULONG STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::Release() {
 HRESULT STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::EventNotify(
     const DWORD eventCode, DWORD_PTR, DWORD) {
     if (owner_ != nullptr && IsWindow(window_)) {
-        PostMessageW(window_, message_, eventCode,
+        static_assert(sizeof(WPARAM) >= sizeof(std::uint64_t));
+        const std::uint64_t packedEvent =
+            (static_cast<std::uint64_t>(notificationToken_) << 32U) |
+            eventCode;
+        PostMessageW(window_, message_, static_cast<WPARAM>(packedEvent),
                      static_cast<LPARAM>(generation_));
     }
     return S_OK;
@@ -504,6 +525,7 @@ void MediaEnginePlayer::EventCallback::Detach() noexcept {
     window_ = nullptr;
     message_ = 0;
     generation_ = 0;
+    notificationToken_ = 0;
 }
 
 }  // namespace lwe::media::video

@@ -27,9 +27,10 @@ public:
 
     HRESULT Open(ID3D11Device* device, HWND notificationWindow,
                  UINT notificationMessage, std::wstring_view path,
-                 bool soundEnabled);
+                 bool soundEnabled, std::uint32_t notificationToken = 0);
     HRESULT PresentFrame(render::D3DRenderer& renderer,
-                         std::span<const RECT> destinations);
+                         std::span<const RECT> destinations,
+                         bool present = true);
     void HandleEvent(DWORD eventCode, std::uint32_t generation);
     HRESULT SetSoundEnabled(bool enabled);
     HRESULT SetPaused(bool paused);
@@ -44,7 +45,7 @@ private:
     class EventCallback final : public IMFMediaEngineNotify {
     public:
         EventCallback(MediaEnginePlayer* owner, HWND window, UINT message,
-                      std::uint32_t generation);
+                      std::uint32_t generation, std::uint32_t notificationToken);
 
         HRESULT STDMETHODCALLTYPE QueryInterface(REFIID interfaceId,
                                                  void** object) override;
@@ -62,12 +63,15 @@ private:
         HWND window_ = nullptr;
         UINT message_ = 0;
         std::uint32_t generation_ = 0;
+        std::uint32_t notificationToken_ = 0;
     };
 
     Microsoft::WRL::ComPtr<IMFMediaEngineClassFactory> factory_;
     Microsoft::WRL::ComPtr<IMFMediaEngine> engine_;
     Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> deviceManager_;
     Microsoft::WRL::ComPtr<EventCallback> callback_;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> transferSurface_;
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> transferSourceView_;
     UINT deviceResetToken_ = 0;
     DWORD nativeWidth_ = 0;
     DWORD nativeHeight_ = 0;

@@ -167,12 +167,12 @@ bool D3DRenderer::CreateSwapChain(const HWND targetWindow, const UINT width,
     description.BufferCount = 1;
     description.OutputWindow = targetWindow;
     description.Windowed = TRUE;
-    description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    description.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
 
-    // Windows 11 raised desktop explicitly supports DXGI BitBlt presents to a
-    // fully opaque layered child that is z-ordered between DefView and WorkerW.
-    // The former failure was caused by parenting below the WorkerW wallpaper,
-    // not by the BitBlt swap chain itself.
+    // Different displays may be updated by independent image/GIF/video
+    // sessions. BitBlt SEQUENTIAL preserves untouched back-buffer regions
+    // across Present calls, so one session cannot erase another screen. This
+    // remains compatible with the opaque Windows 11 raised-desktop child.
     result = factory->CreateSwapChain(device_.Get(), &description, &swapChain_);
     if (FAILED(result)) {
         core::LogError(L"DXGI swap chain creation failed.", result);
@@ -181,7 +181,7 @@ bool D3DRenderer::CreateSwapChain(const HWND targetWindow, const UINT width,
 
     factory->MakeWindowAssociation(
         targetWindow, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
-    core::LogInfo(L"DXGI BitBlt swap chain created for layered desktop compatibility.");
+    core::LogInfo(L"DXGI preserving BitBlt swap chain created for multi-wallpaper composition.");
     return true;
 }
 
@@ -255,8 +255,6 @@ bool D3DRenderer::Resize(const UINT width, const UINT height) {
 
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     renderTarget_.Reset();
-    videoTransferSurface_.Reset();
-    videoSourceView_.Reset();
     videoVertexBuffer_.Reset();
     videoVertexCount_ = 0;
     context_->Flush();
@@ -371,54 +369,44 @@ HRESULT D3DRenderer::AcquireBackBuffer(
     return swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
 }
 
-HRESULT D3DRenderer::AcquireVideoTransferSurface(
+HRESULT D3DRenderer::CreateVideoTransferSurface(
     const UINT sourceWidth, const UINT sourceHeight,
-    Microsoft::WRL::ComPtr<ID3D11Texture2D>& transferSurface) {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>& transferSurface,
+    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& sourceView) const {
     transferSurface.Reset();
+    sourceView.Reset();
     if (!device_ || sourceWidth == 0 || sourceHeight == 0) {
         return E_INVALIDARG;
     }
 
-    bool recreate = !videoTransferSurface_;
-    if (!recreate) {
-        D3D11_TEXTURE2D_DESC existing{};
-        videoTransferSurface_->GetDesc(&existing);
-        recreate = existing.Width != sourceWidth ||
-                   existing.Height != sourceHeight;
+    // Each concurrent video owns one transfer surface while all sessions share
+    // this renderer's D3D device, swap chain, shaders and presentation window.
+    D3D11_TEXTURE2D_DESC description{};
+    description.Width = sourceWidth;
+    description.Height = sourceHeight;
+    description.MipLevels = 1;
+    description.ArraySize = 1;
+    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    description.SampleDesc.Count = 1;
+    description.Usage = D3D11_USAGE_DEFAULT;
+    description.BindFlags =
+        D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    HRESULT result =
+        device_->CreateTexture2D(&description, nullptr, &transferSurface);
+    if (SUCCEEDED(result)) {
+        result = device_->CreateShaderResourceView(transferSurface.Get(), nullptr,
+                                                   &sourceView);
     }
-    if (recreate) {
-        videoSourceView_.Reset();
-        videoTransferSurface_.Reset();
-        // Decode and color-convert each Media Foundation frame exactly once at
-        // the largest selected monitor's useful resolution. The texture is then
-        // sampled by D3D for every selected monitor, avoiding one costly
-        // TransferVideoFrame per screen and unnecessary 4K output conversion.
-        D3D11_TEXTURE2D_DESC description{};
-        description.Width = sourceWidth;
-        description.Height = sourceHeight;
-        description.MipLevels = 1;
-        description.ArraySize = 1;
-        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        description.SampleDesc.Count = 1;
-        description.Usage = D3D11_USAGE_DEFAULT;
-        description.BindFlags =
-            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        HRESULT result = device_->CreateTexture2D(&description, nullptr,
-                                                  &videoTransferSurface_);
-        if (SUCCEEDED(result)) {
-            result = device_->CreateShaderResourceView(
-                videoTransferSurface_.Get(), nullptr, &videoSourceView_);
-        }
-        if (FAILED(result)) {
-            core::LogError(L"Unable to create the off-screen video surface.", result);
-            return result;
-        }
-        std::wostringstream message;
-        message << L"Video transfer surface created at " << sourceWidth << L'x'
-                << sourceHeight << L" for one-transfer multi-display composition.";
-        core::LogInfo(message.str());
+    if (FAILED(result)) {
+        transferSurface.Reset();
+        sourceView.Reset();
+        core::LogError(L"Unable to create a per-video transfer surface.", result);
+        return result;
     }
-    transferSurface = videoTransferSurface_;
+    std::wostringstream message;
+    message << L"Per-video transfer surface created at " << sourceWidth << L'x'
+            << sourceHeight << L'.';
+    core::LogInfo(message.str());
     return S_OK;
 }
 
@@ -513,10 +501,10 @@ bool D3DRenderer::UpdateVideoVertices(
 }
 
 bool D3DRenderer::CommitVideoTransferSurface(
+    ID3D11ShaderResourceView* const sourceView,
     const std::span<const RECT> destinations, const UINT sourceWidth,
-    const UINT sourceHeight) {
-    if (!videoTransferSurface_ || !videoSourceView_ || !context_ ||
-        destinations.empty()) {
+    const UINT sourceHeight, const bool present) {
+    if (sourceView == nullptr || !context_ || destinations.empty()) {
         return false;
     }
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
@@ -534,8 +522,6 @@ bool D3DRenderer::CommitVideoTransferSurface(
 
     ID3D11RenderTargetView* target = renderTarget_.Get();
     context_->OMSetRenderTargets(1, &target, nullptr);
-    constexpr float opaqueBlack[4]{0.0F, 0.0F, 0.0F, 1.0F};
-    context_->ClearRenderTargetView(target, opaqueBlack);
     const D3D11_VIEWPORT viewport{0.0F, 0.0F,
                                   static_cast<float>(targetDescription.Width),
                                   static_cast<float>(targetDescription.Height),
@@ -551,16 +537,15 @@ bool D3DRenderer::CommitVideoTransferSurface(
     context_->PSSetShader(videoPixelShader_.Get(), nullptr, 0);
     ID3D11SamplerState* sampler = videoSampler_.Get();
     context_->PSSetSamplers(0, 1, &sampler);
-    ID3D11ShaderResourceView* sourceView = videoSourceView_.Get();
-    context_->PSSetShaderResources(0, 1, &sourceView);
+    ID3D11ShaderResourceView* source = sourceView;
+    context_->PSSetShaderResources(0, 1, &source);
     context_->Draw(videoVertexCount_, 0);
     ID3D11ShaderResourceView* noSource = nullptr;
     context_->PSSetShaderResources(0, 1, &noSource);
 
-    // The pixel shader always writes alpha=1, and the complete set of monitor
-    // regions is submitted before the one Present call. No full-desktop
-    // intermediate texture or CopyResource is needed.
-    return PresentCurrentFrame(true);
+    // The caller can compose several due video sessions before one Present.
+    // SEQUENTIAL preserves every other image/GIF/video region.
+    return !present || PresentCurrentFrame(true);
 }
 
 bool D3DRenderer::PresentCurrentFrame(const bool synchronize) {
@@ -599,8 +584,6 @@ void D3DRenderer::Shutdown() {
         context_->Flush();
     }
     renderTarget_.Reset();
-    videoTransferSurface_.Reset();
-    videoSourceView_.Reset();
     videoVertexBuffer_.Reset();
     videoSampler_.Reset();
     videoInputLayout_.Reset();

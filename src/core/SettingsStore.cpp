@@ -260,6 +260,117 @@ std::optional<bool> ParseBooleanField(const std::wstring_view json,
     return std::nullopt;
 }
 
+std::optional<WallpaperSelectionKind> ParseWallpaperKind(
+    const std::wstring_view value) {
+    if (value == L"static_image") {
+        return WallpaperSelectionKind::StaticImage;
+    }
+    if (value == L"animated_gif") {
+        return WallpaperSelectionKind::AnimatedGif;
+    }
+    if (value == L"video") {
+        return WallpaperSelectionKind::Video;
+    }
+    if (value == L"dynamic_test") {
+        return WallpaperSelectionKind::DynamicTest;
+    }
+    return std::nullopt;
+}
+
+std::wstring_view WallpaperKindName(const WallpaperSelectionKind kind) {
+    switch (kind) {
+        case WallpaperSelectionKind::StaticImage:
+            return L"static_image";
+        case WallpaperSelectionKind::AnimatedGif:
+            return L"animated_gif";
+        case WallpaperSelectionKind::Video:
+            return L"video";
+        case WallpaperSelectionKind::DynamicTest:
+            return L"dynamic_test";
+    }
+    return L"dynamic_test";
+}
+
+std::optional<std::vector<std::wstring_view>> ParseObjectArray(
+    const std::wstring_view json, const std::wstring_view key) {
+    const std::optional start = FindValueStart(json, key);
+    if (!start.has_value() || *start >= json.size() || json[*start] != L'[') {
+        return std::nullopt;
+    }
+
+    std::vector<std::wstring_view> objects;
+    bool insideString = false;
+    bool escaped = false;
+    std::size_t objectStart = std::wstring_view::npos;
+    int objectDepth = 0;
+    for (std::size_t position = *start + 1; position < json.size(); ++position) {
+        const wchar_t character = json[position];
+        if (insideString) {
+            if (escaped) {
+                escaped = false;
+            } else if (character == L'\\') {
+                escaped = true;
+            } else if (character == L'"') {
+                insideString = false;
+            }
+            continue;
+        }
+        if (character == L'"') {
+            insideString = true;
+            continue;
+        }
+        if (character == L'{') {
+            if (objectDepth++ == 0) {
+                objectStart = position;
+            }
+            continue;
+        }
+        if (character == L'}') {
+            if (objectDepth <= 0) {
+                return std::nullopt;
+            }
+            if (--objectDepth != 0) {
+                continue;
+            }
+            objects.push_back(json.substr(objectStart, position - objectStart + 1));
+            objectStart = std::wstring_view::npos;
+            continue;
+        }
+        if (character == L']' && objectDepth == 0) {
+            return objects;
+        }
+        if (objectDepth == 0 && character != L',' && iswspace(character) == 0) {
+            return std::nullopt;
+        }
+    }
+    return std::nullopt;
+}
+
+std::optional<std::vector<WallpaperAssignmentSetting>> ParseAssignments(
+    const std::wstring_view json) {
+    const auto objects = ParseObjectArray(json, L"assignments");
+    if (!objects.has_value()) {
+        return std::nullopt;
+    }
+    std::vector<WallpaperAssignmentSetting> assignments;
+    assignments.reserve(objects->size());
+    for (const std::wstring_view object : *objects) {
+        const auto type = ParseStringField(object, L"wallpaperType");
+        const auto path = ParseStringField(object, L"wallpaperPath");
+        const auto targets = ParseStringField(object, L"displayTargets");
+        const auto span = ParseBooleanField(object, L"spanAcrossDisplays");
+        const auto kind = type.has_value() ? ParseWallpaperKind(*type) : std::nullopt;
+        if (!kind.has_value() || *kind == WallpaperSelectionKind::DynamicTest ||
+            !path.has_value() || path->empty() || !targets.has_value() ||
+            !span.has_value()) {
+            return std::nullopt;
+        }
+        assignments.push_back(
+            WallpaperAssignmentSetting{*kind, *path, *targets, *span});
+    }
+    return assignments;
+}
+
 HRESULT ReadSettingsFile(const std::wstring& path, std::wstring& json) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -367,22 +478,40 @@ std::optional<AppSettings> SettingsStore::Load() const {
     }
 
     const std::optional version = ParseVersionField(json);
-    const std::optional wallpaperType = ParseStringField(json, L"wallpaperType");
-    if (!version.has_value() || !wallpaperType.has_value() ||
-        (*version != 1 && *version != 2 &&
-         *version != AppSettings::kCurrentSchemaVersion)) {
+    if (!version.has_value() || *version < 1 ||
+        *version > AppSettings::kCurrentSchemaVersion) {
         LogWarning(L"The local settings file is invalid or uses an unsupported version.");
         return std::nullopt;
     }
 
     AppSettings settings;
     settings.schemaVersion = AppSettings::kCurrentSchemaVersion;
-    if (*version == 1) {
-        settings.wallpaperPath =
-            ParseStringField(json, L"staticImagePath").value_or(L"");
+    if (*version >= 4) {
+        const auto assignments = ParseAssignments(json);
+        if (!assignments.has_value()) {
+            LogWarning(L"The local settings file contains invalid display assignments.");
+            return std::nullopt;
+        }
+        settings.assignments = *assignments;
+        settings.displayTargets =
+            ParseStringField(json, L"selectedDisplayTargets").value_or(L"");
+        settings.spanAcrossDisplays =
+            ParseBooleanField(json, L"spanSelection").value_or(true);
+        settings.soundEnabled =
+            ParseBooleanField(json, L"soundEnabled").value_or(false);
     } else {
-        settings.wallpaperPath =
-            ParseStringField(json, L"wallpaperPath").value_or(L"");
+        const auto wallpaperType = ParseStringField(json, L"wallpaperType");
+        const auto kind = wallpaperType.has_value()
+                              ? ParseWallpaperKind(*wallpaperType)
+                              : std::nullopt;
+        if (!kind.has_value()) {
+            LogWarning(L"The legacy settings file contains an unsupported wallpaper type.");
+            return std::nullopt;
+        }
+        const std::wstring wallpaperPath =
+            *version == 1
+                ? ParseStringField(json, L"staticImagePath").value_or(L"")
+                : ParseStringField(json, L"wallpaperPath").value_or(L"");
         settings.soundEnabled =
             ParseBooleanField(json, L"soundEnabled").value_or(false);
         if (*version >= 3) {
@@ -391,20 +520,15 @@ std::optional<AppSettings> SettingsStore::Load() const {
             settings.spanAcrossDisplays =
                 ParseBooleanField(json, L"spanAcrossDisplays").value_or(true);
         }
-    }
-
-    if (*wallpaperType == L"static_image" && !settings.wallpaperPath.empty()) {
-        settings.wallpaperKind = WallpaperSelectionKind::StaticImage;
-    } else if (*wallpaperType == L"animated_gif" &&
-               !settings.wallpaperPath.empty()) {
-        settings.wallpaperKind = WallpaperSelectionKind::AnimatedGif;
-    } else if (*wallpaperType == L"video" && !settings.wallpaperPath.empty()) {
-        settings.wallpaperKind = WallpaperSelectionKind::Video;
-    } else if (*wallpaperType == L"dynamic_test") {
-        settings.wallpaperKind = WallpaperSelectionKind::DynamicTest;
-    } else {
-        LogWarning(L"The local settings file contains an unsupported wallpaper type.");
-        return std::nullopt;
+        if (*kind != WallpaperSelectionKind::DynamicTest) {
+            if (wallpaperPath.empty()) {
+                LogWarning(L"The legacy settings file has an empty wallpaper path.");
+                return std::nullopt;
+            }
+            settings.assignments.push_back(WallpaperAssignmentSetting{
+                *kind, wallpaperPath, settings.displayTargets,
+                settings.spanAcrossDisplays});
+        }
     }
 
     LogInfo(L"Loaded local wallpaper settings.");
@@ -412,37 +536,41 @@ std::optional<AppSettings> SettingsStore::Load() const {
 }
 
 HRESULT SettingsStore::Save(const AppSettings& settings) const {
-    if (settings.schemaVersion != AppSettings::kCurrentSchemaVersion ||
-        (settings.wallpaperKind != WallpaperSelectionKind::DynamicTest &&
-         settings.wallpaperPath.empty())) {
+    if (settings.schemaVersion != AppSettings::kCurrentSchemaVersion) {
         return E_INVALIDARG;
     }
-
-    std::wstring_view wallpaperType = L"dynamic_test";
-    switch (settings.wallpaperKind) {
-        case WallpaperSelectionKind::StaticImage:
-            wallpaperType = L"static_image";
-            break;
-        case WallpaperSelectionKind::AnimatedGif:
-            wallpaperType = L"animated_gif";
-            break;
-        case WallpaperSelectionKind::Video:
-            wallpaperType = L"video";
-            break;
-        case WallpaperSelectionKind::DynamicTest:
-            break;
+    for (const WallpaperAssignmentSetting& assignment : settings.assignments) {
+        if (assignment.wallpaperKind == WallpaperSelectionKind::DynamicTest ||
+            assignment.wallpaperPath.empty() ||
+            (!assignment.spanAcrossDisplays && assignment.displayTargets.empty())) {
+            return E_INVALIDARG;
+        }
     }
-    std::wstring json = L"{\r\n  \"version\": 3,\r\n  \"wallpaperType\": \"";
-    json += wallpaperType;
-    json += L"\",\r\n  \"wallpaperPath\": \"";
-    json += EscapeJsonString(settings.wallpaperPath);
-    json += L"\",\r\n  \"displayTargets\": \"";
-    json += EscapeJsonString(settings.displayTargets);
-    json += L"\",\r\n  \"spanAcrossDisplays\": ";
-    json += settings.spanAcrossDisplays ? L"true" : L"false";
-    json += L",\r\n  \"soundEnabled\": ";
+
+    std::wstring json = L"{\r\n  \"version\": 4,\r\n  \"soundEnabled\": ";
     json += settings.soundEnabled ? L"true" : L"false";
-    json += L"\r\n}\r\n";
+    json += L",\r\n  \"selectedDisplayTargets\": \"";
+    json += EscapeJsonString(settings.displayTargets);
+    json += L"\",\r\n  \"spanSelection\": ";
+    json += settings.spanAcrossDisplays ? L"true" : L"false";
+    json += L",\r\n  \"assignments\": [";
+    for (std::size_t index = 0; index < settings.assignments.size(); ++index) {
+        const WallpaperAssignmentSetting& assignment = settings.assignments[index];
+        json += index == 0 ? L"\r\n" : L",\r\n";
+        json += L"    {\"wallpaperType\": \"";
+        json += WallpaperKindName(assignment.wallpaperKind);
+        json += L"\", \"wallpaperPath\": \"";
+        json += EscapeJsonString(assignment.wallpaperPath);
+        json += L"\", \"displayTargets\": \"";
+        json += EscapeJsonString(assignment.displayTargets);
+        json += L"\", \"spanAcrossDisplays\": ";
+        json += assignment.spanAcrossDisplays ? L"true" : L"false";
+        json += L"}";
+    }
+    if (!settings.assignments.empty()) {
+        json += L"\r\n  ";
+    }
+    json += L"]\r\n}\r\n";
 
     std::wstring directory;
     std::wstring path;

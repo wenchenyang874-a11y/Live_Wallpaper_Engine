@@ -1,7 +1,10 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
+#include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,9 +39,16 @@ private:
     enum class PlaybackMode {
         Stopped,
         TechnicalTest,
-        StaticImage,
-        AnimatedGif,
-        Video,
+        Active,
+    };
+
+    struct WallpaperSession final {
+        std::uint32_t token = 0;
+        core::WallpaperAssignmentSetting assignment;
+        media::WallpaperKind kind = media::WallpaperKind::StaticImage;
+        std::vector<RECT> destinations;
+        std::unique_ptr<media::image::GifPlayer> gifPlayer;
+        std::unique_ptr<media::video::MediaEnginePlayer> videoPlayer;
     };
 
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam,
@@ -66,18 +76,22 @@ private:
     void CancelActiveWallpaper(bool persistSelection = true);
     bool ApplyWallpaper(std::wstring_view path, bool persistSelection = true,
                         bool showErrors = true);
-    HRESULT ApplyStaticImage(std::wstring_view path);
-    HRESULT ApplyAnimatedGif(std::wstring_view path);
-    HRESULT ApplyVideo(std::wstring_view path);
-    HRESULT RenderStaticImage(std::wstring_view path);
-    void StopActivePlayback();
+    bool RebuildPlaybackSessions(bool showErrors);
+    HRESULT StartWallpaperSession(WallpaperSession& session);
+    HRESULT RenderStaticImage(std::wstring_view path,
+                              std::span<const RECT> destinations);
+    void StopAllPlayback();
     void ToggleSound();
     HRESULT SaveCurrentSelection() const;
-    HRESULT SaveClearedSelection() const;
     void RefreshDisplayTargets(bool preserveSelection);
     void ApplyDisplaySelectionFromUi();
     bool ConfigureWallpaperWindowRegion();
-    void UpdateRenderDestinations();
+    std::vector<RECT> DestinationsForAssignment(
+        const core::WallpaperAssignmentSetting& assignment) const;
+    std::vector<std::wstring> ActiveWallpaperPaths() const;
+    std::wstring ActivePlaybackStatus() const;
+    bool HasDynamicPlayback() const;
+    WallpaperSession* FindSession(std::uint32_t token);
     void UpdateResourceUsage();
     void InitializePlaybackPolicy();
     void RefreshPlaybackPolicy();
@@ -111,19 +125,17 @@ private:
     HPOWERNOTIFY displayPowerNotification_ = nullptr;
     bool soundEnabled_ = false;
     PlaybackMode playbackMode_ = PlaybackMode::TechnicalTest;
-    media::WallpaperKind activeKind_ = media::WallpaperKind::StaticImage;
-    std::wstring activeWallpaperPath_;
     shell::DesktopTarget desktopTarget_{};
     std::vector<shell::DisplayTarget> displayTargets_;
     std::vector<std::wstring> selectedDisplayIds_;
-    std::vector<RECT> renderDestinations_;
+    std::vector<core::WallpaperAssignmentSetting> assignments_;
+    std::vector<std::unique_ptr<WallpaperSession>> playbackSessions_;
+    std::uint32_t nextSessionToken_ = 1;
     bool spanAcrossDisplays_ = true;
     ModernMainWindow mainWindow_;
     core::SettingsStore settingsStore_;
     core::WallpaperLibrary wallpaperLibrary_;
     media::image::WicImageLoader imageLoader_;
-    media::image::GifPlayer gifPlayer_;
-    media::video::MediaEnginePlayer videoPlayer_;
     render::D3DRenderer renderer_;
     platform::ProcessResourceMonitor resourceMonitor_;
 };

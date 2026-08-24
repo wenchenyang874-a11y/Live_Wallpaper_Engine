@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 
@@ -15,12 +16,20 @@ enum class WallpaperSelectionKind {
     Video,
 };
 
+struct WallpaperAssignmentSetting final {
+    WallpaperSelectionKind wallpaperKind = WallpaperSelectionKind::StaticImage;
+    std::wstring wallpaperPath;
+    std::wstring displayTargets;
+    bool spanAcrossDisplays = false;
+};
+
 struct AppSettings final {
-    static constexpr std::uint32_t kCurrentSchemaVersion = 3;
+    static constexpr std::uint32_t kCurrentSchemaVersion = 4;
 
     std::uint32_t schemaVersion = kCurrentSchemaVersion;
-    WallpaperSelectionKind wallpaperKind = WallpaperSelectionKind::DynamicTest;
-    std::wstring wallpaperPath;
+    std::vector<WallpaperAssignmentSetting> assignments;
+    // These fields describe the current UI target selection, not an applied
+    // wallpaper. Each applied wallpaper stores its own targets above.
     std::wstring displayTargets;
     bool soundEnabled = false;
     bool spanAcrossDisplays = true;

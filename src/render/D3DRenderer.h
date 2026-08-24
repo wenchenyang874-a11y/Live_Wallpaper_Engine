@@ -38,10 +38,14 @@ public:
     bool PresentImageRegions(std::span<const ImageRegion> regions);
     HRESULT AcquireBackBuffer(
         Microsoft::WRL::ComPtr<ID3D11Texture2D>& backBuffer) const;
-    HRESULT AcquireVideoTransferSurface(UINT sourceWidth, UINT sourceHeight,
-        Microsoft::WRL::ComPtr<ID3D11Texture2D>& transferSurface);
-    bool CommitVideoTransferSurface(std::span<const RECT> destinations,
-                                    UINT sourceWidth, UINT sourceHeight);
+    HRESULT CreateVideoTransferSurface(
+        UINT sourceWidth, UINT sourceHeight,
+        Microsoft::WRL::ComPtr<ID3D11Texture2D>& transferSurface,
+        Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>& sourceView) const;
+    bool CommitVideoTransferSurface(
+        ID3D11ShaderResourceView* sourceView,
+        std::span<const RECT> destinations, UINT sourceWidth,
+        UINT sourceHeight, bool present = true);
     bool PresentCurrentFrame(bool synchronize = true);
     [[nodiscard]] std::optional<std::uint64_t> VideoMemoryUsage() const;
     void Shutdown();
@@ -63,13 +67,11 @@ private:
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter_;
     Microsoft::WRL::ComPtr<IDXGISwapChain> swapChain_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> renderTarget_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> videoTransferSurface_;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> videoVertexShader_;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> videoPixelShader_;
     Microsoft::WRL::ComPtr<ID3D11InputLayout> videoInputLayout_;
     Microsoft::WRL::ComPtr<ID3D11Buffer> videoVertexBuffer_;
     Microsoft::WRL::ComPtr<ID3D11SamplerState> videoSampler_;
-    Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> videoSourceView_;
     UINT videoVertexCount_ = 0;
 };
 

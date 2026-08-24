@@ -39,6 +39,7 @@ constexpr int kTrayShowCommand = 2101;
 constexpr int kTraySoundCommand = 2102;
 constexpr int kTrayExitCommand = 2103;
 constexpr int kTrayCancelCommand = 2104;
+constexpr int kControlledTestSaveCommand = 2198;
 constexpr int kControlledTestExitCommand = 2199;
 constexpr int kLibraryPreviewCommand = 2200;
 constexpr int kLibraryRenameCommand = 2201;
@@ -80,16 +81,43 @@ DWORD RemainingTestMilliseconds(
         std::clamp<std::int64_t>(remaining.count(), 1, INFINITE - 1LL));
 }
 
-std::wstring PlaybackStatus(const media::WallpaperKind kind, const bool soundEnabled,
-                            const std::wstring_view path) {
-    std::wstring status = L"正在使用 · ";
-    status += media::WallpaperKindLabel(kind);
-    if (kind == media::WallpaperKind::Video) {
-        status += soundEnabled ? L" · 声音已开启" : L" · 默认静音";
+core::WallpaperSelectionKind SettingsKind(const media::WallpaperKind kind) {
+    switch (kind) {
+        case media::WallpaperKind::StaticImage:
+            return core::WallpaperSelectionKind::StaticImage;
+        case media::WallpaperKind::AnimatedGif:
+            return core::WallpaperSelectionKind::AnimatedGif;
+        case media::WallpaperKind::Video:
+            return core::WallpaperSelectionKind::Video;
     }
-    status += L" · ";
-    status += std::filesystem::path(path).filename().native();
-    return status;
+    return core::WallpaperSelectionKind::StaticImage;
+}
+
+media::WallpaperKind MediaKind(const core::WallpaperSelectionKind kind) {
+    switch (kind) {
+        case core::WallpaperSelectionKind::StaticImage:
+            return media::WallpaperKind::StaticImage;
+        case core::WallpaperSelectionKind::AnimatedGif:
+            return media::WallpaperKind::AnimatedGif;
+        case core::WallpaperSelectionKind::Video:
+            return media::WallpaperKind::Video;
+        case core::WallpaperSelectionKind::DynamicTest:
+            break;
+    }
+    return media::WallpaperKind::StaticImage;
+}
+
+bool SamePath(const std::wstring_view left, const std::wstring_view right) {
+    return CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+                                right.data(), static_cast<int>(right.size()),
+                                TRUE) == CSTR_EQUAL;
+}
+
+bool ContainsDisplayId(const std::vector<std::wstring>& identifiers,
+    const std::wstring_view identifier) {
+    return std::ranges::any_of(identifiers, [&](const std::wstring& existing) {
+        return SamePath(existing, identifier);
+    });
 }
 
 bool IsPackagePath(const std::wstring_view path) {
@@ -254,11 +282,6 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
             core::LogInfo(L"Controlled test duration completed.");
             break;
         }
-        if (playbackMode_ == PlaybackMode::Video && videoPlayer_.HasFailed()) {
-            exitCode = 1;
-            break;
-        }
-
         if (playbackMode_ == PlaybackMode::TechnicalTest && renderer_.IsInitialized()) {
             if (!renderer_.Render(elapsed)) {
                 exitCode = 1;
@@ -266,35 +289,54 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
             }
             continue;
         }
-        if (playbackMode_ == PlaybackMode::AnimatedGif &&
-            !dynamicPlaybackPaused_) {
-            if (!gifPlayer_.PresentDue(renderer_, now)) {
+        bool videoFrameComposed = false;
+        for (const auto& session : playbackSessions_) {
+            if (session->videoPlayer && session->videoPlayer->HasFailed()) {
                 exitCode = 1;
                 break;
+            }
+            if (dynamicPlaybackPaused_) {
+                continue;
+            }
+            if (session->gifPlayer &&
+                !session->gifPlayer->PresentDue(renderer_, now)) {
+                exitCode = 1;
+                break;
+            }
+            if (session->videoPlayer && session->videoPlayer->IsPlaying()) {
+                const HRESULT frameResult = session->videoPlayer->PresentFrame(
+                    renderer_, session->destinations, false);
+                if (FAILED(frameResult)) {
+                    exitCode = 1;
+                    break;
+                }
+                videoFrameComposed = videoFrameComposed || frameResult == S_OK;
             }
         }
-        if (playbackMode_ == PlaybackMode::Video &&
-            !dynamicPlaybackPaused_ && videoPlayer_.IsPlaying()) {
-            const HRESULT frameResult =
-                videoPlayer_.PresentFrame(renderer_, renderDestinations_);
-            if (FAILED(frameResult)) {
-                exitCode = 1;
-                break;
-            }
-            if (frameResult == S_OK && pendingWallpaperReveal_) {
-                ShowWindow(wallpaperWindow_, SW_SHOWNOACTIVATE);
-                pendingWallpaperReveal_ = false;
-            }
+        if (exitCode != 0) {
+            break;
+        }
+        if (videoFrameComposed && !renderer_.PresentCurrentFrame(true)) {
+            exitCode = 1;
+            break;
+        }
+        if (videoFrameComposed && pendingWallpaperReveal_) {
+            ShowWindow(wallpaperWindow_, SW_SHOWNOACTIVATE);
+            pendingWallpaperReveal_ = false;
         }
 
         DWORD waitMilliseconds = RemainingTestMilliseconds(testDuration, elapsed);
-        if (playbackMode_ == PlaybackMode::AnimatedGif &&
-            !dynamicPlaybackPaused_) {
-            waitMilliseconds =
-                std::min(waitMilliseconds, gifPlayer_.WaitMilliseconds(now));
-        }
-        if (playbackMode_ == PlaybackMode::Video && !dynamicPlaybackPaused_) {
-            waitMilliseconds = std::min(waitMilliseconds, 8UL);
+        if (!dynamicPlaybackPaused_) {
+            for (const auto& session : playbackSessions_) {
+                if (session->gifPlayer) {
+                    waitMilliseconds = std::min(
+                        waitMilliseconds,
+                        session->gifPlayer->WaitMilliseconds(now));
+                }
+                if (session->videoPlayer) {
+                    waitMilliseconds = std::min(waitMilliseconds, 8UL);
+                }
+            }
         }
 
         HANDLE handles[] = {activationEvent_};
@@ -377,7 +419,8 @@ bool WallpaperApplication::CreateWallpaperWindow() {
         return false;
     }
     RefreshDisplayTargets(true);
-    if (!ConfigureWallpaperWindowRegion() || !EnsureRenderer()) {
+    if ((!assignments_.empty() && !ConfigureWallpaperWindowRegion()) ||
+        !EnsureRenderer()) {
         return false;
     }
     ShowWindow(wallpaperWindow_, SW_SHOWNOACTIVATE);
@@ -412,12 +455,11 @@ bool WallpaperApplication::ReattachToDesktop() {
 }
 
 bool WallpaperApplication::RecoverWallpaperWindow() {
-    const std::wstring path = activeWallpaperPath_;
     if (!CreateWallpaperWindow()) {
         return false;
     }
-    if (!path.empty()) {
-        return ApplyWallpaper(path, false, false);
+    if (!assignments_.empty()) {
+        return RebuildPlaybackSessions(false);
     }
     return true;
 }
@@ -458,14 +500,14 @@ bool WallpaperApplication::RestoreSavedWallpaperSelection() {
     soundEnabled_ = settings->soundEnabled;
     selectedDisplayIds_ = SplitDisplayIds(settings->displayTargets);
     spanAcrossDisplays_ = settings->spanAcrossDisplays;
+    assignments_ = settings->assignments;
     RefreshDisplayTargets(true);
-    ConfigureWallpaperWindowRegion();
     mainWindow_.SetSoundEnabled(soundEnabled_);
-    if (settings->wallpaperKind == core::WallpaperSelectionKind::DynamicTest) {
+    if (assignments_.empty()) {
         return false;
     }
-    if (ApplyWallpaper(settings->wallpaperPath, false, false)) {
-        core::LogInfo(L"Restored the saved wallpaper selection.");
+    if (RebuildPlaybackSessions(false)) {
+        core::LogInfo(L"Restored saved per-display wallpaper assignments.");
         return true;
     }
     mainWindow_.SetStatus(
@@ -476,20 +518,19 @@ bool WallpaperApplication::RestoreSavedWallpaperSelection() {
 
 void WallpaperApplication::RefreshLibrary() {
     std::vector<core::WallpaperItem> items = wallpaperLibrary_.Scan();
-    if (!activeWallpaperPath_.empty()) {
+    for (const std::wstring& activePath : ActiveWallpaperPaths()) {
         const bool alreadyListed = std::ranges::any_of(items, [&](const auto& item) {
-            return _wcsicmp(item.path.c_str(), activeWallpaperPath_.c_str()) == 0;
+            return SamePath(item.path.native(), activePath);
         });
         std::error_code fileError;
-        if (!alreadyListed && std::filesystem::is_regular_file(activeWallpaperPath_,
-                                                                fileError) &&
+        if (!alreadyListed && std::filesystem::is_regular_file(activePath, fileError) &&
             !fileError) {
             media::MediaInfo info;
-            if (SUCCEEDED(media::ProbeMediaFile(activeWallpaperPath_, info))) {
+            if (SUCCEEDED(media::ProbeMediaFile(activePath, info))) {
                 core::WallpaperItem external;
-                external.path = activeWallpaperPath_;
+                external.path = activePath;
                 external.displayName =
-                    std::filesystem::path(activeWallpaperPath_).filename().native() +
+                    std::filesystem::path(activePath).filename().native() +
                     L"（外部）";
                 external.kind = info.kind;
                 external.formatLabel = info.formatLabel;
@@ -499,13 +540,13 @@ void WallpaperApplication::RefreshLibrary() {
                 external.external = true;
                 std::error_code error;
                 external.fileSize =
-                    std::filesystem::file_size(activeWallpaperPath_, error);
+                    std::filesystem::file_size(activePath, error);
                 items.insert(items.begin(), std::move(external));
             }
         }
     }
     mainWindow_.SetItems(std::move(items));
-    mainWindow_.SetActivePath(activeWallpaperPath_);
+    mainWindow_.SetActivePaths(ActiveWallpaperPaths());
     mainWindow_.SetSoundEnabled(soundEnabled_);
 }
 
@@ -697,17 +738,18 @@ void WallpaperApplication::CommitWallpaperRename() {
         return;
     }
     const core::WallpaperItem source = rename->first;
-    const bool wasActive = !activeWallpaperPath_.empty() &&
-                           _wcsicmp(activeWallpaperPath_.c_str(),
-                                    source.path.c_str()) == 0;
+    const bool wasActive = std::ranges::any_of(
+        assignments_, [&](const core::WallpaperAssignmentSetting& assignment) {
+            return SamePath(assignment.wallpaperPath, source.path.native());
+        });
     if (wasActive) {
-        StopActivePlayback();
+        StopAllPlayback();
     }
     core::WallpaperItem renamed;
     const HRESULT result = wallpaperLibrary_.Rename(source, rename->second, renamed);
     if (FAILED(result)) {
         if (wasActive) {
-            ApplyWallpaper(source.path.native(), false, false);
+            RebuildPlaybackSessions(false);
         }
         std::wstring message = L"壁纸重命名失败。\r\n\r\n";
         message += core::HResultMessage(result);
@@ -716,8 +758,16 @@ void WallpaperApplication::CommitWallpaperRename() {
         return;
     }
     if (wasActive) {
-        activeWallpaperPath_ = renamed.path.native();
-        ApplyWallpaper(activeWallpaperPath_, true, true);
+        for (auto& assignment : assignments_) {
+            if (SamePath(assignment.wallpaperPath, source.path.native())) {
+                assignment.wallpaperPath = renamed.path.native();
+            }
+        }
+        if (!RebuildPlaybackSessions(true) || FAILED(SaveCurrentSelection())) {
+            MessageBoxW(controlWindow_,
+                        L"壁纸已重命名，但播放状态或本地设置恢复失败。",
+                        kApplicationTitle, MB_OK | MB_ICONWARNING);
+        }
     }
     RefreshLibrary();
     mainWindow_.SetStatus(L"壁纸已重命名 · " + renamed.displayName);
@@ -766,16 +816,16 @@ void WallpaperApplication::ShowLibraryContextMenu(POINT screenPoint) {
 }
 
 void WallpaperApplication::CancelActiveWallpaper(const bool persistSelection) {
-    StopActivePlayback();
+    StopAllPlayback();
+    assignments_.clear();
     playbackMode_ = PlaybackMode::Stopped;
-    activeWallpaperPath_.clear();
     if (IsWindow(wallpaperWindow_)) {
         ShowWindow(wallpaperWindow_, SW_HIDE);
     }
-    mainWindow_.SetActivePath(L"");
+    mainWindow_.SetActivePaths({});
     mainWindow_.SetStatus(L"当前未应用壁纸 · Windows 原壁纸已恢复显示");
     RefreshLibrary();
-    if (persistSelection && FAILED(SaveClearedSelection())) {
+    if (persistSelection && FAILED(SaveCurrentSelection())) {
         MessageBoxW(controlWindow_, L"壁纸已取消，但本地设置保存失败。",
                     kApplicationTitle, MB_OK | MB_ICONWARNING);
     }
@@ -798,46 +848,79 @@ bool WallpaperApplication::ApplyWallpaper(const std::wstring_view path,
         !CreateWallpaperWindow()) {
         return false;
     }
-    if (!ConfigureWallpaperWindowRegion()) {
-        return false;
+    const auto previousAssignments = assignments_;
+    core::WallpaperAssignmentSetting newAssignment{
+        SettingsKind(info.kind), std::wstring(path),
+        JoinDisplayIds(selectedDisplayIds_), spanAcrossDisplays_};
+
+    if (spanAcrossDisplays_) {
+        assignments_.clear();
+        assignments_.push_back(std::move(newAssignment));
+    } else {
+        // Replacing selected screens must leave every other screen untouched.
+        // A former span assignment is first expanded to concrete display IDs,
+        // then the selected IDs are removed from it.
+        for (auto& assignment : assignments_) {
+            std::vector<std::wstring> identifiers =
+                assignment.spanAcrossDisplays
+                    ? std::vector<std::wstring>{}
+                    : SplitDisplayIds(assignment.displayTargets);
+            if (assignment.spanAcrossDisplays) {
+                identifiers.reserve(displayTargets_.size());
+                for (const auto& display : displayTargets_) {
+                    identifiers.push_back(display.deviceId);
+                }
+            }
+            std::erase_if(identifiers, [&](const std::wstring& identifier) {
+                return ContainsDisplayId(selectedDisplayIds_, identifier);
+            });
+            assignment.displayTargets = JoinDisplayIds(identifiers);
+            assignment.spanAcrossDisplays = false;
+        }
+        std::erase_if(assignments_, [](const auto& assignment) {
+            return !assignment.spanAcrossDisplays &&
+                   assignment.displayTargets.empty();
+        });
+
+        auto matching = std::ranges::find_if(
+            assignments_, [&](const auto& assignment) {
+                return !assignment.spanAcrossDisplays &&
+                       assignment.wallpaperKind == newAssignment.wallpaperKind &&
+                       SamePath(assignment.wallpaperPath,
+                                newAssignment.wallpaperPath);
+            });
+        if (matching == assignments_.end()) {
+            assignments_.push_back(std::move(newAssignment));
+        } else {
+            std::vector<std::wstring> identifiers =
+                SplitDisplayIds(matching->displayTargets);
+            for (const std::wstring& selectedId : selectedDisplayIds_) {
+                if (!ContainsDisplayId(identifiers, selectedId)) {
+                    identifiers.push_back(selectedId);
+                }
+            }
+            matching->displayTargets = JoinDisplayIds(identifiers);
+        }
     }
 
-    StopActivePlayback();
-    switch (info.kind) {
-        case media::WallpaperKind::StaticImage:
-            result = ApplyStaticImage(path);
-            break;
-        case media::WallpaperKind::AnimatedGif:
-            result = ApplyAnimatedGif(path);
-            break;
-        case media::WallpaperKind::Video:
-            result = ApplyVideo(path);
-            break;
-    }
-    if (FAILED(result)) {
-        playbackMode_ = PlaybackMode::TechnicalTest;
-        EnsureRenderer();
+    if (!RebuildPlaybackSessions(showErrors)) {
+        assignments_ = previousAssignments;
+        RebuildPlaybackSessions(false);
         if (showErrors) {
-            std::wstring message = L"壁纸无法加载或播放。\r\n\r\n";
-            message += core::HResultMessage(result);
-            MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
+            MessageBoxW(controlWindow_, L"壁纸无法加载或播放。",
+                        kApplicationTitle,
                         MB_OK | MB_ICONERROR);
         }
         return false;
     }
 
-    activeWallpaperPath_.assign(path);
-    activeKind_ = info.kind;
     HRESULT saveResult = S_OK;
     if (persistSelection) {
         saveResult = SaveCurrentSelection();
     }
-    mainWindow_.SetActivePath(activeWallpaperPath_);
-    mainWindow_.SetStatus(PlaybackStatus(activeKind_, soundEnabled_, path));
+    mainWindow_.SetActivePaths(ActiveWallpaperPaths());
+    mainWindow_.SetStatus(ActivePlaybackStatus());
     mainWindow_.SetSoundEnabled(soundEnabled_);
-    if (info.kind != media::WallpaperKind::Video) {
-        ShowWindow(wallpaperWindow_, SW_SHOWNOACTIVATE);
-    }
     RefreshLibrary();
 
     if (persistSelection && FAILED(saveResult) && showErrors) {
@@ -847,72 +930,122 @@ bool WallpaperApplication::ApplyWallpaper(const std::wstring_view path,
     return true;
 }
 
-HRESULT WallpaperApplication::ApplyStaticImage(const std::wstring_view path) {
+bool WallpaperApplication::RebuildPlaybackSessions(const bool showErrors) {
+    StopAllPlayback();
+    if (assignments_.empty()) {
+        playbackMode_ = PlaybackMode::Stopped;
+        if (IsWindow(wallpaperWindow_)) {
+            ShowWindow(wallpaperWindow_, SW_HIDE);
+        }
+        return true;
+    }
     if (!EnsureRenderer()) {
-        return E_FAIL;
+        return false;
     }
-    const HRESULT result = RenderStaticImage(path);
-    if (SUCCEEDED(result)) {
-        playbackMode_ = PlaybackMode::StaticImage;
-        core::LogInfo(L"Static overlay mode activated after one presented frame.");
+    if (!ConfigureWallpaperWindowRegion()) {
+        return false;
     }
-    return result;
+
+    bool presentedImmediately = false;
+    for (const auto& assignment : assignments_) {
+        auto session = std::make_unique<WallpaperSession>();
+        session->token = nextSessionToken_++;
+        if (nextSessionToken_ == 0) {
+            nextSessionToken_ = 1;
+        }
+        session->assignment = assignment;
+        session->kind = MediaKind(assignment.wallpaperKind);
+        session->destinations = DestinationsForAssignment(assignment);
+        if (session->destinations.empty()) {
+            continue;
+        }
+        const HRESULT result = StartWallpaperSession(*session);
+        if (FAILED(result)) {
+            StopAllPlayback();
+            if (showErrors) {
+                std::wstring message = L"壁纸会话启动失败。\r\n\r\n";
+                message += core::HResultMessage(result);
+                MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
+                            MB_OK | MB_ICONERROR);
+            }
+            return false;
+        }
+        std::wstring sessionMessage =
+            L"Wallpaper session " + std::to_wstring(session->token) + L" started: ";
+        sessionMessage += media::WallpaperKindLabel(session->kind);
+        sessionMessage += L", targets=";
+        sessionMessage += assignment.spanAcrossDisplays
+                              ? std::wstring(L"span_all")
+                              : assignment.displayTargets;
+        core::LogInfo(sessionMessage);
+        presentedImmediately = presentedImmediately ||
+                               session->kind != media::WallpaperKind::Video;
+        playbackSessions_.push_back(std::move(session));
+    }
+    if (playbackSessions_.empty()) {
+        return false;
+    }
+    playbackMode_ = PlaybackMode::Active;
+    pendingWallpaperReveal_ =
+        !presentedImmediately && !IsWindowVisible(wallpaperWindow_);
+    if (presentedImmediately) {
+        ShowWindow(wallpaperWindow_, SW_SHOWNOACTIVATE);
+    }
+    RefreshPlaybackPolicy();
+    return true;
 }
 
-HRESULT WallpaperApplication::ApplyAnimatedGif(const std::wstring_view path) {
-    if (!EnsureRenderer()) {
-        return E_FAIL;
+HRESULT WallpaperApplication::StartWallpaperSession(WallpaperSession& session) {
+    if (session.destinations.empty()) {
+        return E_INVALIDARG;
     }
-    RECT client{};
-    if (!GetClientRect(wallpaperWindow_, &client)) {
-        return HRESULT_FROM_WIN32(GetLastError());
+    if (session.kind == media::WallpaperKind::StaticImage) {
+        const HRESULT result = RenderStaticImage(
+            session.assignment.wallpaperPath, session.destinations);
+        if (SUCCEEDED(result)) {
+            core::LogInfo(L"Static wallpaper session presented one frame.");
+        }
+        return result;
     }
-    HRESULT result = gifPlayer_.Load(path, static_cast<UINT>(client.right),
-                                     static_cast<UINT>(client.bottom));
-    if (SUCCEEDED(result)) {
-        gifPlayer_.SetTargetRects(renderDestinations_);
+    if (session.kind == media::WallpaperKind::AnimatedGif) {
+        RECT client{};
+        if (!GetClientRect(wallpaperWindow_, &client)) {
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+        session.gifPlayer = std::make_unique<media::image::GifPlayer>();
+        HRESULT result = session.gifPlayer->Load(
+            session.assignment.wallpaperPath, static_cast<UINT>(client.right),
+            static_cast<UINT>(client.bottom));
+        if (SUCCEEDED(result)) {
+            session.gifPlayer->SetTargetRects(session.destinations);
+        }
+        if (SUCCEEDED(result) && !session.gifPlayer->PresentDue(
+                                     renderer_, std::chrono::steady_clock::now())) {
+            result = E_FAIL;
+        }
+        if (SUCCEEDED(result)) {
+            core::LogInfo(L"Animated GIF overlay mode activated.");
+        }
+        return result;
     }
-    if (SUCCEEDED(result) &&
-        !gifPlayer_.PresentDue(renderer_, std::chrono::steady_clock::now())) {
-        result = E_FAIL;
-    }
-    if (SUCCEEDED(result)) {
-        playbackMode_ = PlaybackMode::AnimatedGif;
-        core::LogInfo(L"Animated GIF overlay mode activated.");
-        RefreshPlaybackPolicy();
-    }
-    return result;
-}
-
-HRESULT WallpaperApplication::ApplyVideo(const std::wstring_view path) {
     if (!mediaFoundationStarted_) {
         return MF_E_PLATFORM_NOT_INITIALIZED;
     }
-    if (!EnsureRenderer()) {
-        return E_FAIL;
-    }
-    // Keep the existing swap chain alive while media is prepared. Destroying
-    // and recreating the HWND renderer on every video switch exposed the system
-    // wallpaper between frames and produced the user's continuous flashing.
-    const HRESULT result = videoPlayer_.Open(renderer_.Device(), controlWindow_,
-                                              kMediaEngineEventMessage, path,
-                                              soundEnabled_);
-    if (SUCCEEDED(result)) {
-        playbackMode_ = PlaybackMode::Video;
-        pendingWallpaperReveal_ = !IsWindowVisible(wallpaperWindow_);
-        RefreshPlaybackPolicy();
-    }
-    return result;
+    session.videoPlayer = std::make_unique<media::video::MediaEnginePlayer>();
+    return session.videoPlayer->Open(
+        renderer_.Device(), controlWindow_, kMediaEngineEventMessage,
+        session.assignment.wallpaperPath, soundEnabled_, session.token);
 }
 
-HRESULT WallpaperApplication::RenderStaticImage(const std::wstring_view path) {
+HRESULT WallpaperApplication::RenderStaticImage(
+    const std::wstring_view path, const std::span<const RECT> destinations) {
     if (!renderer_.IsInitialized() || wallpaperWindow_ == nullptr) {
         return E_UNEXPECTED;
     }
     std::vector<media::image::DecodedImage> images;
-    images.reserve(renderDestinations_.size());
+    images.reserve(destinations.size());
     HRESULT result = S_OK;
-    for (const RECT& destination : renderDestinations_) {
+    for (const RECT& destination : destinations) {
         const LONG width = destination.right - destination.left;
         const LONG height = destination.bottom - destination.top;
         if (width <= 0 || height <= 0) {
@@ -930,7 +1063,7 @@ HRESULT WallpaperApplication::RenderStaticImage(const std::wstring_view path) {
     regions.reserve(images.size());
     for (std::size_t index = 0; index < images.size(); ++index) {
         const auto& image = images[index];
-        const RECT& destination = renderDestinations_[index];
+        const RECT& destination = destinations[index];
         regions.push_back(render::ImageRegion{
             image.pixels, image.width, image.height, image.stride,
             destination.left, destination.top});
@@ -941,27 +1074,44 @@ HRESULT WallpaperApplication::RenderStaticImage(const std::wstring_view path) {
     return result;
 }
 
-void WallpaperApplication::StopActivePlayback() {
-    gifPlayer_.Reset();
-    videoPlayer_.Shutdown();
+void WallpaperApplication::StopAllPlayback() {
+    for (const auto& session : playbackSessions_) {
+        if (session->gifPlayer) {
+            session->gifPlayer->Reset();
+        }
+        if (session->videoPlayer) {
+            session->videoPlayer->Shutdown();
+        }
+    }
+    playbackSessions_.clear();
     dynamicPlaybackPaused_ = false;
     pendingWallpaperReveal_ = false;
 }
 
 void WallpaperApplication::ToggleSound() {
     soundEnabled_ = !soundEnabled_;
-    const HRESULT result = videoPlayer_.SetSoundEnabled(soundEnabled_);
-    if (FAILED(result)) {
+    bool failed = false;
+    for (const auto& session : playbackSessions_) {
+        if (session->videoPlayer &&
+            FAILED(session->videoPlayer->SetSoundEnabled(soundEnabled_))) {
+            failed = true;
+        }
+    }
+    if (failed) {
         soundEnabled_ = !soundEnabled_;
+        for (const auto& session : playbackSessions_) {
+            if (session->videoPlayer) {
+                session->videoPlayer->SetSoundEnabled(soundEnabled_);
+            }
+        }
         MessageBoxW(controlWindow_, L"无法更改当前视频的声音状态。",
                     kApplicationTitle, MB_OK | MB_ICONERROR);
         return;
     }
     mainWindow_.SetSoundEnabled(soundEnabled_);
-    if (!controlledTestMode_ && !activeWallpaperPath_.empty()) {
+    if (!controlledTestMode_ && !assignments_.empty()) {
         SaveCurrentSelection();
-        mainWindow_.SetStatus(
-            PlaybackStatus(activeKind_, soundEnabled_, activeWallpaperPath_));
+        mainWindow_.SetStatus(ActivePlaybackStatus());
     } else {
         mainWindow_.SetStatus(soundEnabled_ ? L"声音已开启 · 将应用到后续视频壁纸"
                                            : L"声音已关闭 · 视频默认静音");
@@ -969,31 +1119,8 @@ void WallpaperApplication::ToggleSound() {
 }
 
 HRESULT WallpaperApplication::SaveCurrentSelection() const {
-    if (activeWallpaperPath_.empty()) {
-        return E_UNEXPECTED;
-    }
     core::AppSettings settings;
-    settings.wallpaperPath = activeWallpaperPath_;
-    settings.soundEnabled = soundEnabled_;
-    settings.displayTargets = JoinDisplayIds(selectedDisplayIds_);
-    settings.spanAcrossDisplays = spanAcrossDisplays_;
-    switch (activeKind_) {
-        case media::WallpaperKind::StaticImage:
-            settings.wallpaperKind = core::WallpaperSelectionKind::StaticImage;
-            break;
-        case media::WallpaperKind::AnimatedGif:
-            settings.wallpaperKind = core::WallpaperSelectionKind::AnimatedGif;
-            break;
-        case media::WallpaperKind::Video:
-            settings.wallpaperKind = core::WallpaperSelectionKind::Video;
-            break;
-    }
-    return settingsStore_.Save(settings);
-}
-
-HRESULT WallpaperApplication::SaveClearedSelection() const {
-    core::AppSettings settings;
-    settings.wallpaperKind = core::WallpaperSelectionKind::DynamicTest;
+    settings.assignments = assignments_;
     settings.soundEnabled = soundEnabled_;
     settings.displayTargets = JoinDisplayIds(selectedDisplayIds_);
     settings.spanAcrossDisplays = spanAcrossDisplays_;
@@ -1045,63 +1172,55 @@ void WallpaperApplication::RefreshDisplayTargets(const bool preserveSelection) {
         options.push_back(std::move(option));
     }
     mainWindow_.SetDisplayOptions(std::move(options), spanAcrossDisplays_);
-    UpdateRenderDestinations();
 }
 
 void WallpaperApplication::ApplyDisplaySelectionFromUi() {
     selectedDisplayIds_ = mainWindow_.SelectedDisplayIds();
     spanAcrossDisplays_ = mainWindow_.SpanAcrossDisplays();
-    if (!ConfigureWallpaperWindowRegion()) {
-        mainWindow_.SetStatus(L"无法更新显示器布局");
-        return;
-    }
-    if (!activeWallpaperPath_.empty()) {
-        const std::wstring path = activeWallpaperPath_;
-        if (ApplyWallpaper(path, false, true)) {
-            SaveCurrentSelection();
-        }
-    } else {
-        SaveClearedSelection();
+    if (FAILED(SaveCurrentSelection())) {
+        mainWindow_.SetStatus(L"显示位置已选择，但本地设置保存失败");
     }
 }
 
-void WallpaperApplication::UpdateRenderDestinations() {
-    renderDestinations_.clear();
+std::vector<RECT> WallpaperApplication::DestinationsForAssignment(
+    const core::WallpaperAssignmentSetting& assignment) const {
+    std::vector<RECT> destinations;
     if (!IsWindow(wallpaperWindow_)) {
-        return;
+        return destinations;
     }
     RECT client{};
     if (!GetClientRect(wallpaperWindow_, &client)) {
-        return;
+        return destinations;
     }
-    if (spanAcrossDisplays_) {
-        renderDestinations_.push_back(client);
-        return;
+    if (assignment.spanAcrossDisplays) {
+        destinations.push_back(client);
+        return destinations;
     }
 
+    const std::vector<std::wstring> identifiers =
+        SplitDisplayIds(assignment.displayTargets);
     for (const shell::DisplayTarget& display : displayTargets_) {
-        const bool selected = std::ranges::any_of(
-            selectedDisplayIds_, [&](const std::wstring& identifier) {
-                return _wcsicmp(identifier.c_str(), display.deviceId.c_str()) == 0;
-            });
+        const bool selected = ContainsDisplayId(identifiers, display.deviceId);
         RECT clipped{};
         if (selected && IntersectRect(&clipped, &client, &display.clientBounds) &&
             !IsRectEmpty(&clipped)) {
-            renderDestinations_.push_back(clipped);
+            destinations.push_back(clipped);
         }
     }
-    if (renderDestinations_.empty()) {
-        renderDestinations_.push_back(client);
-        spanAcrossDisplays_ = true;
-    }
+    return destinations;
 }
 
 bool WallpaperApplication::ConfigureWallpaperWindowRegion() {
     if (!IsWindow(wallpaperWindow_)) {
         return false;
     }
-    UpdateRenderDestinations();
-    if (renderDestinations_.empty()) {
+    std::vector<RECT> activeDestinations;
+    for (const auto& assignment : assignments_) {
+        std::vector<RECT> destinations = DestinationsForAssignment(assignment);
+        activeDestinations.insert(activeDestinations.end(), destinations.begin(),
+                                  destinations.end());
+    }
+    if (activeDestinations.empty()) {
         return false;
     }
 
@@ -1109,7 +1228,7 @@ bool WallpaperApplication::ConfigureWallpaperWindowRegion() {
     if (combined == nullptr) {
         return false;
     }
-    for (const RECT& destination : renderDestinations_) {
+    for (const RECT& destination : activeDestinations) {
         HRGN part = CreateRectRgn(destination.left, destination.top,
                                   destination.right, destination.bottom);
         if (part == nullptr || CombineRgn(combined, combined, part, RGN_OR) == ERROR) {
@@ -1121,17 +1240,83 @@ bool WallpaperApplication::ConfigureWallpaperWindowRegion() {
         }
         DeleteObject(part);
     }
-    // SetWindowRgn takes ownership only on success. The complex region allows
-    // one decoder and one D3D device to target any subset of monitors while the
-    // untouched monitors continue showing the original Windows wallpaper.
+    // SetWindowRgn takes ownership only on success. The union contains every
+    // assigned screen while unassigned displays reveal the Windows wallpaper.
     if (SetWindowRgn(wallpaperWindow_, combined, TRUE) == 0) {
         DeleteObject(combined);
         core::LogError(L"Unable to apply the selected display region.",
                        HRESULT_FROM_WIN32(GetLastError()));
         return false;
     }
-    gifPlayer_.SetTargetRects(renderDestinations_);
     return true;
+}
+
+std::vector<std::wstring> WallpaperApplication::ActiveWallpaperPaths() const {
+    std::vector<std::wstring> paths;
+    paths.reserve(assignments_.size());
+    for (const auto& assignment : assignments_) {
+        if (!std::ranges::any_of(paths, [&](const std::wstring& existing) {
+                return SamePath(existing, assignment.wallpaperPath);
+            })) {
+            paths.push_back(assignment.wallpaperPath);
+        }
+    }
+    return paths;
+}
+
+std::wstring WallpaperApplication::ActivePlaybackStatus() const {
+    if (assignments_.empty()) {
+        return L"当前未应用壁纸 · Windows 原壁纸已恢复显示";
+    }
+    std::vector<std::wstring> assignedDisplays;
+    for (const auto& assignment : assignments_) {
+        if (assignment.spanAcrossDisplays) {
+            assignedDisplays.clear();
+            for (const auto& display : displayTargets_) {
+                assignedDisplays.push_back(display.deviceId);
+            }
+            break;
+        }
+        for (const std::wstring& identifier :
+             SplitDisplayIds(assignment.displayTargets)) {
+            if (!ContainsDisplayId(assignedDisplays, identifier)) {
+                assignedDisplays.push_back(identifier);
+            }
+        }
+    }
+    if (assignments_.size() == 1) {
+        const auto& assignment = assignments_.front();
+        std::wstring status = L"正在使用 · ";
+        status += media::WallpaperKindLabel(MediaKind(assignment.wallpaperKind));
+        if (assignment.wallpaperKind == core::WallpaperSelectionKind::Video) {
+            status += soundEnabled_ ? L" · 声音已开启" : L" · 默认静音";
+        }
+        status += L" · ";
+        status += std::filesystem::path(assignment.wallpaperPath).filename().native();
+        status += L" · ";
+        status += assignment.spanAcrossDisplays
+                      ? L"跨屏扩展"
+                      : std::to_wstring(assignedDisplays.size()) + L" 个屏幕";
+        return status;
+    }
+    return L"正在使用 · " + std::to_wstring(ActiveWallpaperPaths().size()) +
+           L" 张壁纸 · " + std::to_wstring(assignedDisplays.size()) +
+           L" 个屏幕";
+}
+
+bool WallpaperApplication::HasDynamicPlayback() const {
+    return std::ranges::any_of(playbackSessions_, [](const auto& session) {
+        return session->gifPlayer || session->videoPlayer;
+    });
+}
+
+WallpaperApplication::WallpaperSession* WallpaperApplication::FindSession(
+    const std::uint32_t token) {
+    const auto found = std::ranges::find_if(
+        playbackSessions_, [&](const auto& session) {
+            return session->token == token;
+        });
+    return found == playbackSessions_.end() ? nullptr : found->get();
 }
 
 void WallpaperApplication::UpdateResourceUsage() {
@@ -1181,16 +1366,21 @@ void WallpaperApplication::RefreshPlaybackPolicy() {
                         (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
                          state == QUNS_PRESENTATION_MODE);
 
-    const bool dynamic = playbackMode_ == PlaybackMode::AnimatedGif ||
-                         playbackMode_ == PlaybackMode::Video;
+    const bool dynamic = HasDynamicPlayback();
     const std::wstring reason = PlaybackPauseReason();
     const bool shouldPause = dynamic && !reason.empty();
     if (shouldPause == dynamicPlaybackPaused_) {
         return;
     }
 
-    if (playbackMode_ == PlaybackMode::Video &&
-        FAILED(videoPlayer_.SetPaused(shouldPause))) {
+    bool pauseFailed = false;
+    for (const auto& session : playbackSessions_) {
+        if (session->videoPlayer &&
+            FAILED(session->videoPlayer->SetPaused(shouldPause))) {
+            pauseFailed = true;
+        }
+    }
+    if (pauseFailed) {
         core::LogWarning(L"Unable to change video playback for the pause policy.");
         return;
     }
@@ -1199,8 +1389,7 @@ void WallpaperApplication::RefreshPlaybackPolicy() {
         mainWindow_.SetStatus(L"动态壁纸已暂停 · " + reason);
         core::LogInfo(L"Dynamic wallpaper paused: " + reason);
     } else {
-        mainWindow_.SetStatus(
-            PlaybackStatus(activeKind_, soundEnabled_, activeWallpaperPath_));
+        mainWindow_.SetStatus(ActivePlaybackStatus());
         core::LogInfo(L"Dynamic wallpaper resumed after pause policy cleared.");
     }
 }
@@ -1228,7 +1417,7 @@ void WallpaperApplication::ShowTrayMenu() {
     AppendMenuW(menu, MF_STRING, kTrayImportCommand, L"导入壁纸...");
     AppendMenuW(menu, MF_STRING | (soundEnabled_ ? MF_CHECKED : 0),
                 kTraySoundCommand, L"视频声音");
-    AppendMenuW(menu, MF_STRING | (activeWallpaperPath_.empty() ? MF_GRAYED : 0),
+    AppendMenuW(menu, MF_STRING | (assignments_.empty() ? MF_GRAYED : 0),
                 kTrayCancelCommand, L"取消应用当前壁纸");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kTrayExitCommand, L"退出");
@@ -1267,13 +1456,18 @@ void WallpaperApplication::ResizeRendererToWindow() {
     if (renderer_.IsInitialized() && !renderer_.Resize(width, height)) {
         return;
     }
-    UpdateRenderDestinations();
-    if (playbackMode_ == PlaybackMode::StaticImage &&
-        !activeWallpaperPath_.empty()) {
-        RenderStaticImage(activeWallpaperPath_);
-    } else if (playbackMode_ == PlaybackMode::AnimatedGif) {
-        gifPlayer_.Resize(width, height);
-        gifPlayer_.SetTargetRects(renderDestinations_);
+    if (!assignments_.empty()) {
+        ConfigureWallpaperWindowRegion();
+    }
+    for (const auto& session : playbackSessions_) {
+        session->destinations = DestinationsForAssignment(session->assignment);
+        if (session->kind == media::WallpaperKind::StaticImage) {
+            RenderStaticImage(session->assignment.wallpaperPath,
+                              session->destinations);
+        } else if (session->gifPlayer) {
+            session->gifPlayer->Resize(width, height);
+            session->gifPlayer->SetTargetRects(session->destinations);
+        }
     }
 }
 
@@ -1304,8 +1498,7 @@ void WallpaperApplication::Shutdown() {
         sessionNotificationsRegistered_ = false;
     }
     RemoveTrayIcon();
-    gifPlayer_.Reset();
-    videoPlayer_.Shutdown();
+    StopAllPlayback();
     renderer_.Shutdown();
 
     if (wallpaperWindow_ != nullptr && IsWindow(wallpaperWindow_)) {
@@ -1375,6 +1568,16 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 if (controlledTestMode_ &&
                     identifier == kControlledTestExitCommand) {
                     RequestExit();
+                    return 0;
+                }
+                if (controlledTestMode_ &&
+                    identifier == kControlledTestSaveCommand) {
+                    const HRESULT result = SaveCurrentSelection();
+                    if (SUCCEEDED(result)) {
+                        core::LogInfo(L"CONTROLLED_SETTINGS_SAVE=True");
+                    } else {
+                        core::LogError(L"Controlled settings save failed.", result);
+                    }
                     return 0;
                 }
                 if (mainWindow_.HandleFilterCommand(identifier, notification)) {
@@ -1560,12 +1763,17 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 return 0;
 
             case kMediaEngineEventMessage:
-                videoPlayer_.HandleEvent(static_cast<DWORD>(wParam),
-                                         static_cast<std::uint32_t>(lParam));
-                if (videoPlayer_.IsPlaying() &&
-                    playbackMode_ == PlaybackMode::Video) {
-                    mainWindow_.SetStatus(PlaybackStatus(
-                        activeKind_, soundEnabled_, activeWallpaperPath_));
+                if (WallpaperSession* session = FindSession(
+                        static_cast<std::uint32_t>(
+                            static_cast<std::uint64_t>(wParam) >> 32U));
+                    session != nullptr && session->videoPlayer) {
+                    session->videoPlayer->HandleEvent(
+                        static_cast<DWORD>(static_cast<std::uint64_t>(wParam) &
+                                           0xffffffffULL),
+                        static_cast<std::uint32_t>(lParam));
+                    if (session->videoPlayer->IsPlaying()) {
+                        mainWindow_.SetStatus(ActivePlaybackStatus());
+                    }
                 }
                 return 0;
 
@@ -1612,8 +1820,7 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
             }
             case WM_DESTROY:
                 wallpaperWindow_ = nullptr;
-                gifPlayer_.Reset();
-                videoPlayer_.Shutdown();
+                StopAllPlayback();
                 renderer_.Shutdown();
                 if (!shuttingDown_ && controlWindow_ != nullptr) {
                     core::LogWarning(
