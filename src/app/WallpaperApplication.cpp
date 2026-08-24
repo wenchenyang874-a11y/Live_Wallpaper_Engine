@@ -186,7 +186,7 @@ WallpaperApplication::~WallpaperApplication() {
 }
 
 int WallpaperApplication::Run(const std::chrono::seconds testDuration,
-                              const std::optional<std::wstring>& testWallpaper) {
+                              const std::vector<std::wstring>& testWallpapers) {
     controlledTestMode_ = testDuration.count() > 0;
     // Tencent DeskGo and other desktop organizers use this established signal
     // to stop painting an opaque copy of the Windows wallpaper above live
@@ -227,8 +227,8 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
     UpdateResourceUsage();
 
     bool wallpaperApplied = false;
-    if (testWallpaper.has_value()) {
-        wallpaperApplied = ApplyWallpaper(*testWallpaper, false, false);
+    if (!testWallpapers.empty()) {
+        wallpaperApplied = ApplyWallpaper(testWallpapers.front(), false, false);
         if (!wallpaperApplied) {
             Shutdown();
             return 1;
@@ -253,6 +253,8 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
     }
 
     const auto startedAt = std::chrono::steady_clock::now();
+    auto nextControlledSwitchAt = startedAt + std::chrono::milliseconds(200);
+    std::size_t nextControlledWallpaper = 1;
     int exitCode = 0;
     running_ = true;
     ShowControlWindow();
@@ -282,6 +284,19 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
             core::LogInfo(L"Controlled test duration completed.");
             break;
         }
+        if (testWallpapers.size() > 1 && now >= nextControlledSwitchAt) {
+            const std::wstring& nextPath =
+                testWallpapers[nextControlledWallpaper % testWallpapers.size()];
+            if (!ApplyWallpaper(nextPath, false, false)) {
+                core::LogError(L"Controlled wallpaper switching failed: " + nextPath);
+                exitCode = 1;
+                break;
+            }
+            ++nextControlledWallpaper;
+            nextControlledSwitchAt = now + std::chrono::milliseconds(200);
+            core::LogInfo(L"Controlled wallpaper switch completed; count=" +
+                          std::to_wstring(nextControlledWallpaper - 1) + L'.');
+        }
         if (playbackMode_ == PlaybackMode::TechnicalTest && renderer_.IsInitialized()) {
             if (!renderer_.Render(elapsed)) {
                 exitCode = 1;
@@ -289,12 +304,12 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
             }
             continue;
         }
+        if (RemoveFailedPlaybackSessions()) {
+            continue;
+        }
         bool videoFrameComposed = false;
+        bool videoSessionFailed = false;
         for (const auto& session : playbackSessions_) {
-            if (session->videoPlayer && session->videoPlayer->HasFailed()) {
-                exitCode = 1;
-                break;
-            }
             if (dynamicPlaybackPaused_) {
                 continue;
             }
@@ -307,11 +322,18 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
                 const HRESULT frameResult = session->videoPlayer->PresentFrame(
                     renderer_, session->destinations, false);
                 if (FAILED(frameResult)) {
-                    exitCode = 1;
+                    videoSessionFailed = true;
                     break;
                 }
                 videoFrameComposed = videoFrameComposed || frameResult == S_OK;
             }
+        }
+        if (videoSessionFailed) {
+            if (!RemoveFailedPlaybackSessions()) {
+                exitCode = 1;
+                break;
+            }
+            continue;
         }
         if (exitCode != 0) {
             break;
@@ -633,7 +655,8 @@ void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths) {
     }
 
     if (!importedItems.empty()) {
-        ApplyWallpaper(importedItems.front().path.native(), true, true);
+        ApplyWallpaperWithTargetPrompt(importedItems.front().path.native(), true,
+                                       true);
     }
     RefreshLibrary();
 
@@ -711,7 +734,16 @@ void WallpaperApplication::ApplySelectedWallpaper() {
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    ApplyWallpaper(selected->path.native());
+    ApplyWallpaperWithTargetPrompt(selected->path.native());
+}
+
+bool WallpaperApplication::ApplyWallpaperWithTargetPrompt(
+    const std::wstring_view path, const bool persistSelection,
+    const bool showErrors) {
+    if (!ChooseApplicationTargets()) {
+        return false;
+    }
+    return ApplyWallpaper(path, persistSelection, showErrors);
 }
 
 void WallpaperApplication::PreviewSelectedWallpaper() {
@@ -1088,6 +1120,63 @@ void WallpaperApplication::StopAllPlayback() {
     pendingWallpaperReveal_ = false;
 }
 
+bool WallpaperApplication::RemoveFailedPlaybackSessions() {
+    std::vector<core::WallpaperAssignmentSetting> failedAssignments;
+    for (const auto& session : playbackSessions_) {
+        if (session->videoPlayer && session->videoPlayer->HasFailed()) {
+            failedAssignments.push_back(session->assignment);
+        }
+    }
+    if (failedAssignments.empty()) {
+        return false;
+    }
+
+    // A decoder failure belongs to one wallpaper assignment. Keeping the
+    // control window and unrelated display sessions alive prevents a bad or
+    // transient video event from looking like an application crash.
+    std::erase_if(playbackSessions_, [&](const auto& session) {
+        const bool failed = session->videoPlayer && session->videoPlayer->HasFailed();
+        if (failed) {
+            session->videoPlayer->Shutdown();
+        }
+        return failed;
+    });
+    const auto assignmentFailed = [&](const auto& assignment) {
+        return std::ranges::any_of(
+            failedAssignments, [&](const auto& failed) {
+                return assignment.wallpaperKind == failed.wallpaperKind &&
+                       assignment.spanAcrossDisplays == failed.spanAcrossDisplays &&
+                       SamePath(assignment.wallpaperPath, failed.wallpaperPath) &&
+                       SamePath(assignment.displayTargets, failed.displayTargets);
+            });
+    };
+    std::erase_if(assignments_, assignmentFailed);
+
+    if (assignments_.empty()) {
+        playbackMode_ = PlaybackMode::Stopped;
+        pendingWallpaperReveal_ = false;
+        if (IsWindow(wallpaperWindow_)) {
+            ShowWindow(wallpaperWindow_, SW_HIDE);
+        }
+    } else {
+        playbackMode_ = PlaybackMode::Active;
+        ConfigureWallpaperWindowRegion();
+    }
+    mainWindow_.SetActivePaths(ActiveWallpaperPaths());
+    mainWindow_.SetStatus(
+        assignments_.empty()
+            ? L"视频播放失败，已停止该壁纸 · 程序仍在运行"
+            : L"一个视频播放失败并已停止 · 其他屏幕继续运行");
+    RefreshLibrary();
+    if (!controlledTestMode_ && FAILED(SaveCurrentSelection())) {
+        core::LogWarning(
+            L"Failed video assignment was removed but settings could not be saved.");
+    }
+    core::LogWarning(
+        L"Contained a video playback failure without exiting the application.");
+    return true;
+}
+
 void WallpaperApplication::ToggleSound() {
     soundEnabled_ = !soundEnabled_;
     bool failed = false;
@@ -1174,12 +1263,40 @@ void WallpaperApplication::RefreshDisplayTargets(const bool preserveSelection) {
     mainWindow_.SetDisplayOptions(std::move(options), spanAcrossDisplays_);
 }
 
-void WallpaperApplication::ApplyDisplaySelectionFromUi() {
-    selectedDisplayIds_ = mainWindow_.SelectedDisplayIds();
+void WallpaperApplication::ApplyDisplayModeFromUi() {
     spanAcrossDisplays_ = mainWindow_.SpanAcrossDisplays();
     if (FAILED(SaveCurrentSelection())) {
-        mainWindow_.SetStatus(L"显示位置已选择，但本地设置保存失败");
+        mainWindow_.SetStatus(L"显示方式已选择，但本地设置保存失败");
+        return;
     }
+    mainWindow_.SetStatus(
+        spanAcrossDisplays_
+            ? L"显示方式：跨屏扩展 · 选择壁纸后应用到整个桌面"
+            : L"显示方式：分屏显示 · 应用壁纸时选择一个或多个屏幕");
+}
+
+bool WallpaperApplication::ChooseApplicationTargets() {
+    RefreshDisplayTargets(true);
+    spanAcrossDisplays_ = mainWindow_.SpanAcrossDisplays();
+    if (spanAcrossDisplays_) {
+        return true;
+    }
+    if (displayTargets_.empty()) {
+        MessageBoxW(controlWindow_, L"当前没有可用的显示器。", kApplicationTitle,
+                    MB_OK | MB_ICONERROR);
+        return false;
+    }
+    if (displayTargets_.size() == 1) {
+        selectedDisplayIds_ = {displayTargets_.front().deviceId};
+        return true;
+    }
+    const auto selected = mainWindow_.ChooseDisplayTargets();
+    if (!selected.has_value()) {
+        mainWindow_.SetStatus(L"已取消应用 · 当前壁纸保持不变");
+        return false;
+    }
+    selectedDisplayIds_ = *selected;
+    return !selectedDisplayIds_.empty();
 }
 
 std::vector<RECT> WallpaperApplication::DestinationsForAssignment(
@@ -1583,10 +1700,10 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 if (mainWindow_.HandleFilterCommand(identifier, notification)) {
                     return 0;
                 }
-                if (identifier == ModernMainWindow::DisplaySelector &&
+                if (identifier == ModernMainWindow::DisplayMode &&
                     notification == BN_CLICKED) {
-                    if (mainWindow_.ShowDisplaySelectorMenu()) {
-                        ApplyDisplaySelectionFromUi();
+                    if (mainWindow_.ShowDisplayModeMenu()) {
+                        ApplyDisplayModeFromUi();
                     }
                     return 0;
                 }

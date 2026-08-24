@@ -127,8 +127,7 @@ HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
         ++generation_;
     }
     EventCallback* callback = new (std::nothrow) EventCallback(
-        this, notificationWindow, notificationMessage, generation_,
-        notificationToken);
+        notificationWindow, notificationMessage, generation_, notificationToken);
     if (callback == nullptr) {
         return E_OUTOFMEMORY;
     }
@@ -347,6 +346,14 @@ void MediaEnginePlayer::HandleEvent(const DWORD eventCode,
             if (statisticsStartedAt_ == std::chrono::steady_clock::time_point{}) {
                 statisticsStartedAt_ = std::chrono::steady_clock::now();
             }
+            if (failed_) {
+                core::LogInfo(
+                    L"Media Engine recovered after a transient playback event.");
+            }
+            // Some sources emit ERROR/ABORT while replacing their source and
+            // then immediately reach PLAYING. PLAYING is authoritative proof
+            // that this session is usable and must clear the transient flag.
+            failed_ = false;
             playing_ = true;
             core::LogInfo(L"Media Engine video playback started.");
             break;
@@ -472,10 +479,9 @@ bool MediaEnginePlayer::SoundEnabled() const noexcept {
 }
 
 MediaEnginePlayer::EventCallback::EventCallback(
-    MediaEnginePlayer* owner, const HWND window, const UINT message,
-    const std::uint32_t generation, const std::uint32_t notificationToken)
-    : owner_(owner),
-      window_(window),
+    const HWND window, const UINT message, const std::uint32_t generation,
+    const std::uint32_t notificationToken)
+    : window_(window),
       message_(message),
       generation_(generation),
       notificationToken_(notificationToken) {}
@@ -509,7 +515,7 @@ ULONG STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::Release() {
 
 HRESULT STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::EventNotify(
     const DWORD eventCode, DWORD_PTR, DWORD) {
-    if (owner_ != nullptr && IsWindow(window_)) {
+    if (!detached_.load(std::memory_order_acquire) && IsWindow(window_)) {
         static_assert(sizeof(WPARAM) >= sizeof(std::uint64_t));
         const std::uint64_t packedEvent =
             (static_cast<std::uint64_t>(notificationToken_) << 32U) |
@@ -521,11 +527,7 @@ HRESULT STDMETHODCALLTYPE MediaEnginePlayer::EventCallback::EventNotify(
 }
 
 void MediaEnginePlayer::EventCallback::Detach() noexcept {
-    owner_ = nullptr;
-    window_ = nullptr;
-    message_ = 0;
-    generation_ = 0;
-    notificationToken_ = 0;
+    detached_.store(true, std::memory_order_release);
 }
 
 }  // namespace lwe::media::video

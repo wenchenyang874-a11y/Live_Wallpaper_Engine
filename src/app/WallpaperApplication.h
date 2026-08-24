@@ -33,7 +33,7 @@ public:
     WallpaperApplication& operator=(const WallpaperApplication&) = delete;
 
     int Run(std::chrono::seconds testDuration,
-            const std::optional<std::wstring>& testWallpaper);
+            const std::vector<std::wstring>& testWallpapers);
 
 private:
     enum class PlaybackMode {
@@ -74,6 +74,9 @@ private:
     void CommitWallpaperRename();
     void ShowLibraryContextMenu(POINT screenPoint);
     void CancelActiveWallpaper(bool persistSelection = true);
+    bool ApplyWallpaperWithTargetPrompt(std::wstring_view path,
+                                        bool persistSelection = true,
+                                        bool showErrors = true);
     bool ApplyWallpaper(std::wstring_view path, bool persistSelection = true,
                         bool showErrors = true);
     bool RebuildPlaybackSessions(bool showErrors);
@@ -81,10 +84,12 @@ private:
     HRESULT RenderStaticImage(std::wstring_view path,
                               std::span<const RECT> destinations);
     void StopAllPlayback();
+    bool RemoveFailedPlaybackSessions();
     void ToggleSound();
     HRESULT SaveCurrentSelection() const;
     void RefreshDisplayTargets(bool preserveSelection);
-    void ApplyDisplaySelectionFromUi();
+    void ApplyDisplayModeFromUi();
+    bool ChooseApplicationTargets();
     bool ConfigureWallpaperWindowRegion();
     std::vector<RECT> DestinationsForAssignment(
         const core::WallpaperAssignmentSetting& assignment) const;

@@ -44,8 +44,8 @@ public:
 private:
     class EventCallback final : public IMFMediaEngineNotify {
     public:
-        EventCallback(MediaEnginePlayer* owner, HWND window, UINT message,
-                      std::uint32_t generation, std::uint32_t notificationToken);
+        EventCallback(HWND window, UINT message, std::uint32_t generation,
+                      std::uint32_t notificationToken);
 
         HRESULT STDMETHODCALLTYPE QueryInterface(REFIID interfaceId,
                                                  void** object) override;
@@ -59,11 +59,15 @@ private:
         ~EventCallback() = default;
 
         std::atomic_ulong referenceCount_{1};
-        MediaEnginePlayer* owner_ = nullptr;
-        HWND window_ = nullptr;
-        UINT message_ = 0;
-        std::uint32_t generation_ = 0;
-        std::uint32_t notificationToken_ = 0;
+        // Media Engine owns a callback reference and can notify concurrently
+        // with UI-thread shutdown. The routing values never change after
+        // construction; Detach publishes one atomic barrier instead of racing
+        // on several mutable fields or dereferencing a destroyed player.
+        std::atomic_bool detached_{false};
+        const HWND window_ = nullptr;
+        const UINT message_ = 0;
+        const std::uint32_t generation_ = 0;
+        const std::uint32_t notificationToken_ = 0;
     };
 
     Microsoft::WRL::ComPtr<IMFMediaEngineClassFactory> factory_;

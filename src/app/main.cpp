@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <windows.h>
 #include <mfapi.h>
@@ -17,7 +18,7 @@ namespace {
 
 struct StartupOptions final {
     std::chrono::seconds testDuration = std::chrono::seconds::zero();
-    std::optional<std::wstring> testWallpaper;
+    std::vector<std::wstring> testWallpapers;
     std::optional<std::wstring> libraryTestSource;
 };
 
@@ -50,7 +51,7 @@ StartupOptions ParseStartupOptions() {
                                                  : legacyImagePrefix.size();
             const std::wstring_view path = argument.substr(prefixLength);
             if (!path.empty()) {
-                options.testWallpaper = std::wstring(path);
+                options.testWallpapers.emplace_back(path);
             }
             continue;
         }
@@ -68,7 +69,7 @@ StartupOptions ParseStartupOptions() {
 
     LocalFree(arguments);
     if (options.testDuration.count() <= 0) {
-        options.testWallpaper.reset();
+        options.testWallpapers.clear();
     }
     return options;
 }
@@ -125,7 +126,7 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE) {
         lwe::app::WallpaperApplication application(instance,
                                                    instanceCoordinator.ActivationEvent());
-        exitCode = application.Run(options.testDuration, options.testWallpaper);
+        exitCode = application.Run(options.testDuration, options.testWallpapers);
     } else {
         lwe::core::LogError(L"COM initialization failed.", comResult);
     }

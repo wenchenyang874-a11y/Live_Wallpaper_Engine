@@ -31,7 +31,7 @@ public:
         Sound = 1106,
         CancelApplication = 1107,
         RenameCommit = 1108,
-        DisplaySelector = 1199,
+        DisplayMode = 1199,
     };
 
     ModernMainWindow() = default;
@@ -47,7 +47,8 @@ public:
     bool DrawItem(const DRAWITEMSTRUCT& draw) const;
     HBRUSH ColorControl(HDC deviceContext, HWND control) const;
     bool HandleFilterCommand(WORD controlId, WORD notificationCode);
-    bool ShowDisplaySelectorMenu();
+    bool ShowDisplayModeMenu();
+    std::optional<std::vector<std::wstring>> ChooseDisplayTargets();
 
     void SetItems(std::vector<core::WallpaperItem> items);
     void SetActivePaths(std::vector<std::wstring> paths);
@@ -55,7 +56,6 @@ public:
     void SetSoundEnabled(bool enabled);
     void SetDisplayOptions(std::vector<DisplayOption> displays, bool spanDisplays);
     void SetResourceUsage(std::wstring usage);
-    [[nodiscard]] std::vector<std::wstring> SelectedDisplayIds() const;
     [[nodiscard]] bool SpanAcrossDisplays() const noexcept;
     std::optional<core::WallpaperItem> SelectedItem() const;
     bool SelectItemAtScreenPoint(POINT screenPoint);
@@ -98,7 +98,7 @@ private:
     HWND sound_ = nullptr;
     HWND cancelApplication_ = nullptr;
     HWND renameEdit_ = nullptr;
-    HWND displaySelector_ = nullptr;
+    HWND displayMode_ = nullptr;
     std::vector<DisplayOption> displayOptions_;
     HFONT titleFont_ = nullptr;
     HFONT headingFont_ = nullptr;
@@ -118,7 +118,7 @@ private:
     bool spanAcrossDisplays_ = true;
 
     void UpdateFilterSelectorText();
-    void UpdateDisplaySelectorText();
+    void UpdateDisplayModeText();
 };
 
 }  // namespace lwe::app

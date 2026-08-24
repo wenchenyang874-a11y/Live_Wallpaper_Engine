@@ -4,6 +4,7 @@
 #include <array>
 #include <cwctype>
 #include <string>
+#include <utility>
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -24,6 +25,11 @@ constexpr COLORREF kTextPrimary = RGB(241, 244, 250);
 constexpr COLORREF kTextSecondary = RGB(158, 168, 188);
 constexpr COLORREF kBorder = RGB(54, 63, 82);
 constexpr COLORREF kDanger = RGB(222, 92, 106);
+constexpr wchar_t kScreenSelectionWindowClass[] =
+    L"LiveWallpaperEngine.ScreenSelection";
+constexpr int kScreenSelectionList = 3100;
+constexpr int kScreenSelectionApply = 3101;
+constexpr int kScreenSelectionCancel = 3102;
 
 int Scale(const HWND window, const int value) {
     return MulDiv(value, GetDpiForWindow(window), 96);
@@ -109,6 +115,397 @@ int FontPixelHeight(const HWND window, const HFONT font) {
     return measured ? metrics.tmHeight : Scale(window, 17);
 }
 
+struct ScreenSelectionDialogState final {
+    HINSTANCE instance = nullptr;
+    HWND owner = nullptr;
+    HWND window = nullptr;
+    HWND list = nullptr;
+    HWND apply = nullptr;
+    HWND cancel = nullptr;
+    const std::vector<ModernMainWindow::DisplayOption>* options = nullptr;
+    std::vector<std::wstring> result;
+    HFONT headingFont = nullptr;
+    HFONT bodyFont = nullptr;
+    HBRUSH panelBrush = nullptr;
+    bool accepted = false;
+    bool complete = false;
+};
+
+void RecreateScreenSelectionFonts(ScreenSelectionDialogState& state) {
+    if (state.headingFont != nullptr) {
+        DeleteObject(state.headingFont);
+    }
+    if (state.bodyFont != nullptr) {
+        DeleteObject(state.bodyFont);
+    }
+    const int dpi = static_cast<int>(GetDpiForWindow(state.window));
+    state.headingFont = CreateFontW(
+        -MulDiv(18, dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    state.bodyFont = CreateFontW(
+        -MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    for (const HWND control : {state.list, state.apply, state.cancel}) {
+        SetControlFont(control, state.bodyFont);
+    }
+}
+
+void LayoutScreenSelectionDialog(ScreenSelectionDialogState& state) {
+    RECT client{};
+    GetClientRect(state.window, &client);
+    const int margin = Scale(state.window, 24);
+    const int listTop = Scale(state.window, 70);
+    const int footerHeight = Scale(state.window, 64);
+    const int gap = Scale(state.window, 10);
+    const int buttonWidth = Scale(state.window, 112);
+    const int buttonHeight = Scale(state.window, 38);
+    MoveWindow(state.list, margin, listTop,
+               static_cast<int>(client.right) - margin * 2,
+               std::max(1, static_cast<int>(client.bottom) - listTop -
+                               footerHeight),
+               TRUE);
+    MoveWindow(state.cancel, client.right - margin - buttonWidth * 2 - gap,
+               client.bottom - margin - buttonHeight, buttonWidth, buttonHeight,
+               TRUE);
+    MoveWindow(state.apply, client.right - margin - buttonWidth,
+               client.bottom - margin - buttonHeight, buttonWidth, buttonHeight,
+               TRUE);
+}
+
+void DrawScreenSelectionItem(const DRAWITEMSTRUCT& draw,
+                             const ScreenSelectionDialogState& state) {
+    FillRectangle(draw.hDC, draw.rcItem, kBackground);
+    if (draw.itemID == static_cast<UINT>(-1) || state.options == nullptr ||
+        draw.itemID >= state.options->size()) {
+        return;
+    }
+    const bool selected =
+        SendMessageW(draw.hwndItem, LB_GETSEL, draw.itemID, 0) > 0;
+    RECT card = draw.rcItem;
+    InflateRect(&card, -Scale(state.window, 3), -Scale(state.window, 4));
+    FillRoundedRectangle(draw.hDC, card, selected ? kPanelHover : kPanel,
+                         selected ? kAccent : kBorder, Scale(state.window, 10),
+                         selected ? 2 : 1);
+
+    const int boxSize = Scale(state.window, 20);
+    RECT box{card.left + Scale(state.window, 14),
+             card.top + (card.bottom - card.top - boxSize) / 2,
+             card.left + Scale(state.window, 14) + boxSize,
+             card.top + (card.bottom - card.top + boxSize) / 2};
+    FillRoundedRectangle(draw.hDC, box, selected ? kAccent : kPanel,
+                         selected ? kAccent : kTextSecondary,
+                         Scale(state.window, 5));
+    if (selected) {
+        const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(state.window, 2)),
+                                   RGB(255, 255, 255));
+        const HGDIOBJ previous = SelectObject(draw.hDC, pen);
+        MoveToEx(draw.hDC, box.left + Scale(state.window, 5),
+                 box.top + Scale(state.window, 10), nullptr);
+        LineTo(draw.hDC, box.left + Scale(state.window, 9),
+               box.top + Scale(state.window, 14));
+        LineTo(draw.hDC, box.left + Scale(state.window, 16),
+               box.top + Scale(state.window, 6));
+        SelectObject(draw.hDC, previous);
+        DeleteObject(pen);
+    }
+
+    RECT label = card;
+    label.left = box.right + Scale(state.window, 14);
+    label.right -= Scale(state.window, 12);
+    DrawTextLine(draw.hDC, (*state.options)[draw.itemID].label, label,
+                 state.bodyFont, kTextPrimary,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void DrawScreenSelectionButton(const DRAWITEMSTRUCT& draw,
+                               const ScreenSelectionDialogState& state) {
+    wchar_t text[64]{};
+    GetWindowTextW(draw.hwndItem, text, static_cast<int>(std::size(text)));
+    const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
+    COLORREF fill = kPanel;
+    COLORREF outline = kBorder;
+    if (draw.CtlID == kScreenSelectionApply) {
+        fill = pressed ? RGB(72, 99, 207) : kAccent;
+        outline = fill;
+    } else if (pressed) {
+        fill = kPanelHover;
+    }
+    FillRectangle(draw.hDC, draw.rcItem, kBackground);
+    RECT button = draw.rcItem;
+    InflateRect(&button, -1, -1);
+    FillRoundedRectangle(draw.hDC, button, fill, outline,
+                         Scale(state.window, 10));
+    DrawTextLine(draw.hDC, text, button, state.bodyFont, kTextPrimary,
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
+                                                const UINT message,
+                                                const WPARAM wParam,
+                                                const LPARAM lParam) {
+    auto* state = reinterpret_cast<ScreenSelectionDialogState*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = static_cast<ScreenSelectionDialogState*>(create->lpCreateParams);
+        state->window = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(state));
+    }
+    if (state == nullptr) {
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    switch (message) {
+        case WM_CREATE: {
+            state->list = CreateWindowExW(
+                0, L"LISTBOX", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+                    LBS_HASSTRINGS | LBS_MULTIPLESEL | LBS_OWNERDRAWFIXED |
+                    LBS_NOINTEGRALHEIGHT,
+                0, 0, 1, 1, window,
+                reinterpret_cast<HMENU>(
+                    static_cast<INT_PTR>(kScreenSelectionList)),
+                state->instance, nullptr);
+            state->cancel = CreateWindowExW(
+                0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                                                BS_OWNERDRAW,
+                0, 0, 1, 1, window,
+                reinterpret_cast<HMENU>(
+                    static_cast<INT_PTR>(kScreenSelectionCancel)),
+                state->instance, nullptr);
+            state->apply = CreateWindowExW(
+                0, L"BUTTON", L"应用到所选屏幕",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 1, 1,
+                window,
+                reinterpret_cast<HMENU>(
+                    static_cast<INT_PTR>(kScreenSelectionApply)),
+                state->instance, nullptr);
+            if (state->list == nullptr || state->apply == nullptr ||
+                state->cancel == nullptr || state->options == nullptr) {
+                return -1;
+            }
+            SetWindowTheme(state->list, L"DarkMode_Explorer", nullptr);
+            state->panelBrush = CreateSolidBrush(kPanel);
+            RecreateScreenSelectionFonts(*state);
+            SendMessageW(state->list, LB_SETITEMHEIGHT, 0,
+                         Scale(window, 54));
+            bool hasSelection = false;
+            for (std::size_t index = 0; index < state->options->size(); ++index) {
+                SendMessageW(state->list, LB_ADDSTRING, 0,
+                             reinterpret_cast<LPARAM>(
+                                 (*state->options)[index].label.c_str()));
+                if ((*state->options)[index].selected) {
+                    SendMessageW(state->list, LB_SETSEL, TRUE, index);
+                    hasSelection = true;
+                }
+            }
+            if (!hasSelection && !state->options->empty()) {
+                SendMessageW(state->list, LB_SETSEL, TRUE, 0);
+            }
+            LayoutScreenSelectionDialog(*state);
+            return 0;
+        }
+        case WM_SIZE:
+            LayoutScreenSelectionDialog(*state);
+            return 0;
+        case WM_DPICHANGED: {
+            const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+            SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOACTIVATE | SWP_NOZORDER);
+            RecreateScreenSelectionFonts(*state);
+            SendMessageW(state->list, LB_SETITEMHEIGHT, 0, Scale(window, 54));
+            return 0;
+        }
+        case WM_COMMAND: {
+            const int identifier = LOWORD(wParam);
+            if (identifier == kScreenSelectionApply) {
+                state->result.clear();
+                for (std::size_t index = 0; index < state->options->size(); ++index) {
+                    if (SendMessageW(state->list, LB_GETSEL, index, 0) > 0) {
+                        state->result.push_back((*state->options)[index].id);
+                    }
+                }
+                if (state->result.empty()) {
+                    MessageBeep(MB_ICONWARNING);
+                    return 0;
+                }
+                state->accepted = true;
+                DestroyWindow(window);
+                return 0;
+            }
+            if (identifier == kScreenSelectionCancel) {
+                DestroyWindow(window);
+                return 0;
+            }
+            if (identifier == kScreenSelectionList &&
+                HIWORD(wParam) == LBN_SELCHANGE) {
+                InvalidateRect(state->list, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        }
+        case WM_DRAWITEM: {
+            const auto& draw = *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw.CtlID == kScreenSelectionList) {
+                DrawScreenSelectionItem(draw, *state);
+                return TRUE;
+            }
+            if (draw.CtlID == kScreenSelectionApply ||
+                draw.CtlID == kScreenSelectionCancel) {
+                DrawScreenSelectionButton(draw, *state);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CTLCOLORLISTBOX:
+            SetBkColor(reinterpret_cast<HDC>(wParam), kPanel);
+            SetTextColor(reinterpret_cast<HDC>(wParam), kTextPrimary);
+            return reinterpret_cast<LRESULT>(state->panelBrush);
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC context = BeginPaint(window, &paint);
+            RECT client{};
+            GetClientRect(window, &client);
+            FillRectangle(context, client, kBackground);
+            RECT title{Scale(window, 24), Scale(window, 12),
+                       client.right - Scale(window, 24), Scale(window, 42)};
+            DrawTextLine(context, L"应用到哪些屏幕？", title,
+                         state->headingFont, kTextPrimary,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            RECT subtitle{title.left, Scale(window, 40), title.right,
+                          Scale(window, 66)};
+            DrawTextLine(context, L"可以选择一个或多个屏幕", subtitle,
+                         state->bodyFont, kTextSecondary,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_CLOSE:
+            DestroyWindow(window);
+            return 0;
+        case WM_DESTROY:
+            state->complete = true;
+            return 0;
+        case WM_NCDESTROY:
+            if (state->headingFont != nullptr) {
+                DeleteObject(state->headingFont);
+                state->headingFont = nullptr;
+            }
+            if (state->bodyFont != nullptr) {
+                DeleteObject(state->bodyFont);
+                state->bodyFont = nullptr;
+            }
+            if (state->panelBrush != nullptr) {
+                DeleteObject(state->panelBrush);
+                state->panelBrush = nullptr;
+            }
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+bool RegisterScreenSelectionWindowClass(const HINSTANCE instance) {
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.lpfnWndProc = &ScreenSelectionWindowProcedure;
+    windowClass.hInstance = instance;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.lpszClassName = kScreenSelectionWindowClass;
+    return RegisterClassExW(&windowClass) != 0 ||
+           GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+std::optional<std::vector<std::wstring>> ShowScreenSelectionDialog(
+    const HWND owner, const HINSTANCE instance,
+    const std::vector<ModernMainWindow::DisplayOption>& options) {
+    if (!IsWindow(owner) || options.empty() ||
+        !RegisterScreenSelectionWindowClass(instance)) {
+        return std::nullopt;
+    }
+
+    ScreenSelectionDialogState state;
+    state.instance = instance;
+    state.owner = owner;
+    state.options = &options;
+    const int visibleRows = std::clamp(static_cast<int>(options.size()), 1, 5);
+    const int clientWidth = Scale(owner, 500);
+    const int clientHeight = Scale(owner, 70 + visibleRows * 54 + 64);
+    RECT outer{0, 0, clientWidth, clientHeight};
+    AdjustWindowRectExForDpi(&outer, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
+                             WS_EX_DLGMODALFRAME, GetDpiForWindow(owner));
+    RECT ownerRectangle{};
+    GetWindowRect(owner, &ownerRectangle);
+    const int width = outer.right - outer.left;
+    const int height = outer.bottom - outer.top;
+    const int left = ownerRectangle.left +
+                     (ownerRectangle.right - ownerRectangle.left - width) / 2;
+    const int top = ownerRectangle.top +
+                    (ownerRectangle.bottom - ownerRectangle.top - height) / 2;
+    const HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME, kScreenSelectionWindowClass, L"选择应用屏幕",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, left, top, width, height, owner,
+        nullptr, instance, &state);
+    if (dialog == nullptr) {
+        return std::nullopt;
+    }
+    const BOOL dark = TRUE;
+    DwmSetWindowAttribute(dialog, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
+                          sizeof(dark));
+
+    EnableWindow(owner, FALSE);
+    ShowWindow(dialog, SW_SHOWNORMAL);
+    SetForegroundWindow(dialog);
+    SetFocus(state.list);
+    bool receivedQuit = false;
+    WPARAM quitCode = 0;
+    MSG message{};
+    while (!state.complete && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        const bool belongsToDialog =
+            message.hwnd == dialog || IsChild(dialog, message.hwnd);
+        if (belongsToDialog && message.message == WM_KEYDOWN &&
+            (message.wParam == VK_RETURN || message.wParam == VK_ESCAPE)) {
+            PostMessageW(dialog, WM_COMMAND,
+                         MAKEWPARAM(message.wParam == VK_RETURN
+                                        ? kScreenSelectionApply
+                                        : kScreenSelectionCancel,
+                                    BN_CLICKED),
+                         0);
+            continue;
+        }
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    if (message.message == WM_QUIT) {
+        receivedQuit = true;
+        quitCode = message.wParam;
+    }
+    if (IsWindow(dialog)) {
+        DestroyWindow(dialog);
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    if (receivedQuit) {
+        PostQuitMessage(static_cast<int>(quitCode));
+    }
+    if (!state.accepted) {
+        return std::nullopt;
+    }
+    return state.result;
+}
+
 }  // namespace
 
 ModernMainWindow::~ModernMainWindow() {
@@ -155,13 +552,13 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
             parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier)), instance,
             nullptr);
     };
-    filter_ = createButton(Filter, L"分类：全部  ▼");
+    filter_ = createButton(Filter, L"分类：全部");
     import_ = createButton(Import, L"＋  导入壁纸");
     export_ = createButton(Export, L"导出分享包");
     apply_ = createButton(Apply, L"应用到桌面");
     sound_ = createButton(Sound, L"声音：关闭");
     cancelApplication_ = createButton(CancelApplication, L"取消应用");
-    displaySelector_ = createButton(DisplaySelector, L"显示位置：跨屏扩展  ▼");
+    displayMode_ = createButton(DisplayMode, L"显示方式：跨屏扩展");
     renameEdit_ = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 1, 1,
         parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(RenameCommit)),
@@ -170,7 +567,7 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     if (search_ == nullptr || filter_ == nullptr || library_ == nullptr ||
         import_ == nullptr || export_ == nullptr || apply_ == nullptr ||
         sound_ == nullptr || cancelApplication_ == nullptr ||
-        displaySelector_ == nullptr || renameEdit_ == nullptr) {
+        displayMode_ == nullptr || renameEdit_ == nullptr) {
         return false;
     }
 
@@ -215,7 +612,7 @@ void ModernMainWindow::RecreateFonts() {
                              L"Segoe UI Variable Text");
 
     for (const HWND control : {search_, filter_, library_, import_, export_, apply_,
-                               sound_, cancelApplication_, displaySelector_,
+                               sound_, cancelApplication_, displayMode_,
                                renameEdit_}) {
         SetControlFont(control, bodyFont_);
     }
@@ -266,7 +663,7 @@ void ModernMainWindow::Layout() {
                contentWidth - (actionWidth + gap) * 2, controlHeight, TRUE);
 
     const int displayTop = actionTop + controlHeight + gap;
-    MoveWindow(displaySelector_, contentLeft, displayTop, contentWidth,
+    MoveWindow(displayMode_, contentLeft, displayTop, contentWidth,
                controlHeight, TRUE);
 
     const int statusHeight = Scale(parent_, 62);
@@ -404,8 +801,29 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
     RECT button = draw.rcItem;
     InflateRect(&button, -1, -1);
     FillRoundedRectangle(draw.hDC, button, fill, outline, Scale(parent_, 10));
-    DrawTextLine(draw.hDC, text, button, bodyFont_, foreground,
+    RECT textRectangle = button;
+    const bool dropdown = draw.CtlID == Filter || draw.CtlID == DisplayMode;
+    if (dropdown) {
+        const int arrowSpace = Scale(parent_, 38);
+        textRectangle.left += arrowSpace;
+        textRectangle.right -= arrowSpace;
+    }
+    DrawTextLine(draw.hDC, text, textRectangle, bodyFont_, foreground,
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (dropdown) {
+        const int centerX = button.right - Scale(parent_, 20);
+        const int centerY = (button.top + button.bottom) / 2;
+        const int halfWidth = Scale(parent_, 5);
+        const int halfHeight = Scale(parent_, 3);
+        const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(parent_, 2)),
+                                   foreground);
+        const HGDIOBJ previous = SelectObject(draw.hDC, pen);
+        MoveToEx(draw.hDC, centerX - halfWidth, centerY - halfHeight, nullptr);
+        LineTo(draw.hDC, centerX, centerY + halfHeight);
+        LineTo(draw.hDC, centerX + halfWidth, centerY - halfHeight);
+        SelectObject(draw.hDC, previous);
+        DeleteObject(pen);
+    }
 }
 
 void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
@@ -547,8 +965,8 @@ bool ModernMainWindow::ShowFilterMenu() {
     return true;
 }
 
-bool ModernMainWindow::ShowDisplaySelectorMenu() {
-    if (displayOptions_.empty() || !IsWindow(displaySelector_)) {
+bool ModernMainWindow::ShowDisplayModeMenu() {
+    if (!IsWindow(displayMode_)) {
         return false;
     }
     HMENU menu = CreatePopupMenu();
@@ -556,20 +974,17 @@ bool ModernMainWindow::ShowDisplaySelectorMenu() {
         return false;
     }
     constexpr UINT kSpanCommand = 1;
-    constexpr UINT kDisplayCommandBase = 100;
-    AppendMenuW(menu, MF_STRING | (spanAcrossDisplays_ ? MF_CHECKED : 0),
-                kSpanCommand, L"跨屏扩展（一个画面横跨全部屏幕）");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    for (std::size_t index = 0; index < displayOptions_.size(); ++index) {
-        const DisplayOption& option = displayOptions_[index];
-        const UINT flags = MF_STRING |
-                           (!spanAcrossDisplays_ && option.selected ? MF_CHECKED : 0);
-        AppendMenuW(menu, flags, kDisplayCommandBase + static_cast<UINT>(index),
-                    option.label.c_str());
-    }
+    constexpr UINT kSplitCommand = 2;
+    AppendMenuW(menu, MF_STRING, kSpanCommand,
+                L"跨屏扩展（一个画面横跨全部屏幕）");
+    AppendMenuW(menu, MF_STRING, kSplitCommand,
+                L"分屏显示（应用时选择一个或多个屏幕）");
+    CheckMenuRadioItem(menu, kSpanCommand, kSplitCommand,
+                       spanAcrossDisplays_ ? kSpanCommand : kSplitCommand,
+                       MF_BYCOMMAND);
 
     RECT selector{};
-    GetWindowRect(displaySelector_, &selector);
+    GetWindowRect(displayMode_, &selector);
     const UINT command = TrackPopupMenu(
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
         selector.left, selector.bottom, 0, parent_, nullptr);
@@ -577,24 +992,33 @@ bool ModernMainWindow::ShowDisplaySelectorMenu() {
     if (command == 0) {
         return false;
     }
+    const bool previous = spanAcrossDisplays_;
     if (command == kSpanCommand) {
         spanAcrossDisplays_ = true;
-    } else if (command >= kDisplayCommandBase &&
-               command < kDisplayCommandBase + displayOptions_.size()) {
+    } else if (command == kSplitCommand) {
         spanAcrossDisplays_ = false;
-        DisplayOption& selected =
-            displayOptions_[command - kDisplayCommandBase];
-        selected.selected = !selected.selected;
-        if (std::ranges::none_of(displayOptions_, [](const DisplayOption& option) {
-                return option.selected;
-            })) {
-            selected.selected = true;
-        }
     } else {
         return false;
     }
-    UpdateDisplaySelectorText();
-    return true;
+    UpdateDisplayModeText();
+    return previous != spanAcrossDisplays_;
+}
+
+std::optional<std::vector<std::wstring>>
+ModernMainWindow::ChooseDisplayTargets() {
+    const auto selected = ShowScreenSelectionDialog(
+        parent_, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(parent_, GWLP_HINSTANCE)),
+        displayOptions_);
+    if (!selected.has_value()) {
+        return std::nullopt;
+    }
+    for (DisplayOption& option : displayOptions_) {
+        option.selected = std::ranges::any_of(
+            *selected, [&](const std::wstring& identifier) {
+                return _wcsicmp(identifier.c_str(), option.id.c_str()) == 0;
+            });
+    }
+    return selected;
 }
 
 void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
@@ -639,7 +1063,7 @@ void ModernMainWindow::SetDisplayOptions(std::vector<DisplayOption> displays,
         displayOptions_.front().selected = true;
     }
 
-    UpdateDisplaySelectorText();
+    UpdateDisplayModeText();
     Layout();
 }
 
@@ -647,31 +1071,16 @@ void ModernMainWindow::UpdateFilterSelectorText() {
     constexpr std::array labels{L"全部", L"图片", L"GIF", L"视频"};
     const std::wstring text =
         std::wstring(L"分类：") +
-        labels[static_cast<std::size_t>(filterKind_)] + L"  ▼";
+        labels[static_cast<std::size_t>(filterKind_)];
     SetWindowTextW(filter_, text.c_str());
     InvalidateRect(filter_, nullptr, FALSE);
 }
 
-void ModernMainWindow::UpdateDisplaySelectorText() {
-    std::wstring text = L"显示位置：";
-    if (spanAcrossDisplays_) {
-        text += L"跨屏扩展";
-    } else {
-        bool first = true;
-        for (std::size_t index = 0; index < displayOptions_.size(); ++index) {
-            if (!displayOptions_[index].selected) {
-                continue;
-            }
-            if (!first) {
-                text += L"、";
-            }
-            text += L"屏幕 " + std::to_wstring(index + 1U);
-            first = false;
-        }
-    }
-    text += L"  ▼";
-    SetWindowTextW(displaySelector_, text.c_str());
-    InvalidateRect(displaySelector_, nullptr, FALSE);
+void ModernMainWindow::UpdateDisplayModeText() {
+    const wchar_t* text = spanAcrossDisplays_ ? L"显示方式：跨屏扩展"
+                                             : L"显示方式：分屏显示";
+    SetWindowTextW(displayMode_, text);
+    InvalidateRect(displayMode_, nullptr, FALSE);
 }
 
 void ModernMainWindow::SetResourceUsage(std::wstring usage) {
@@ -694,16 +1103,6 @@ void ModernMainWindow::InvalidateFooter() const {
                 client.right - Scale(parent_, 28),
                 client.bottom - Scale(parent_, 26)};
     InvalidateRect(parent_, &footer, FALSE);
-}
-
-std::vector<std::wstring> ModernMainWindow::SelectedDisplayIds() const {
-    std::vector<std::wstring> selected;
-    for (const DisplayOption& option : displayOptions_) {
-        if (option.selected) {
-            selected.push_back(option.id);
-        }
-    }
-    return selected;
 }
 
 bool ModernMainWindow::SpanAcrossDisplays() const noexcept {
