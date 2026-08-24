@@ -77,6 +77,7 @@ private:
 
     void RecreateFonts();
     void RefreshVisibleItems();
+    void InvalidateFooter() const;
     bool MatchesFilter(const core::WallpaperItem& item,
                        std::wstring_view search) const;
     void DrawButton(const DRAWITEMSTRUCT& draw) const;

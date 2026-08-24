@@ -327,11 +327,13 @@ bool WallpaperApplication::RegisterWindowClasses() {
 
 bool WallpaperApplication::CreateControlWindow() {
     const UINT dpi = GetDpiForSystem();
+    constexpr DWORD windowStyle =
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
     RECT windowRectangle{0, 0, MulDiv(1040, dpi, 96), MulDiv(700, dpi, 96)};
-    AdjustWindowRectExForDpi(&windowRectangle, WS_OVERLAPPEDWINDOW, FALSE,
+    AdjustWindowRectExForDpi(&windowRectangle, windowStyle, FALSE,
                              WS_EX_APPWINDOW, dpi);
     controlWindow_ = CreateWindowExW(
-        WS_EX_APPWINDOW, kControlWindowClass, kApplicationTitle, WS_OVERLAPPEDWINDOW,
+        WS_EX_APPWINDOW, kControlWindowClass, kApplicationTitle, windowStyle,
         CW_USEDEFAULT, CW_USEDEFAULT, windowRectangle.right - windowRectangle.left,
         windowRectangle.bottom - windowRectangle.top, nullptr, nullptr, instance_, this);
     if (controlWindow_ == nullptr) {
@@ -1429,7 +1431,32 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
             case WM_PAINT: {
                 PAINTSTRUCT paint{};
                 const HDC context = BeginPaint(controlWindow_, &paint);
-                mainWindow_.Paint(context, paint.rcPaint);
+                RECT client{};
+                GetClientRect(controlWindow_, &client);
+                const int width = client.right - client.left;
+                const int height = client.bottom - client.top;
+                const HDC bufferContext = CreateCompatibleDC(context);
+                const HBITMAP buffer =
+                    width > 0 && height > 0
+                        ? CreateCompatibleBitmap(context, width, height)
+                        : nullptr;
+                if (bufferContext != nullptr && buffer != nullptr) {
+                    const HGDIOBJ previous = SelectObject(bufferContext, buffer);
+                    mainWindow_.Paint(bufferContext, paint.rcPaint);
+                    BitBlt(context, paint.rcPaint.left, paint.rcPaint.top,
+                           paint.rcPaint.right - paint.rcPaint.left,
+                           paint.rcPaint.bottom - paint.rcPaint.top, bufferContext,
+                           paint.rcPaint.left, paint.rcPaint.top, SRCCOPY);
+                    SelectObject(bufferContext, previous);
+                } else {
+                    mainWindow_.Paint(context, paint.rcPaint);
+                }
+                if (buffer != nullptr) {
+                    DeleteObject(buffer);
+                }
+                if (bufferContext != nullptr) {
+                    DeleteDC(bufferContext);
+                }
                 EndPaint(controlWindow_, &paint);
                 return 0;
             }

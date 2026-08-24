@@ -54,7 +54,6 @@ private:
     bool CreateSwapChain(HWND targetWindow, UINT width, UINT height);
     bool CreateRenderTarget();
     bool CreateVideoCompositionPipeline();
-    bool EnsureVideoCompositeSurface(UINT width, UINT height);
     bool UpdateVideoVertices(std::span<const RECT> destinations,
                              UINT sourceWidth, UINT sourceHeight,
                              UINT targetWidth, UINT targetHeight);
@@ -65,8 +64,6 @@ private:
     Microsoft::WRL::ComPtr<IDXGISwapChain> swapChain_;
     Microsoft::WRL::ComPtr<ID3D11RenderTargetView> renderTarget_;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> videoTransferSurface_;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> videoCompositeSurface_;
-    Microsoft::WRL::ComPtr<ID3D11RenderTargetView> videoCompositeTarget_;
     Microsoft::WRL::ComPtr<ID3D11VertexShader> videoVertexShader_;
     Microsoft::WRL::ComPtr<ID3D11PixelShader> videoPixelShader_;
     Microsoft::WRL::ComPtr<ID3D11InputLayout> videoInputLayout_;

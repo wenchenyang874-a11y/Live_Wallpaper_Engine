@@ -167,13 +167,7 @@ bool D3DRenderer::CreateSwapChain(const HWND targetWindow, const UINT width,
     description.BufferCount = 1;
     description.OutputWindow = targetWindow;
     description.Windowed = TRUE;
-    // A continuously-presented desktop child must not use DISCARD.
-    // DXGI explicitly allows that mode to throw away the back-buffer contents
-    // after Present; on the raised Windows 11 desktop some Intel/DWM paths show
-    // that discarded state between video frames even though static one-shot
-    // presentation looks correct. SEQUENTIAL keeps the BitBlt compatibility
-    // required by this desktop host while preserving the last complete frame.
-    description.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
+    description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
     // Windows 11 raised desktop explicitly supports DXGI BitBlt presents to a
     // fully opaque layered child that is z-ordered between DefView and WorkerW.
@@ -187,8 +181,7 @@ bool D3DRenderer::CreateSwapChain(const HWND targetWindow, const UINT width,
 
     factory->MakeWindowAssociation(
         targetWindow, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
-    core::LogInfo(
-        L"DXGI preserving BitBlt swap chain created for desktop compatibility.");
+    core::LogInfo(L"DXGI BitBlt swap chain created for layered desktop compatibility.");
     return true;
 }
 
@@ -264,8 +257,6 @@ bool D3DRenderer::Resize(const UINT width, const UINT height) {
     renderTarget_.Reset();
     videoTransferSurface_.Reset();
     videoSourceView_.Reset();
-    videoCompositeTarget_.Reset();
-    videoCompositeSurface_.Reset();
     videoVertexBuffer_.Reset();
     videoVertexCount_ = 0;
     context_->Flush();
@@ -431,41 +422,6 @@ HRESULT D3DRenderer::AcquireVideoTransferSurface(
     return S_OK;
 }
 
-bool D3DRenderer::EnsureVideoCompositeSurface(const UINT width,
-                                              const UINT height) {
-    bool recreate = !videoCompositeSurface_;
-    if (!recreate) {
-        D3D11_TEXTURE2D_DESC existing{};
-        videoCompositeSurface_->GetDesc(&existing);
-        recreate = existing.Width != width || existing.Height != height;
-    }
-    if (!recreate) {
-        return true;
-    }
-    videoCompositeTarget_.Reset();
-    videoCompositeSurface_.Reset();
-    D3D11_TEXTURE2D_DESC description{};
-    description.Width = width;
-    description.Height = height;
-    description.MipLevels = 1;
-    description.ArraySize = 1;
-    description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    description.SampleDesc.Count = 1;
-    description.Usage = D3D11_USAGE_DEFAULT;
-    description.BindFlags = D3D11_BIND_RENDER_TARGET;
-    HRESULT result = device_->CreateTexture2D(
-        &description, nullptr, &videoCompositeSurface_);
-    if (SUCCEEDED(result)) {
-        result = device_->CreateRenderTargetView(
-            videoCompositeSurface_.Get(), nullptr, &videoCompositeTarget_);
-    }
-    if (FAILED(result)) {
-        core::LogError(L"Unable to create the video composition surface.", result);
-        return false;
-    }
-    return true;
-}
-
 bool D3DRenderer::UpdateVideoVertices(
     const std::span<const RECT> destinations, const UINT sourceWidth,
     const UINT sourceHeight, const UINT targetWidth, const UINT targetHeight) {
@@ -571,14 +527,12 @@ bool D3DRenderer::CommitVideoTransferSurface(
     }
     D3D11_TEXTURE2D_DESC targetDescription{};
     backBuffer->GetDesc(&targetDescription);
-    if (!EnsureVideoCompositeSurface(targetDescription.Width,
-                                     targetDescription.Height) ||
-        !UpdateVideoVertices(destinations, sourceWidth, sourceHeight,
+    if (!UpdateVideoVertices(destinations, sourceWidth, sourceHeight,
                              targetDescription.Width, targetDescription.Height)) {
         return false;
     }
 
-    ID3D11RenderTargetView* target = videoCompositeTarget_.Get();
+    ID3D11RenderTargetView* target = renderTarget_.Get();
     context_->OMSetRenderTargets(1, &target, nullptr);
     constexpr float opaqueBlack[4]{0.0F, 0.0F, 0.0F, 1.0F};
     context_->ClearRenderTargetView(target, opaqueBlack);
@@ -603,10 +557,9 @@ bool D3DRenderer::CommitVideoTransferSurface(
     ID3D11ShaderResourceView* noSource = nullptr;
     context_->PSSetShaderResources(0, 1, &noSource);
 
-    context_->CopyResource(backBuffer.Get(), videoCompositeSurface_.Get());
-    // The pixel shader always writes alpha=1 and the back buffer only changes
-    // once per frame, so the layered desktop compositor never observes a
-    // partially converted or transparent Media Foundation surface.
+    // The pixel shader always writes alpha=1, and the complete set of monitor
+    // regions is submitted before the one Present call. No full-desktop
+    // intermediate texture or CopyResource is needed.
     return PresentCurrentFrame(true);
 }
 
@@ -648,8 +601,6 @@ void D3DRenderer::Shutdown() {
     renderTarget_.Reset();
     videoTransferSurface_.Reset();
     videoSourceView_.Reset();
-    videoCompositeTarget_.Reset();
-    videoCompositeSurface_.Reset();
     videoVertexBuffer_.Reset();
     videoSampler_.Reset();
     videoInputLayout_.Reset();

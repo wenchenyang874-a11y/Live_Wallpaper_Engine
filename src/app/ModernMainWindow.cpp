@@ -572,8 +572,11 @@ void ModernMainWindow::SetActivePath(const std::wstring_view path) {
 }
 
 void ModernMainWindow::SetStatus(std::wstring status) {
+    if (status_ == status) {
+        return;
+    }
     status_ = std::move(status);
-    InvalidateRect(parent_, nullptr, FALSE);
+    InvalidateFooter();
 }
 
 void ModernMainWindow::SetSoundEnabled(const bool enabled) {
@@ -620,8 +623,25 @@ void ModernMainWindow::UpdateDisplaySelectorText() {
 }
 
 void ModernMainWindow::SetResourceUsage(std::wstring usage) {
+    if (resourceUsage_ == usage) {
+        return;
+    }
     resourceUsage_ = std::move(usage);
-    InvalidateRect(parent_, nullptr, FALSE);
+    InvalidateFooter();
+}
+
+void ModernMainWindow::InvalidateFooter() const {
+    if (parent_ == nullptr) {
+        return;
+    }
+    RECT client{};
+    if (!GetClientRect(parent_, &client)) {
+        return;
+    }
+    RECT footer{Scale(parent_, 246), client.bottom - Scale(parent_, 84),
+                client.right - Scale(parent_, 28),
+                client.bottom - Scale(parent_, 26)};
+    InvalidateRect(parent_, &footer, FALSE);
 }
 
 std::vector<std::wstring> ModernMainWindow::SelectedDisplayIds() const {

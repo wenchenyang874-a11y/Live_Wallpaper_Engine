@@ -35,6 +35,9 @@ public static class LweStaticOverlayProbe
     public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam,
                                           IntPtr lParam);
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+
     public static IntPtr FindTopLevel(uint processId, string targetClass)
     {
         IntPtr found = IntPtr.Zero;
@@ -207,6 +210,12 @@ try {
     $activeProcess = $started[0]
     $control = [IntPtr]$started[1]
 
+    $controlStyle = [LweStaticOverlayProbe]::GetWindowLongPtr($control, -16).ToInt64()
+    $requiredClippingStyles = 0x02000000 -bor 0x04000000
+    if (($controlStyle -band $requiredClippingStyles) -ne $requiredClippingStyles) {
+        throw "Control window is missing child/sibling clipping styles."
+    }
+
     $wallpaperWindow = [LweStaticOverlayProbe]::FindProcessChild(
         [uint32]$activeProcess.Id, "LiveWallpaperEngine.Wallpaper")
     if ($wallpaperWindow -eq [IntPtr]::Zero) {
@@ -247,6 +256,7 @@ try {
     "TEST_IMAGE_GPU_DEDICATED_BYTES=$($firstMetrics.DedicatedGpuBytes)"
     "TEST_IMAGE_GPU_SHARED_BYTES=$($firstMetrics.SharedGpuBytes)"
     "SINGLE_INSTANCE_COUNT=$instanceCount"
+    "CONTROL_WINDOW_CHILD_CLIPPING=True"
     "SYSTEM_WALLPAPER_UNCHANGED=True"
     "SETTINGS_UNCHANGED=True"
 
