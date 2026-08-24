@@ -4,6 +4,8 @@
 #include <cmath>
 #include <sstream>
 
+#include <d3d10.h>
+
 #include "core/Logger.h"
 
 namespace lwe::render {
@@ -37,7 +39,11 @@ bool D3DRenderer::CreateDevice() {
     };
 
     D3D_FEATURE_LEVEL selectedLevel{};
-    constexpr UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    // Media Foundation frame-server mode shares this device for hardware video
+    // decode and processing. VIDEO_SUPPORT is harmless for image/GIF rendering
+    // and avoids creating a second D3D device when a video is selected.
+    constexpr UINT flags =
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
     HRESULT result = D3D11CreateDevice(
         nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags, featureLevels.data(),
         static_cast<UINT>(featureLevels.size()), D3D11_SDK_VERSION, &device_, &selectedLevel,
@@ -46,7 +52,8 @@ bool D3DRenderer::CreateDevice() {
     if (FAILED(result)) {
         core::LogWarning(L"Hardware D3D11 device creation failed; trying WARP software rendering.");
         result = D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, featureLevels.data(),
+            nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, featureLevels.data(),
             static_cast<UINT>(featureLevels.size()), D3D11_SDK_VERSION, &device_, &selectedLevel,
             &context_);
     }
@@ -54,6 +61,14 @@ bool D3DRenderer::CreateDevice() {
     if (FAILED(result)) {
         core::LogError(L"D3D11 device creation failed.", result);
         return false;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D10Multithread> multithread;
+    if (SUCCEEDED(device_.As(&multithread))) {
+        // Media Foundation may use the shared DXGI device from decoder threads.
+        // Protecting the immediate context prevents video frame transfer from
+        // racing image/GIF rendering or swap-chain resize operations.
+        multithread->SetMultithreadProtected(TRUE);
     }
 
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
@@ -73,7 +88,8 @@ bool D3DRenderer::CreateDevice() {
     return true;
 }
 
-bool D3DRenderer::CreateSwapChain(const HWND targetWindow, const UINT width, const UINT height) {
+bool D3DRenderer::CreateSwapChain(const HWND targetWindow, const UINT width,
+                                  const UINT height) {
     Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     Microsoft::WRL::ComPtr<IDXGIFactory> factory;
@@ -99,29 +115,27 @@ bool D3DRenderer::CreateSwapChain(const HWND targetWindow, const UINT width, con
     description.BufferCount = 1;
     description.OutputWindow = targetWindow;
     description.Windowed = TRUE;
-
-    // Windows 11 raised desktop requires a WS_EX_LAYERED child. A normal HWND
-    // flip-model swap chain does not honor SetLayeredWindowAttributes reliably,
-    // so this compatibility spike intentionally uses the D3D11 BitBlt model.
-    // The production optimization path is DirectComposition plus a composition
-    // flip-model swap chain, which will be evaluated after embedding is stable.
     description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
+    // Windows 11 raised desktop explicitly supports DXGI BitBlt presents to a
+    // fully opaque layered child that is z-ordered between DefView and WorkerW.
+    // The former failure was caused by parenting below the WorkerW wallpaper,
+    // not by the BitBlt swap chain itself.
     result = factory->CreateSwapChain(device_.Get(), &description, &swapChain_);
     if (FAILED(result)) {
         core::LogError(L"DXGI swap chain creation failed.", result);
         return false;
     }
 
-    factory->MakeWindowAssociation(targetWindow,
-                                   DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+    factory->MakeWindowAssociation(
+        targetWindow, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
     core::LogInfo(L"DXGI BitBlt swap chain created for layered desktop compatibility.");
     return true;
 }
 
 bool D3DRenderer::CreateRenderTarget() {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
-    const HRESULT result = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    const HRESULT result = AcquireBackBuffer(backBuffer);
     if (FAILED(result)) {
         core::LogError(L"Unable to obtain the swap chain back buffer.", result);
         return false;
@@ -175,16 +189,7 @@ bool D3DRenderer::Render(const std::chrono::steady_clock::duration elapsed) {
     context_->OMSetRenderTargets(1, &target, nullptr);
     context_->ClearRenderTargetView(renderTarget_.Get(), clearColor);
 
-    const HRESULT result = swapChain_->Present(1, 0);
-    if (result == DXGI_STATUS_OCCLUDED) {
-        Sleep(100);
-        return true;
-    }
-    if (FAILED(result)) {
-        core::LogError(L"DXGI Present failed.", result);
-        return false;
-    }
-    return true;
+    return PresentCurrentFrame();
 }
 
 bool D3DRenderer::PresentStaticImage(const std::span<const std::uint8_t> bgraPixels,
@@ -198,7 +203,7 @@ bool D3DRenderer::PresentStaticImage(const std::span<const std::uint8_t> bgraPix
     }
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
-    HRESULT result = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    HRESULT result = AcquireBackBuffer(backBuffer);
     if (FAILED(result)) {
         core::LogError(L"Unable to acquire the static wallpaper back buffer.", result);
         return false;
@@ -213,12 +218,31 @@ bool D3DRenderer::PresentStaticImage(const std::span<const std::uint8_t> bgraPix
     }
 
     context_->UpdateSubresource(backBuffer.Get(), 0, nullptr, bgraPixels.data(), stride, 0);
-    result = swapChain_->Present(1, 0);
-    if (FAILED(result)) {
-        core::LogError(L"Static wallpaper Present failed.", result);
+    return PresentCurrentFrame();
+}
+
+HRESULT D3DRenderer::AcquireBackBuffer(
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>& backBuffer) const {
+    backBuffer.Reset();
+    if (!swapChain_) {
+        return E_UNEXPECTED;
+    }
+    return swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+}
+
+bool D3DRenderer::PresentCurrentFrame(const bool synchronize) {
+    if (!swapChain_) {
         return false;
     }
-
+    const HRESULT result = swapChain_->Present(synchronize ? 1U : 0U, 0);
+    if (result == DXGI_STATUS_OCCLUDED) {
+        Sleep(100);
+        return true;
+    }
+    if (FAILED(result)) {
+        core::LogError(L"DXGI Present failed.", result);
+        return false;
+    }
     return true;
 }
 
@@ -235,6 +259,10 @@ void D3DRenderer::Shutdown() {
 
 bool D3DRenderer::IsInitialized() const noexcept {
     return device_ && context_ && swapChain_ && renderTarget_;
+}
+
+ID3D11Device* D3DRenderer::Device() const noexcept {
+    return device_.Get();
 }
 
 }  // namespace lwe::render

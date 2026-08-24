@@ -23,6 +23,9 @@ public:
         Sound = 1106,
         Hide = 1107,
         Exit = 1108,
+        FilterStatic = 1109,
+        FilterGif = 1110,
+        FilterVideo = 1111,
     };
 
     ModernMainWindow() = default;
@@ -61,11 +64,13 @@ private:
                        std::wstring_view search) const;
     void DrawButton(const DRAWITEMSTRUCT& draw) const;
     void DrawLibraryItem(const DRAWITEMSTRUCT& draw) const;
-    void DrawFilterItem(const DRAWITEMSTRUCT& draw) const;
 
     HWND parent_ = nullptr;
     HWND search_ = nullptr;
     HWND filter_ = nullptr;
+    HWND filterStatic_ = nullptr;
+    HWND filterGif_ = nullptr;
+    HWND filterVideo_ = nullptr;
     HWND library_ = nullptr;
     HWND import_ = nullptr;
     HWND export_ = nullptr;

@@ -96,6 +96,21 @@ std::optional<DesktopTarget> FindDesktopTarget() {
 
         if (worker != nullptr) {
             core::LogInfo(L"Raised desktop WorkerW selected: " + HandleText(worker));
+            const HWND shellView =
+                FindWindowExW(progman, nullptr, L"SHELLDLL_DefView", nullptr);
+            if (shellView != nullptr) {
+                // Windows 11's raised desktop draws the system wallpaper in the
+                // WorkerW child itself. Parenting our renderer to that WorkerW
+                // puts it underneath the system wallpaper even though Present
+                // succeeds. Our layered child must instead be a Progman sibling
+                // placed immediately behind the layered icon view and therefore
+                // above the system-wallpaper WorkerW.
+                core::LogInfo(L"Raised desktop renderer will be placed between "
+                              L"SHELLDLL_DefView and WorkerW.");
+                return DesktopTarget{progman, shellView, DesktopLayout::Raised};
+            }
+            core::LogWarning(
+                L"Raised desktop icon view was not found; using WorkerW fallback.");
             return DesktopTarget{worker, nullptr, DesktopLayout::Raised};
         }
     }

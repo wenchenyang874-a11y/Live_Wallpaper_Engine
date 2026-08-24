@@ -79,6 +79,8 @@ private:
 
     HINSTANCE instance_ = nullptr;
     HANDLE activationEvent_ = nullptr;
+    HANDLE desktopCompatibilityMutex_ = nullptr;
+    bool desktopCompatibilityMutexOwned_ = false;
     HWND controlWindow_ = nullptr;
     HWND wallpaperWindow_ = nullptr;
     UINT taskbarCreatedMessage_ = 0;

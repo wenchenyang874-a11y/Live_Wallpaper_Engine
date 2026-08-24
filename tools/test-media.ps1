@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $GifPath,
     [Parameter(Mandatory = $true)]
-    [string] $VideoPath
+    [string] $VideoPath,
+    [switch] $HideWallpaperWindow
 )
 
 Set-StrictMode -Version Latest
@@ -26,6 +27,7 @@ public static class LweMediaProbe
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr w, out uint p);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr w, StringBuilder n, int c);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
 
     public static IntPtr Find(uint processId, string targetClass, bool child)
     {
@@ -100,6 +102,12 @@ function Start-MediaTest([string] $path) {
         if (-not $process.HasExited) { Stop-Process -Id $process.Id }
         throw "Media wallpaper windows were not found for '$path'."
     }
+    if ($HideWallpaperWindow) {
+        # Hidden mode verifies decoding, frame transfer and lifecycle without
+        # disturbing an interactive desktop that still has an incompatible
+        # third-party organizer layer. It is not a visual desktop substitute.
+        [void][LweMediaProbe]::ShowWindow($wallpaper, 0)
+    }
     @($process, $control)
 }
 function Stop-MediaTest($process, [IntPtr] $control) {
@@ -146,11 +154,16 @@ try {
     $logSegment = [Text.Encoding]::UTF8.GetString($logBytes, [int]$baselineLogBytes, $logBytes.Length - [int]$baselineLogBytes)
     foreach ($required in @('Loaded an animated GIF with', 'Animated GIF overlay mode activated.',
         'GIF playback statistics: rendered=',
-        'Media Engine opened a looping video; audio is muted:', 'Media Engine video playback started.',
+        'Media Engine frame server opened a looping video; audio is muted:', 'Media Engine video playback started.',
         'Video playback statistics: rendered=',
+        'Video frame-server transfers presented=',
         'Video audio enabled.', 'Video audio muted.', 'Dynamic wallpaper paused:',
         'Dynamic wallpaper resumed after pause policy cleared.')) {
         if (-not $logSegment.Contains($required)) { throw "Expected runtime evidence was not logged: $required" }
+    }
+    $transferMatch = [regex]::Match($logSegment, 'Video frame-server transfers presented=(\d+)\.')
+    if (-not $transferMatch.Success -or [uint64]$transferMatch.Groups[1].Value -eq 0) {
+        throw 'The video frame server did not present any decoded frames.'
     }
     if ((Get-SettingsState) -ne $baselineSettings) { throw 'Controlled tests changed saved settings.' }
     if ((Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\Desktop' -Name WallPaper).WallPaper -ne $baselineWallpaper) {
@@ -178,6 +191,7 @@ try {
     'GIF_PLAYBACK=True'; 'VIDEO_PLAYBACK=True'; 'VIDEO_DEFAULT_MUTED=True'
     'VIDEO_SOUND_TOGGLE=True'; 'SESSION_PAUSE_RESUME=True'
     'SETTINGS_UNCHANGED=True'; 'SYSTEM_WALLPAPER_UNCHANGED=True'
+    "WALLPAPER_WINDOW_HIDDEN=$([bool]$HideWallpaperWindow)"
 } finally {
     if ($null -ne $activeProcess -and -not $activeProcess.HasExited) {
         Stop-Process -Id $activeProcess.Id -ErrorAction SilentlyContinue

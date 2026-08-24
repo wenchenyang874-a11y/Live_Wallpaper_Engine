@@ -34,6 +34,8 @@ constexpr int kTrayImportCommand = 2100;
 constexpr int kTrayShowCommand = 2101;
 constexpr int kTraySoundCommand = 2102;
 constexpr int kTrayExitCommand = 2103;
+constexpr wchar_t kDesktopCompatibilityMutexName[] =
+    L"cxWallpaperEngineGlobalMutex";
 
 bool RegisterApplicationClass(const HINSTANCE instance, const wchar_t* className,
                               const WNDPROC procedure, const HBRUSH background,
@@ -98,6 +100,20 @@ WallpaperApplication::~WallpaperApplication() {
 int WallpaperApplication::Run(const std::chrono::seconds testDuration,
                               const std::optional<std::wstring>& testWallpaper) {
     controlledTestMode_ = testDuration.count() > 0;
+    // Tencent DeskGo and other desktop organizers use this established signal
+    // to stop painting an opaque copy of the Windows wallpaper above live
+    // wallpaper hosts. The handle exists only for our application lifetime.
+    SetLastError(ERROR_SUCCESS);
+    desktopCompatibilityMutex_ =
+        CreateMutexW(nullptr, TRUE, kDesktopCompatibilityMutexName);
+    if (desktopCompatibilityMutex_ == nullptr) {
+        core::LogWarning(L"Desktop-organizer compatibility signal is unavailable.");
+    } else {
+        desktopCompatibilityMutexOwned_ = GetLastError() != ERROR_ALREADY_EXISTS;
+        core::LogInfo(desktopCompatibilityMutexOwned_
+                          ? L"Desktop-organizer live-wallpaper compatibility enabled."
+                          : L"Desktop-organizer compatibility is already active.");
+    }
     const HRESULT mediaFoundationResult = MFStartup(MF_VERSION, MFSTARTUP_FULL);
     mediaFoundationStarted_ = SUCCEEDED(mediaFoundationResult);
     if (!mediaFoundationStarted_) {
@@ -190,12 +206,30 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
                 break;
             }
         }
+        if (playbackMode_ == PlaybackMode::Video &&
+            !dynamicPlaybackPaused_ && videoPlayer_.IsPlaying()) {
+            RECT client{};
+            if (!GetClientRect(wallpaperWindow_, &client)) {
+                exitCode = 1;
+                break;
+            }
+            const HRESULT frameResult = videoPlayer_.PresentFrame(
+                renderer_, static_cast<UINT>(client.right - client.left),
+                static_cast<UINT>(client.bottom - client.top));
+            if (FAILED(frameResult)) {
+                exitCode = 1;
+                break;
+            }
+        }
 
         DWORD waitMilliseconds = RemainingTestMilliseconds(testDuration, elapsed);
         if (playbackMode_ == PlaybackMode::AnimatedGif &&
             !dynamicPlaybackPaused_) {
             waitMilliseconds =
                 std::min(waitMilliseconds, gifPlayer_.WaitMilliseconds(now));
+        }
+        if (playbackMode_ == PlaybackMode::Video && !dynamicPlaybackPaused_) {
+            waitMilliseconds = std::min(waitMilliseconds, 8UL);
         }
 
         HANDLE handles[] = {activationEvent_};
@@ -659,8 +693,13 @@ HRESULT WallpaperApplication::ApplyVideo(const std::wstring_view path) {
     if (!mediaFoundationStarted_) {
         return MF_E_PLATFORM_NOT_INITIALIZED;
     }
-    renderer_.Shutdown();
-    const HRESULT result = videoPlayer_.Open(wallpaperWindow_, controlWindow_,
+    if (!EnsureRenderer()) {
+        return E_FAIL;
+    }
+    // Keep the existing swap chain alive while media is prepared. Destroying
+    // and recreating the HWND renderer on every video switch exposed the system
+    // wallpaper between frames and produced the user's continuous flashing.
+    const HRESULT result = videoPlayer_.Open(renderer_.Device(), controlWindow_,
                                               kMediaEngineEventMessage, path,
                                               soundEnabled_);
     if (SUCCEEDED(result)) {
@@ -903,6 +942,17 @@ void WallpaperApplication::Shutdown() {
         DestroyWindow(wallpaperWindow_);
     }
     wallpaperWindow_ = nullptr;
+    if (desktopCompatibilityMutex_ != nullptr) {
+        // The mutex must remain owned, not merely present. DeskGo waits on it
+        // to detect shutdown; an unowned mutex is immediately signalled and
+        // makes its static background repeatedly hide/show, causing flashing.
+        if (desktopCompatibilityMutexOwned_) {
+            ReleaseMutex(desktopCompatibilityMutex_);
+        }
+        CloseHandle(desktopCompatibilityMutex_);
+        desktopCompatibilityMutex_ = nullptr;
+        desktopCompatibilityMutexOwned_ = false;
+    }
     if (controlWindow_ != nullptr && IsWindow(controlWindow_)) {
         DragAcceptFiles(controlWindow_, FALSE);
         DestroyWindow(controlWindow_);

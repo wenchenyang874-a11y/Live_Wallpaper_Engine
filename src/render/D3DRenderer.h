@@ -24,9 +24,13 @@ public:
     bool Render(std::chrono::steady_clock::duration elapsed);
     bool PresentStaticImage(std::span<const std::uint8_t> bgraPixels, UINT width,
                             UINT height, UINT stride);
+    HRESULT AcquireBackBuffer(
+        Microsoft::WRL::ComPtr<ID3D11Texture2D>& backBuffer) const;
+    bool PresentCurrentFrame(bool synchronize = true);
     void Shutdown();
 
     [[nodiscard]] bool IsInitialized() const noexcept;
+    [[nodiscard]] ID3D11Device* Device() const noexcept;
 
 private:
     bool CreateDevice();

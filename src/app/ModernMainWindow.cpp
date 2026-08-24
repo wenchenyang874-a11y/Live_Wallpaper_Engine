@@ -135,11 +135,6 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
                               0, 0, 1, 1, parent_,
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(Search)),
                               instance, nullptr);
-    filter_ = CreateWindowExW(
-        0, WC_COMBOBOXW, L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | WS_VSCROLL,
-        0, 0, 1, 1, parent_,
-        reinterpret_cast<HMENU>(static_cast<INT_PTR>(Filter)), instance, nullptr);
     library_ = CreateWindowExW(
         0, L"LISTBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED |
@@ -153,6 +148,10 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
             parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(identifier)), instance,
             nullptr);
     };
+    filter_ = createButton(Filter, L"全部");
+    filterStatic_ = createButton(FilterStatic, L"图片");
+    filterGif_ = createButton(FilterGif, L"GIF");
+    filterVideo_ = createButton(FilterVideo, L"视频");
     import_ = createButton(Import, L"＋  导入壁纸");
     export_ = createButton(Export, L"导出分享包");
     apply_ = createButton(Apply, L"应用到桌面");
@@ -160,24 +159,17 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     hide_ = createButton(Hide, L"隐藏到托盘");
     exit_ = createButton(Exit, L"退出程序");
 
-    if (search_ == nullptr || filter_ == nullptr || library_ == nullptr ||
+    if (search_ == nullptr || filter_ == nullptr || filterStatic_ == nullptr ||
+        filterGif_ == nullptr || filterVideo_ == nullptr || library_ == nullptr ||
         import_ == nullptr || export_ == nullptr || apply_ == nullptr ||
         sound_ == nullptr || hide_ == nullptr || exit_ == nullptr) {
         return false;
     }
 
     SetWindowTheme(search_, L"DarkMode_Explorer", nullptr);
-    SetWindowTheme(filter_, L"DarkMode_Explorer", nullptr);
     SetWindowTheme(library_, L"DarkMode_Explorer", nullptr);
     SendMessageW(search_, EM_SETCUEBANNER, TRUE,
                  reinterpret_cast<LPARAM>(L"搜索名称、格式或路径"));
-
-    constexpr std::array filterLabels{L"全部壁纸", L"静态图片", L"动态 GIF",
-                                       L"视频"};
-    for (const wchar_t* label : filterLabels) {
-        SendMessageW(filter_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
-    }
-    SendMessageW(filter_, CB_SETCURSEL, 0, 0);
 
     editBrush_ = CreateSolidBrush(kPanel);
     panelBrush_ = CreateSolidBrush(kPanel);
@@ -211,13 +203,12 @@ void ModernMainWindow::RecreateFonts() {
                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
                              L"Segoe UI Variable Text");
 
-    for (const HWND control : {search_, filter_, library_, import_, export_, apply_,
+    for (const HWND control : {search_, filter_, filterStatic_, filterGif_,
+                               filterVideo_, library_, import_, export_, apply_,
                                sound_, hide_, exit_}) {
         SetControlFont(control, bodyFont_);
     }
     SendMessageW(library_, LB_SETITEMHEIGHT, 0, Scale(parent_, 78));
-    SendMessageW(filter_, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), Scale(parent_, 34));
-    SendMessageW(filter_, CB_SETITEMHEIGHT, 0, Scale(parent_, 32));
 }
 
 void ModernMainWindow::Layout() {
@@ -235,12 +226,20 @@ void ModernMainWindow::Layout() {
     const int contentWidth = std::max(1, width - contentLeft - margin);
     const int searchTop = Scale(parent_, 104);
     const int controlHeight = Scale(parent_, 40);
-    const int filterWidth = Scale(parent_, 142);
+    const int filterWidth = Scale(parent_, 282);
     const int searchWidth = std::max(1, contentWidth - filterWidth - gap);
 
     MoveWindow(search_, contentLeft, searchTop, searchWidth, controlHeight, TRUE);
-    MoveWindow(filter_, contentLeft + searchWidth + gap, searchTop, filterWidth,
-               Scale(parent_, 260), TRUE);
+    const int filterLeft = contentLeft + searchWidth + gap;
+    const int segmentGap = Scale(parent_, 4);
+    const int segmentWidth = std::max(1, (filterWidth - segmentGap * 3) / 4);
+    MoveWindow(filter_, filterLeft, searchTop, segmentWidth, controlHeight, TRUE);
+    MoveWindow(filterStatic_, filterLeft + segmentWidth + segmentGap, searchTop,
+               segmentWidth, controlHeight, TRUE);
+    MoveWindow(filterGif_, filterLeft + (segmentWidth + segmentGap) * 2, searchTop,
+               segmentWidth, controlHeight, TRUE);
+    MoveWindow(filterVideo_, filterLeft + (segmentWidth + segmentGap) * 3, searchTop,
+               filterWidth - (segmentWidth + segmentGap) * 3, controlHeight, TRUE);
 
     const int actionTop = searchTop + controlHeight + gap;
     const int actionWidth = std::max(1, (contentWidth - gap * 2) / 3);
@@ -327,10 +326,6 @@ bool ModernMainWindow::DrawItem(const DRAWITEMSTRUCT& draw) const {
         DrawLibraryItem(draw);
         return true;
     }
-    if (draw.CtlID == Filter) {
-        DrawFilterItem(draw);
-        return true;
-    }
     if (draw.CtlType == ODT_BUTTON) {
         DrawButton(draw);
         return true;
@@ -346,7 +341,19 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
     COLORREF fill = kPanel;
     COLORREF outline = kBorder;
     COLORREF foreground = disabled ? RGB(90, 98, 114) : kTextPrimary;
-    if (draw.CtlID == Apply || draw.CtlID == Import) {
+    const bool filterButton =
+        draw.CtlID == Filter || draw.CtlID == FilterStatic ||
+        draw.CtlID == FilterGif || draw.CtlID == FilterVideo;
+    const bool selectedFilter =
+        (draw.CtlID == Filter && filterKind_ == FilterKind::All) ||
+        (draw.CtlID == FilterStatic && filterKind_ == FilterKind::StaticImage) ||
+        (draw.CtlID == FilterGif && filterKind_ == FilterKind::AnimatedGif) ||
+        (draw.CtlID == FilterVideo && filterKind_ == FilterKind::Video);
+    if (filterButton && selectedFilter) {
+        fill = pressed ? RGB(72, 99, 207) : RGB(47, 62, 108);
+        outline = kAccent;
+        foreground = RGB(210, 219, 255);
+    } else if (draw.CtlID == Apply || draw.CtlID == Import) {
         fill = pressed ? RGB(72, 99, 207) : kAccent;
         outline = fill;
     } else if (draw.CtlID == Exit) {
@@ -414,22 +421,6 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
     }
 }
 
-void ModernMainWindow::DrawFilterItem(const DRAWITEMSTRUCT& draw) const {
-    const bool selected = (draw.itemState & ODS_SELECTED) != 0;
-    FillRectangle(draw.hDC, draw.rcItem, selected ? kPanelHover : kPanel);
-    if (draw.itemID == static_cast<UINT>(-1)) {
-        return;
-    }
-    wchar_t text[64]{};
-    SendMessageW(draw.hwndItem, CB_GETLBTEXT, draw.itemID,
-                 reinterpret_cast<LPARAM>(text));
-    RECT label = draw.rcItem;
-    label.left += Scale(parent_, 12);
-    label.right -= Scale(parent_, 8);
-    DrawTextLine(draw.hDC, text, label, bodyFont_, kTextPrimary,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-}
-
 HBRUSH ModernMainWindow::ColorControl(const HDC deviceContext, const HWND control) const {
     SetBkMode(deviceContext, TRANSPARENT);
     if (control == search_) {
@@ -448,12 +439,22 @@ bool ModernMainWindow::HandleFilterCommand(const WORD controlId,
         RefreshVisibleItems();
         return true;
     }
-    if (controlId == Filter && notificationCode == CBN_SELCHANGE) {
-        const LRESULT selection = SendMessageW(filter_, CB_GETCURSEL, 0, 0);
-        if (selection >= 0 && selection <= 3) {
-            filterKind_ = static_cast<FilterKind>(selection);
-            RefreshVisibleItems();
+    if (notificationCode == BN_CLICKED &&
+        (controlId == Filter || controlId == FilterStatic ||
+         controlId == FilterGif || controlId == FilterVideo)) {
+        if (controlId == Filter) {
+            filterKind_ = FilterKind::All;
+        } else if (controlId == FilterStatic) {
+            filterKind_ = FilterKind::StaticImage;
+        } else if (controlId == FilterGif) {
+            filterKind_ = FilterKind::AnimatedGif;
+        } else {
+            filterKind_ = FilterKind::Video;
         }
+        for (const HWND control : {filter_, filterStatic_, filterGif_, filterVideo_}) {
+            InvalidateRect(control, nullptr, FALSE);
+        }
+        RefreshVisibleItems();
         return true;
     }
     return false;

@@ -9,10 +9,12 @@
 #include <vector>
 
 #include <mfapi.h>
+#include <mferror.h>
 #include <propvarutil.h>
 #include <shlwapi.h>
 
 #include "core/Logger.h"
+#include "render/D3DRenderer.h"
 
 namespace lwe::media::video {
 namespace {
@@ -100,12 +102,13 @@ MediaEnginePlayer::~MediaEnginePlayer() {
     Shutdown();
 }
 
-HRESULT MediaEnginePlayer::Open(const HWND videoWindow, const HWND notificationWindow,
+HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
+                                const HWND notificationWindow,
                                 const UINT notificationMessage,
                                 const std::wstring_view path,
                                 const bool soundEnabled) {
     Shutdown();
-    if (!IsWindow(videoWindow) || !IsWindow(notificationWindow) ||
+    if (device == nullptr || !IsWindow(notificationWindow) ||
         notificationMessage < WM_APP || path.empty()) {
         return E_INVALIDARG;
     }
@@ -124,15 +127,26 @@ HRESULT MediaEnginePlayer::Open(const HWND videoWindow, const HWND notificationW
     callback_.Attach(callback);
 
     Microsoft::WRL::ComPtr<IMFAttributes> attributes;
-    result = MFCreateAttributes(&attributes, 2);
+    result = MFCreateDXGIDeviceManager(&deviceResetToken_, &deviceManager_);
+    if (SUCCEEDED(result)) {
+        result = deviceManager_->ResetDevice(device, deviceResetToken_);
+    }
+    if (SUCCEEDED(result)) {
+        result = MFCreateAttributes(&attributes, 3);
+    }
     if (SUCCEEDED(result)) {
         result = attributes->SetUnknown(MF_MEDIA_ENGINE_CALLBACK, callback_.Get());
     }
     if (SUCCEEDED(result)) {
-        result = attributes->SetUINT64(
-            MF_MEDIA_ENGINE_PLAYBACK_HWND,
-            static_cast<UINT64>(reinterpret_cast<std::uintptr_t>(videoWindow)));
+        result = attributes->SetUnknown(MF_MEDIA_ENGINE_DXGI_MANAGER,
+                                        deviceManager_.Get());
     }
+    if (SUCCEEDED(result)) {
+        result = attributes->SetUINT32(MF_MEDIA_ENGINE_VIDEO_OUTPUT_FORMAT,
+                                       DXGI_FORMAT_B8G8R8A8_UNORM);
+    }
+    // Omitting MF_MEDIA_ENGINE_PLAYBACK_HWND selects frame-server mode. Frames
+    // are copied into our existing desktop swap chain with TransferVideoFrame.
     if (SUCCEEDED(result)) {
         result = CoCreateInstance(CLSID_MFMediaEngineClassFactory, nullptr,
                                   CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory_));
@@ -176,9 +190,79 @@ HRESULT MediaEnginePlayer::Open(const HWND videoWindow, const HWND notificationW
         return result;
     }
 
-    core::LogInfo(L"Media Engine opened a looping video; audio is " +
+    core::LogInfo(L"Media Engine frame server opened a looping video; audio is " +
                   std::wstring(soundEnabled ? L"enabled: " : L"muted: ") +
                   std::wstring(path));
+    return S_OK;
+}
+
+HRESULT MediaEnginePlayer::PresentFrame(render::D3DRenderer& renderer,
+                                        const UINT width, const UINT height) {
+    if (!engine_ || !playing_ || width == 0 || height == 0) {
+        return S_FALSE;
+    }
+
+    LONGLONG presentationTime = 0;
+    HRESULT result = engine_->OnVideoStreamTick(&presentationTime);
+    if (result == S_FALSE) {
+        return S_FALSE;
+    }
+    if (FAILED(result)) {
+        failed_ = true;
+        core::LogError(L"Media Engine frame tick failed.", result);
+        return result;
+    }
+    if (hasPresentationTime_ && presentationTime == lastPresentationTime_) {
+        return S_FALSE;
+    }
+
+    if (nativeWidth_ == 0 || nativeHeight_ == 0) {
+        result = engine_->GetNativeVideoSize(&nativeWidth_, &nativeHeight_);
+        if (FAILED(result) || nativeWidth_ == 0 || nativeHeight_ == 0) {
+            failed_ = true;
+            core::LogError(L"Media Engine returned an invalid native video size.",
+                           FAILED(result) ? result : MF_E_INVALIDMEDIATYPE);
+            return FAILED(result) ? result : MF_E_INVALIDMEDIATYPE;
+        }
+    }
+
+    MFVideoNormalizedRect source{0.0F, 0.0F, 1.0F, 1.0F};
+    const float sourceAspect =
+        static_cast<float>(nativeWidth_) / static_cast<float>(nativeHeight_);
+    const float destinationAspect = static_cast<float>(width) / static_cast<float>(height);
+    if (sourceAspect > destinationAspect) {
+        const float normalizedWidth = destinationAspect / sourceAspect;
+        source.left = (1.0F - normalizedWidth) * 0.5F;
+        source.right = source.left + normalizedWidth;
+    } else if (sourceAspect < destinationAspect) {
+        const float normalizedHeight = sourceAspect / destinationAspect;
+        source.top = (1.0F - normalizedHeight) * 0.5F;
+        source.bottom = source.top + normalizedHeight;
+    }
+
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> backBuffer;
+    result = renderer.AcquireBackBuffer(backBuffer);
+    if (FAILED(result)) {
+        failed_ = true;
+        core::LogError(L"Unable to acquire the video destination back buffer.", result);
+        return result;
+    }
+
+    const RECT destination{0, 0, static_cast<LONG>(width), static_cast<LONG>(height)};
+    const MFARGB border{0, 0, 0, 255};
+    result = engine_->TransferVideoFrame(backBuffer.Get(), &source, &destination, &border);
+    if (FAILED(result)) {
+        failed_ = true;
+        core::LogError(L"Media Engine could not transfer a decoded video frame.", result);
+        return result;
+    }
+    if (!renderer.PresentCurrentFrame(false)) {
+        failed_ = true;
+        return E_FAIL;
+    }
+    lastPresentationTime_ = presentationTime;
+    hasPresentationTime_ = true;
+    ++transferredFrameCount_;
     return S_OK;
 }
 
@@ -294,15 +378,24 @@ void MediaEnginePlayer::Shutdown() {
                 : std::chrono::duration_cast<std::chrono::milliseconds>(
                       now - statisticsStartedAt_ - pausedDuration);
         LogPlaybackStatistics(engine_.Get(), activeDuration);
+        core::LogInfo(L"Video frame-server transfers presented=" +
+                      std::to_wstring(transferredFrameCount_) + L'.');
         engine_->Pause();
         engine_->Shutdown();
     }
     engine_.Reset();
+    deviceManager_.Reset();
     factory_.Reset();
     callback_.Reset();
     statisticsStartedAt_ = {};
     statisticsPauseStartedAt_ = {};
     statisticsPausedDuration_ = {};
+    deviceResetToken_ = 0;
+    nativeWidth_ = 0;
+    nativeHeight_ = 0;
+    transferredFrameCount_ = 0;
+    lastPresentationTime_ = 0;
+    hasPresentationTime_ = false;
 }
 
 bool MediaEnginePlayer::IsActive() const noexcept {

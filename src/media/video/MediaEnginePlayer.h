@@ -6,8 +6,13 @@
 #include <string_view>
 
 #include <windows.h>
+#include <d3d11.h>
 #include <mfmediaengine.h>
 #include <wrl/client.h>
+
+namespace lwe::render {
+class D3DRenderer;
+}
 
 namespace lwe::media::video {
 
@@ -19,8 +24,10 @@ public:
     MediaEnginePlayer(const MediaEnginePlayer&) = delete;
     MediaEnginePlayer& operator=(const MediaEnginePlayer&) = delete;
 
-    HRESULT Open(HWND videoWindow, HWND notificationWindow, UINT notificationMessage,
-                 std::wstring_view path, bool soundEnabled);
+    HRESULT Open(ID3D11Device* device, HWND notificationWindow,
+                 UINT notificationMessage, std::wstring_view path,
+                 bool soundEnabled);
+    HRESULT PresentFrame(render::D3DRenderer& renderer, UINT width, UINT height);
     void HandleEvent(DWORD eventCode);
     HRESULT SetSoundEnabled(bool enabled);
     HRESULT SetPaused(bool paused);
@@ -55,7 +62,14 @@ private:
 
     Microsoft::WRL::ComPtr<IMFMediaEngineClassFactory> factory_;
     Microsoft::WRL::ComPtr<IMFMediaEngine> engine_;
+    Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> deviceManager_;
     Microsoft::WRL::ComPtr<EventCallback> callback_;
+    UINT deviceResetToken_ = 0;
+    DWORD nativeWidth_ = 0;
+    DWORD nativeHeight_ = 0;
+    std::uint64_t transferredFrameCount_ = 0;
+    LONGLONG lastPresentationTime_ = 0;
+    bool hasPresentationTime_ = false;
     bool playing_ = false;
     bool failed_ = false;
     bool soundEnabled_ = false;
