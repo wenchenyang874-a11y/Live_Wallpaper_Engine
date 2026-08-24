@@ -179,9 +179,14 @@ try {
     $library = [LweDisplayModeProbe]::GetDlgItem($control, 1102)
     [void][LweDisplayModeProbe]::SendMessage(
         $library, 0x0186, [IntPtr]::Zero, [IntPtr]::Zero)
-    $apply = [LweDisplayModeProbe]::GetDlgItem($control, 1105)
+    if ([LweDisplayModeProbe]::GetDlgItem($control, 1105) -ne [IntPtr]::Zero) {
+        throw 'The removed Apply button is still present.'
+    }
+    # Applying now uses the wallpaper row's double-click action instead of a
+    # separate Apply button. Exercise the same LBN_DBLCLK command emitted by
+    # the library control so this test follows the current user workflow.
     [void][LweDisplayModeProbe]::PostMessage(
-        $control, 0x0111, [LweDisplayModeProbe]::Command(1105, 0), $apply)
+        $control, 0x0111, [LweDisplayModeProbe]::Command(1102, 2), $library)
 
     $dialog = [IntPtr]::Zero
     for ($attempt = 0; $attempt -lt 50; $attempt++) {

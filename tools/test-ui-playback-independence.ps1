@@ -33,6 +33,7 @@ public static class LweUiPlaybackProbe
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr w);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr w, IntPtr dc, uint flags);
 
@@ -166,6 +167,16 @@ try {
     $displayMode = [LweUiPlaybackProbe]::GetDlgItem($control, 1199)
     $dropdown = [LweUiPlaybackProbe]::GetDlgItem($control, 1109)
     $library = [LweUiPlaybackProbe]::GetDlgItem($control, 1102)
+    $applyButtonRemoved =
+        [LweUiPlaybackProbe]::GetDlgItem($control, 1105) -eq [IntPtr]::Zero
+    $globalCancelButtonRemoved =
+        [LweUiPlaybackProbe]::GetDlgItem($control, 1107) -eq [IntPtr]::Zero
+    $activeDrawerHeaderRemoved =
+        [LweUiPlaybackProbe]::GetDlgItem($control, 1112) -eq [IntPtr]::Zero
+    if (-not $applyButtonRemoved -or -not $globalCancelButtonRemoved -or
+        -not $activeDrawerHeaderRemoved) {
+        throw 'A removed legacy action/header control is still present.'
+    }
     [void][LweUiPlaybackProbe]::SendMessage(
         $displayMode, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 20))
     [void][LweUiPlaybackProbe]::SendMessage(
@@ -210,11 +221,77 @@ try {
         throw 'The independent playback render thread did not start.'
     }
 
-    # Close the dropdown, then open the upward active-wallpaper drawer.
+    # A rapid second click is delivered by Win32 as BN_DBLCLK. It must close the
+    # list, and the next regular click must open it again rather than being
+    # swallowed. Close once more before exercising the classification list.
     [void][LweUiPlaybackProbe]::SendMessage(
-        $displayMode, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 20))
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(1199, 5), $displayMode)
+    if ([LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+        throw 'A rapid second display-mode click did not close the dropdown.'
+    }
     [void][LweUiPlaybackProbe]::SendMessage(
-        $displayMode, 0x0202, [IntPtr]::Zero, [LweUiPlaybackProbe]::Point(100, 20))
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(1199, 0), $displayMode)
+    if (-not [LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+        throw 'The display-mode dropdown did not reopen on the next click.'
+    }
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(1199, 5), $displayMode)
+    if ([LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+        throw 'The reopened display-mode dropdown did not close rapidly.'
+    }
+
+    # Exercise the filter dropdown through the same down/up messages produced
+    # by a real mouse click. Selecting its first row must close it without
+    # relying on LBN_SELCHANGE timing.
+    $filter = [LweUiPlaybackProbe]::GetDlgItem($control, 1101)
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $filter, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 20))
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $filter, 0x0202, [IntPtr]::Zero, [LweUiPlaybackProbe]::Point(100, 20))
+    if (-not [LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+        throw 'The classification dropdown did not open through a mouse click.'
+    }
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $dropdown, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(80, 20))
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $dropdown, 0x0202, [IntPtr]::Zero, [LweUiPlaybackProbe]::Point(80, 20))
+    if ([LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+        throw 'Selecting a classification row did not close the dropdown.'
+    }
+
+    # Once the hover transition has settled, moving inside the same wallpaper
+    # row must not repaint it again. This catches the visible flash caused by
+    # invalidating the whole list on every WM_MOUSEMOVE.
+    $libraryBounds = New-Object LweUiPlaybackProbe+RECT
+    [void][LweUiPlaybackProbe]::GetWindowRect($library, [ref]$libraryBounds)
+    [void][LweUiPlaybackProbe]::SetCursorPos(
+        $libraryBounds.Left + 120, $libraryBounds.Top + 38)
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $library, 0x0200, [IntPtr]::Zero, [LweUiPlaybackProbe]::Point(120, 38))
+    Start-Sleep -Milliseconds 500
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(2195, 0), [IntPtr]::Zero)
+    for ($offset = 0; $offset -lt 40; $offset++) {
+        [void][LweUiPlaybackProbe]::SendMessage(
+            $library, 0x0200, [IntPtr]::Zero,
+            [LweUiPlaybackProbe]::Point(100 + $offset, 38))
+    }
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(2195, 0), [IntPtr]::Zero)
+    $updatedLogBytes = Read-SharedBytes $logPath
+    $updatedLogSegment = [Text.Encoding]::UTF8.GetString(
+        $updatedLogBytes, [int]$baselineLogBytes,
+        $updatedLogBytes.Length - [int]$baselineLogBytes)
+    $drawMatches = [regex]::Matches(
+        $updatedLogSegment, 'CONTROLLED_LIBRARY_DRAW_COUNT=(\d+)')
+    if ($drawMatches.Count -lt 2) {
+        throw 'The controlled library draw counter did not produce two samples.'
+    }
+    $drawBefore = [uint64]$drawMatches[$drawMatches.Count - 2].Groups[1].Value
+    $drawAfter = [uint64]$drawMatches[$drawMatches.Count - 1].Groups[1].Value
+    if ($drawAfter - $drawBefore -gt 1) {
+        throw "Stationary-row mouse movement repainted the wallpaper list: $drawBefore -> $drawAfter"
+    }
 
     # Locate the active library badge through the same hit-test path used by a
     # real click. Rejecting the confirmation must keep the wallpaper active.
@@ -244,12 +321,24 @@ try {
     Start-Sleep -Milliseconds 300
 
     $activeStatus = [LweUiPlaybackProbe]::GetDlgItem($control, 1110)
-    [void][LweUiPlaybackProbe]::SendMessage(
-        $activeStatus, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 24))
-    [void][LweUiPlaybackProbe]::SendMessage(
-        $activeStatus, 0x0202, [IntPtr]::Zero, [LweUiPlaybackProbe]::Point(100, 24))
-    Start-Sleep -Milliseconds 300
     $activeList = [LweUiPlaybackProbe]::GetDlgItem($control, 1111)
+    # Rapid synchronous toggles must alternate deterministically. An even
+    # number leaves the drawer closed before the final click below opens it.
+    for ($toggle = 0; $toggle -lt 10; $toggle++) {
+        [void][LweUiPlaybackProbe]::SendMessage(
+            $control, 0x0111,
+            [LweUiPlaybackProbe]::Command(
+                1110, $(if (($toggle % 2) -eq 0) { 0 } else { 5 })),
+            $activeStatus)
+        $expectedVisible = ($toggle % 2) -eq 0
+        if ([LweUiPlaybackProbe]::IsWindowVisible($activeList) -ne
+            $expectedVisible) {
+            throw "Rapid active-drawer toggle failed at iteration $toggle."
+        }
+    }
+    [void][LweUiPlaybackProbe]::SendMessage(
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(1110, 0), $activeStatus)
+    Start-Sleep -Milliseconds 300
     $activeCount = [int][LweUiPlaybackProbe]::SendMessage(
         $activeList, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
     if (-not [LweUiPlaybackProbe]::IsWindowVisible($activeList) -or
@@ -292,8 +381,16 @@ try {
     "DROPDOWN_FRAME_COUNT_BEFORE=$before"
     "DROPDOWN_FRAME_COUNT_AFTER=$after"
     'DROPDOWN_PLAYBACK_CONTINUED=True'
+    'CLASSIFICATION_DROPDOWN_MOUSE_CLICK=True'
     'INDEPENDENT_RENDER_THREAD=True'
+    "LIBRARY_DRAW_COUNT_BEFORE_MOVES=$drawBefore"
+    "LIBRARY_DRAW_COUNT_AFTER_MOVES=$drawAfter"
+    'LIBRARY_MOUSE_MOVE_REPAINT_STABLE=True'
+    'ACTIVE_DRAWER_RAPID_TOGGLE=True'
     "ACTIVE_DRAWER_COUNT=$activeCount"
+    "APPLY_BUTTON_REMOVED=$applyButtonRemoved"
+    "GLOBAL_CANCEL_BUTTON_REMOVED=$globalCancelButtonRemoved"
+    "ACTIVE_DRAWER_HEADER_REMOVED=$activeDrawerHeaderRemoved"
     "ACTIVE_BADGE_ROW=$activeBadgeRow"
     'ACTIVE_BADGE_CONFIRMATION=True'
     'PER_ITEM_CANCEL_CONFIRMED=True'

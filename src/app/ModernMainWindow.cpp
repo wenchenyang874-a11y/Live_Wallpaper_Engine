@@ -526,9 +526,9 @@ ModernMainWindow::~ModernMainWindow() {
     if (renameEdit_ != nullptr) {
         RemoveWindowSubclass(renameEdit_, &ModernMainWindow::RenameEditProcedure, 1);
     }
-    for (const HWND control : {filter_, library_, import_, export_, apply_, sound_,
-                               cancelApplication_, displayMode_, dropdownList_,
-                               activeStatus_, activeList_, activeDrawerHeader_}) {
+    for (const HWND control : {filter_, library_, import_, export_, sound_,
+                               displayMode_, dropdownList_, activeStatus_,
+                               activeList_}) {
         if (control != nullptr) {
             RemoveWindowSubclass(control,
                                  &ModernMainWindow::InteractiveControlProcedure, 2);
@@ -570,7 +570,7 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(Library)), instance, nullptr);
     dropdownList_ = CreateWindowExW(
         WS_EX_TOOLWINDOW, L"LISTBOX", L"",
-        WS_CHILD | WS_CLIPSIBLINGS | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS |
+        WS_CHILD | WS_CLIPSIBLINGS | WS_VSCROLL | LBS_HASSTRINGS |
             LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT,
         0, 0, 1, 1, parent_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(DropdownList)), instance,
@@ -593,23 +593,19 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     filter_ = createButton(Filter, L"分类：全部");
     import_ = createButton(Import, L"＋  导入壁纸");
     export_ = createButton(Export, L"导出分享包");
-    apply_ = createButton(Apply, L"应用到桌面");
     sound_ = createButton(Sound, L"声音：关闭");
-    cancelApplication_ = createButton(CancelApplication, L"取消应用");
     displayMode_ = createButton(DisplayMode, L"显示方式：跨屏扩展");
     activeStatus_ = createButton(ActiveStatus, L"");
-    activeDrawerHeader_ = createButton(ActiveDrawerHeader, L"正在应用");
     renameEdit_ = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 1, 1,
         parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(RenameCommit)),
         instance, nullptr);
 
     if (search_ == nullptr || filter_ == nullptr || library_ == nullptr ||
-        import_ == nullptr || export_ == nullptr || apply_ == nullptr ||
-        sound_ == nullptr || cancelApplication_ == nullptr ||
+        import_ == nullptr || export_ == nullptr || sound_ == nullptr ||
         displayMode_ == nullptr || renameEdit_ == nullptr ||
         dropdownList_ == nullptr || activeStatus_ == nullptr ||
-        activeList_ == nullptr || activeDrawerHeader_ == nullptr) {
+        activeList_ == nullptr) {
         return false;
     }
 
@@ -620,9 +616,9 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     SetWindowTheme(renameEdit_, L"DarkMode_Explorer", nullptr);
     SetWindowSubclass(renameEdit_, &ModernMainWindow::RenameEditProcedure, 1,
                       reinterpret_cast<DWORD_PTR>(this));
-    for (const HWND control : {filter_, library_, import_, export_, apply_, sound_,
-                               cancelApplication_, displayMode_, dropdownList_,
-                               activeStatus_, activeList_, activeDrawerHeader_}) {
+    for (const HWND control : {filter_, library_, import_, export_, sound_,
+                               displayMode_, dropdownList_, activeStatus_,
+                               activeList_}) {
         SetWindowSubclass(control, &ModernMainWindow::InteractiveControlProcedure, 2,
                           reinterpret_cast<DWORD_PTR>(this));
         hoverProgress_.emplace(control, 0.0F);
@@ -663,10 +659,9 @@ void ModernMainWindow::RecreateFonts() {
                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
                              L"Segoe UI Variable Text");
 
-    for (const HWND control : {search_, filter_, library_, import_, export_, apply_,
-                               sound_, cancelApplication_, displayMode_,
-                               renameEdit_, dropdownList_, activeStatus_, activeList_,
-                               activeDrawerHeader_}) {
+    for (const HWND control : {search_, filter_, library_, import_, export_, sound_,
+                               displayMode_, renameEdit_, dropdownList_, activeStatus_,
+                               activeList_}) {
         SetControlFont(control, bodyFont_);
     }
     SendMessageW(library_, LB_SETITEMHEIGHT, 0, Scale(parent_, 78));
@@ -713,15 +708,11 @@ void ModernMainWindow::Layout() {
     MoveWindow(import_, contentLeft, actionTop, actionWidth, controlHeight, TRUE);
     MoveWindow(export_, contentLeft + actionWidth + gap, actionTop, actionWidth,
                controlHeight, TRUE);
-    MoveWindow(apply_, contentLeft + (actionWidth + gap) * 2, actionTop,
+    MoveWindow(displayMode_, contentLeft + (actionWidth + gap) * 2, actionTop,
                contentWidth - (actionWidth + gap) * 2, controlHeight, TRUE);
 
-    const int displayTop = actionTop + controlHeight + gap;
-    MoveWindow(displayMode_, contentLeft, displayTop, contentWidth,
-               controlHeight, TRUE);
-
     const int statusHeight = Scale(parent_, 62);
-    const int listTop = displayTop + controlHeight + Scale(parent_, 16);
+    const int listTop = actionTop + controlHeight + Scale(parent_, 16);
     const int listBottom = height - margin - statusHeight;
     MoveWindow(library_, contentLeft, listTop, contentWidth,
                std::max(1, listBottom - listTop - gap), TRUE);
@@ -737,32 +728,21 @@ void ModernMainWindow::Layout() {
                                          Scale(parent_, 260),
                                          Scale(parent_, 390));
     const int statusRight = contentLeft + contentWidth - resourceWidth - gap;
-    const int cancelWidth = Scale(parent_, 96);
     const int statusCardHeight = Scale(parent_, 54);
-    const int cancelHeight = Scale(parent_, 40);
-    MoveWindow(cancelApplication_, statusRight - cancelWidth - Scale(parent_, 8),
-               statusTop + (statusCardHeight - cancelHeight) / 2, cancelWidth,
-                cancelHeight, TRUE);
     MoveWindow(activeStatus_, contentLeft, statusTop,
                statusRight - contentLeft, statusCardHeight, TRUE);
-    SetWindowPos(cancelApplication_, HWND_TOP, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 
     if (activeDrawerVisible_ && !activeVisibleIndices_.empty()) {
         const int rowHeight = Scale(parent_, 78);
-        const int headerHeight = Scale(parent_, 44);
         const int visibleRows = std::clamp(
             static_cast<int>(activeVisibleIndices_.size()), 1, 4);
-        const int drawerHeight = headerHeight + rowHeight * visibleRows;
+        const int drawerHeight = rowHeight * visibleRows;
         const int drawerBottom = statusTop - Scale(parent_, 8);
         const int drawerTop = std::max(listTop, drawerBottom - drawerHeight);
-        SetWindowPos(activeDrawerHeader_, HWND_TOP, contentLeft, drawerTop,
-                     statusRight - contentLeft, headerHeight, SWP_SHOWWINDOW);
-        SetWindowPos(activeList_, HWND_TOP, contentLeft, drawerTop + headerHeight,
+        SetWindowPos(activeList_, HWND_TOP, contentLeft, drawerTop,
                      statusRight - contentLeft,
-                     drawerBottom - drawerTop - headerHeight, SWP_SHOWWINDOW);
+                     drawerBottom - drawerTop, SWP_SHOWWINDOW);
     } else {
-        ShowWindow(activeDrawerHeader_, SW_HIDE);
         ShowWindow(activeList_, SW_HIDE);
     }
 
@@ -850,23 +830,56 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
 }
 
 bool ModernMainWindow::DrawItem(const DRAWITEMSTRUCT& draw) const {
-    if (draw.CtlID == Library) {
-        DrawLibraryItem(draw);
-        return true;
+    const auto drawDirect = [&](const DRAWITEMSTRUCT& target) {
+        if (target.CtlID == Library) {
+            DrawLibraryItem(target);
+            return true;
+        }
+        if (target.CtlID == ActiveList) {
+            DrawActiveItem(target);
+            return true;
+        }
+        if (target.CtlID == DropdownList) {
+            DrawDropdownItem(target);
+            return true;
+        }
+        if (target.CtlType == ODT_BUTTON) {
+            DrawButton(target);
+            return true;
+        }
+        return false;
+    };
+
+    const int width = draw.rcItem.right - draw.rcItem.left;
+    const int height = draw.rcItem.bottom - draw.rcItem.top;
+    if (width <= 0 || height <= 0) {
+        return drawDirect(draw);
     }
-    if (draw.CtlID == ActiveList) {
-        DrawActiveItem(draw);
-        return true;
+    const HDC buffer = CreateCompatibleDC(draw.hDC);
+    const HBITMAP bitmap = CreateCompatibleBitmap(draw.hDC, width, height);
+    if (buffer == nullptr || bitmap == nullptr) {
+        if (bitmap != nullptr) {
+            DeleteObject(bitmap);
+        }
+        if (buffer != nullptr) {
+            DeleteDC(buffer);
+        }
+        return drawDirect(draw);
     }
-    if (draw.CtlID == DropdownList) {
-        DrawDropdownItem(draw);
-        return true;
+    const HGDIOBJ previousBitmap = SelectObject(buffer, bitmap);
+    SetViewportOrgEx(buffer, -draw.rcItem.left, -draw.rcItem.top, nullptr);
+    DRAWITEMSTRUCT buffered = draw;
+    buffered.hDC = buffer;
+    const bool handled = drawDirect(buffered);
+    SetViewportOrgEx(buffer, 0, 0, nullptr);
+    if (handled) {
+        BitBlt(draw.hDC, draw.rcItem.left, draw.rcItem.top, width, height,
+               buffer, 0, 0, SRCCOPY);
     }
-    if (draw.CtlType == ODT_BUTTON) {
-        DrawButton(draw);
-        return true;
-    }
-    return false;
+    SelectObject(buffer, previousBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(buffer);
+    return handled;
 }
 
 void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
@@ -878,29 +891,27 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
     COLORREF fill = kPanel;
     COLORREF outline = kBorder;
     COLORREF foreground = disabled ? RGB(90, 98, 114) : kTextPrimary;
-    if (draw.CtlID == Apply || draw.CtlID == Import) {
+    if (draw.CtlID == Import) {
         fill = pressed ? RGB(72, 99, 207)
                        : BlendColor(kAccent, kAccentHover, hover);
         outline = fill;
-    } else if (draw.CtlID == CancelApplication) {
-        foreground = disabled ? foreground : kDanger;
-        fill = BlendColor(kPanel, RGB(54, 36, 45), hover);
     } else if (pressed) {
         fill = kPanelHover;
     } else {
         fill = BlendColor(kPanel, kPanelHover, hover);
     }
-    FillRectangle(draw.hDC, draw.rcItem, kBackground);
+    FillRectangle(draw.hDC, draw.rcItem,
+                  draw.CtlID == Sound ? kSidebar : kBackground);
     RECT button = draw.rcItem;
     InflateRect(&button, -1, -1);
     FillRoundedRectangle(draw.hDC, button, fill, outline, Scale(parent_, 10));
     RECT textRectangle = button;
     if (draw.CtlID == ActiveStatus) {
         textRectangle.left += Scale(parent_, 16);
-        textRectangle.right -= Scale(parent_, 132);
+        textRectangle.right -= Scale(parent_, 42);
         DrawTextLine(draw.hDC, status_, textRectangle, smallFont_, kTextSecondary,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        const int centerX = button.right - Scale(parent_, 114);
+        const int centerX = button.right - Scale(parent_, 20);
         const int centerY = (button.top + button.bottom) / 2;
         const int halfWidth = Scale(parent_, 5);
         const int halfHeight = Scale(parent_, 3);
@@ -908,33 +919,12 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
                                    kTextSecondary);
         const HGDIOBJ previous = SelectObject(draw.hDC, pen);
         MoveToEx(draw.hDC, centerX - halfWidth,
-                 centerY + (activeDrawerVisible_ ? halfHeight : -halfHeight),
-                 nullptr);
+                  centerY + (activeDrawerVisible_ ? -halfHeight : halfHeight),
+                  nullptr);
         LineTo(draw.hDC, centerX,
-               centerY + (activeDrawerVisible_ ? -halfHeight : halfHeight));
+                centerY + (activeDrawerVisible_ ? halfHeight : -halfHeight));
         LineTo(draw.hDC, centerX + halfWidth,
-               centerY + (activeDrawerVisible_ ? halfHeight : -halfHeight));
-        SelectObject(draw.hDC, previous);
-        DeleteObject(pen);
-        return;
-    }
-    if (draw.CtlID == ActiveDrawerHeader) {
-        std::wstring header = L"正在应用（" +
-                              std::to_wstring(activeVisibleIndices_.size()) + L"）";
-        textRectangle.left += Scale(parent_, 16);
-        textRectangle.right -= Scale(parent_, 40);
-        DrawTextLine(draw.hDC, header, textRectangle, headingFont_, kTextPrimary,
-                     DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        const int centerX = button.right - Scale(parent_, 22);
-        const int centerY = (button.top + button.bottom) / 2;
-        const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(parent_, 2)),
-                                   kTextSecondary);
-        const HGDIOBJ previous = SelectObject(draw.hDC, pen);
-        MoveToEx(draw.hDC, centerX - Scale(parent_, 5),
-                 centerY + Scale(parent_, 3), nullptr);
-        LineTo(draw.hDC, centerX, centerY - Scale(parent_, 3));
-        LineTo(draw.hDC, centerX + Scale(parent_, 5),
-               centerY + Scale(parent_, 3));
+                centerY + (activeDrawerVisible_ ? -halfHeight : halfHeight));
         SelectObject(draw.hDC, previous);
         DeleteObject(pen);
         return;
@@ -970,6 +960,7 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
 }
 
 void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
+    ++libraryDrawCount_;
     FillRectangle(draw.hDC, draw.rcItem, kBackground);
     if (draw.itemID == static_cast<UINT>(-1) ||
         draw.itemID >= visibleIndices_.size()) {
@@ -1166,45 +1157,37 @@ bool ModernMainWindow::HandleFilterCommand(const WORD controlId,
         RefreshVisibleItems();
         return true;
     }
-    if (controlId == Filter && notificationCode == BN_CLICKED) {
-        ShowFilterMenu();
-        return true;
-    }
-    if (controlId == DisplayMode && notificationCode == BN_CLICKED) {
-        ShowDisplayModeMenu();
-        return true;
-    }
-    if (controlId == ActiveStatus && notificationCode == BN_CLICKED) {
-        ToggleActiveDrawer();
-        return true;
-    }
-    if (controlId == ActiveDrawerHeader && notificationCode == BN_CLICKED) {
-        HideActiveDrawer();
-        return true;
-    }
-    if (controlId == DropdownList && notificationCode == LBN_SELCHANGE) {
-        if (dropdownUpdating_ || dropdownSuppressSelectionNotification_) {
-            return true;
+    if (controlId == Filter) {
+        if (notificationCode == BN_CLICKED || notificationCode == BN_DBLCLK) {
+            ShowFilterMenu();
         }
-        const LRESULT selected = SendMessageW(dropdownList_, LB_GETCURSEL, 0, 0);
-        if (selected < 0 ||
-            static_cast<std::size_t>(selected) >= dropdownLabels_.size()) {
-            return true;
+        return true;
+    }
+    if (controlId == DisplayMode) {
+        if (notificationCode == BN_CLICKED || notificationCode == BN_DBLCLK) {
+            ShowDisplayModeMenu();
         }
-        const DropdownKind kind = dropdownKind_;
-        HideDropdown();
-        if (kind == DropdownKind::Filter) {
-            filterKind_ = static_cast<FilterKind>(selected);
-            UpdateFilterSelectorText();
-            RefreshVisibleItems();
-        } else if (kind == DropdownKind::DisplayMode) {
-            const bool nextSpan = selected == 0;
-            if (nextSpan != spanAcrossDisplays_) {
-                spanAcrossDisplays_ = nextSpan;
-                UpdateDisplayModeText();
-                PostMessageW(parent_, WM_COMMAND,
-                             MAKEWPARAM(DisplayModeChanged, BN_CLICKED),
-                             reinterpret_cast<LPARAM>(displayMode_));
+        return true;
+    }
+    if (controlId == ActiveStatus) {
+        if (notificationCode == BN_CLICKED || notificationCode == BN_DBLCLK) {
+            ToggleActiveDrawer();
+        }
+        return true;
+    }
+    // The focused list emits LBN_SETFOCUS/LBN_KILLFOCUS through WM_COMMAND.
+    // These belong to the custom dropdown itself. Letting them fall through to
+    // the application's generic command handler immediately closes a dropdown
+    // opened by a real foreground mouse click.
+    if (controlId == DropdownList) {
+        if (notificationCode == LBN_KILLFOCUS &&
+            dropdownKind_ != DropdownKind::None) {
+            const HWND anchor = dropdownKind_ == DropdownKind::Filter
+                                    ? filter_
+                                    : displayMode_;
+            const HWND nextFocus = GetFocus();
+            if (nextFocus != dropdownList_ && nextFocus != anchor) {
+                HideDropdown();
             }
         }
         return true;
@@ -1240,7 +1223,6 @@ bool ModernMainWindow::ToggleDropdown(const DropdownKind kind) {
                                  L"应用时选择一个或多个屏幕"};
     }
 
-    dropdownUpdating_ = true;
     SendMessageW(dropdownList_, WM_SETREDRAW, FALSE, 0);
     SendMessageW(dropdownList_, LB_RESETCONTENT, 0, 0);
     for (const std::wstring& label : dropdownLabels_) {
@@ -1252,20 +1234,39 @@ bool ModernMainWindow::ToggleDropdown(const DropdownKind kind) {
                               : (spanAcrossDisplays_ ? 0 : 1);
     SendMessageW(dropdownList_, LB_SETCURSEL, selection, 0);
     SendMessageW(dropdownList_, WM_SETREDRAW, TRUE, 0);
-    dropdownUpdating_ = false;
-    dropdownSuppressSelectionNotification_ = true;
     dropdownHoverIndex_ = -1;
     dropdownHoverProgress_ = 0.0F;
     dropdownHoverTarget_ = false;
     Layout();
-    if (GetForegroundWindow() == parent_) {
-        SetFocus(dropdownList_);
-    }
     InvalidateRect(dropdownList_, nullptr, FALSE);
     InvalidateRect(kind == DropdownKind::Filter ? filter_ : displayMode_, nullptr,
                    FALSE);
     StartHoverAnimation();
     return true;
+}
+
+void ModernMainWindow::SelectDropdownItem(const std::size_t index) {
+    if (dropdownKind_ == DropdownKind::None || index >= dropdownLabels_.size()) {
+        return;
+    }
+    const DropdownKind kind = dropdownKind_;
+    HideDropdown();
+    if (kind == DropdownKind::Filter) {
+        filterKind_ = static_cast<FilterKind>(index);
+        UpdateFilterSelectorText();
+        RefreshVisibleItems();
+        return;
+    }
+
+    const bool nextSpan = index == 0;
+    if (nextSpan == spanAcrossDisplays_) {
+        return;
+    }
+    spanAcrossDisplays_ = nextSpan;
+    UpdateDisplayModeText();
+    PostMessageW(parent_, WM_COMMAND,
+                 MAKEWPARAM(DisplayModeChanged, BN_CLICKED),
+                 reinterpret_cast<LPARAM>(displayMode_));
 }
 
 void ModernMainWindow::HideDropdown() {
@@ -1314,7 +1315,6 @@ void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
 
 void ModernMainWindow::SetActivePaths(std::vector<std::wstring> paths) {
     activePaths_ = std::move(paths);
-    EnableWindow(cancelApplication_, !activePaths_.empty());
     EnableWindow(activeStatus_, !activePaths_.empty());
     RefreshActiveItems();
     if (activePaths_.empty()) {
@@ -1521,6 +1521,10 @@ HWND ModernMainWindow::ActiveLibraryControl() const noexcept {
     return activeList_;
 }
 
+std::uint64_t ModernMainWindow::LibraryDrawCount() const noexcept {
+    return libraryDrawCount_;
+}
+
 HBITMAP ModernMainWindow::LoadThumbnail(const std::wstring_view path) const {
     Microsoft::WRL::ComPtr<IShellItem> item;
     const std::wstring filePath(path);
@@ -1596,6 +1600,13 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         if (window == self->library_ || window == self->activeList_ ||
             window == self->dropdownList_) {
             self->SetListHovered(window, point, true);
+            // The stock list box repaints owner-draw rows while processing
+            // ordinary mouse movement even though selection did not change.
+            // Our hover state already owns that visual update. Preserve the
+            // native path only while the list has mouse capture for dragging.
+            if (GetCapture() != window) {
+                return 0;
+            }
         } else {
             self->SetControlHovered(window, true);
         }
@@ -1628,8 +1639,65 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
                          reinterpret_cast<LPARAM>(window));
             return 0;
         }
+    } else if (message == WM_LBUTTONUP && window == self->dropdownList_) {
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        const LRESULT item = SendMessageW(
+            window, LB_ITEMFROMPOINT, 0, MAKELPARAM(point.x, point.y));
+        if (HIWORD(item) == 0) {
+            self->SelectDropdownItem(LOWORD(item));
+        }
+        return 0;
+    } else if (message == WM_KILLFOCUS &&
+               ((window == self->filter_ &&
+                 self->dropdownKind_ == DropdownKind::Filter) ||
+                (window == self->displayMode_ &&
+                 self->dropdownKind_ == DropdownKind::DisplayMode))) {
+        if (reinterpret_cast<HWND>(wParam) != self->dropdownList_) {
+            self->HideDropdown();
+        }
+    } else if (message == WM_KEYDOWN &&
+               ((window == self->filter_ &&
+                 self->dropdownKind_ == DropdownKind::Filter) ||
+                (window == self->displayMode_ &&
+                 self->dropdownKind_ == DropdownKind::DisplayMode))) {
+        if (wParam == VK_RETURN) {
+            const LRESULT selected =
+                SendMessageW(self->dropdownList_, LB_GETCURSEL, 0, 0);
+            if (selected >= 0) {
+                self->SelectDropdownItem(static_cast<std::size_t>(selected));
+            }
+            return 0;
+        }
+        if (wParam == VK_UP || wParam == VK_DOWN || wParam == VK_HOME ||
+            wParam == VK_END) {
+            const int count = static_cast<int>(SendMessageW(
+                self->dropdownList_, LB_GETCOUNT, 0, 0));
+            int selected = static_cast<int>(SendMessageW(
+                self->dropdownList_, LB_GETCURSEL, 0, 0));
+            if (count > 0) {
+                if (wParam == VK_HOME) {
+                    selected = 0;
+                } else if (wParam == VK_END) {
+                    selected = count - 1;
+                } else {
+                    selected = std::clamp(
+                        selected + (wParam == VK_DOWN ? 1 : -1), 0, count - 1);
+                }
+                SendMessageW(self->dropdownList_, LB_SETCURSEL, selected, 0);
+                InvalidateRect(self->dropdownList_, nullptr, FALSE);
+            }
+            return 0;
+        }
+    } else if (message == WM_KEYDOWN && window == self->dropdownList_ &&
+               wParam == VK_RETURN) {
+        const LRESULT selected = SendMessageW(window, LB_GETCURSEL, 0, 0);
+        if (selected >= 0) {
+            self->SelectDropdownItem(static_cast<std::size_t>(selected));
+        }
+        return 0;
     } else if (message == WM_KEYDOWN && wParam == VK_ESCAPE) {
         self->HideDropdown();
+        return 0;
     }
     return DefSubclassProc(window, message, wParam, lParam);
 }
@@ -1645,25 +1713,28 @@ void ModernMainWindow::SetControlHovered(const HWND control, const bool hovered)
 
 void ModernMainWindow::SetListHovered(const HWND list, const POINT clientPoint,
                                       const bool hovered) {
-    int index = -1;
+    int hitIndex = -1;
     if (hovered) {
         const LRESULT item = SendMessageW(
             list, LB_ITEMFROMPOINT, 0,
             MAKELPARAM(clientPoint.x, clientPoint.y));
         if (HIWORD(item) == 0) {
-            index = LOWORD(item);
+            hitIndex = LOWORD(item);
         }
     }
 
     int* hoveredIndex = nullptr;
     float* progress = nullptr;
     bool* target = nullptr;
+    int* specialHoverIndex = nullptr;
+    int nextSpecialHoverIndex = -1;
     if (list == library_) {
         hoveredIndex = &libraryHoverIndex_;
         progress = &libraryHoverProgress_;
         target = &libraryHoverTarget_;
         UINT badgeIndex = 0;
-        libraryBadgeHoverIndex_ =
+        specialHoverIndex = &libraryBadgeHoverIndex_;
+        nextSpecialHoverIndex =
             hovered && HitLibraryActiveBadge(clientPoint, badgeIndex)
                 ? static_cast<int>(badgeIndex)
                 : -1;
@@ -1672,7 +1743,8 @@ void ModernMainWindow::SetListHovered(const HWND list, const POINT clientPoint,
         progress = &activeHoverProgress_;
         target = &activeHoverTarget_;
         UINT cancelIndex = 0;
-        activeCancelHoverIndex_ =
+        specialHoverIndex = &activeCancelHoverIndex_;
+        nextSpecialHoverIndex =
             hovered && HitActiveCancelButton(clientPoint, cancelIndex)
                 ? static_cast<int>(cancelIndex)
                 : -1;
@@ -1685,12 +1757,42 @@ void ModernMainWindow::SetListHovered(const HWND list, const POINT clientPoint,
     if (hoveredIndex == nullptr) {
         return;
     }
-    if (index != *hoveredIndex) {
-        *hoveredIndex = index;
+
+    const auto invalidateItem = [&](const int index) {
+        if (index < 0) {
+            return;
+        }
+        RECT itemRectangle{};
+        if (SendMessageW(list, LB_GETITEMRECT, index,
+                         reinterpret_cast<LPARAM>(&itemRectangle)) != LB_ERR) {
+            InvalidateRect(list, &itemRectangle, FALSE);
+        }
+    };
+
+    bool animationChanged = false;
+    if (hitIndex >= 0 && hitIndex != *hoveredIndex) {
+        invalidateItem(*hoveredIndex);
+        *hoveredIndex = hitIndex;
         *progress = 0.0F;
+        animationChanged = true;
     }
-    *target = hovered && index >= 0;
-    InvalidateRect(list, nullptr, FALSE);
+    const bool nextTarget = hovered && hitIndex >= 0;
+    if (*target != nextTarget) {
+        *target = nextTarget;
+        animationChanged = true;
+    }
+
+    if (specialHoverIndex != nullptr &&
+        *specialHoverIndex != nextSpecialHoverIndex) {
+        const int previousSpecial = *specialHoverIndex;
+        *specialHoverIndex = nextSpecialHoverIndex;
+        invalidateItem(previousSpecial);
+        invalidateItem(nextSpecialHoverIndex);
+    }
+    if (!animationChanged) {
+        return;
+    }
+    invalidateItem(*hoveredIndex);
     StartHoverAnimation();
 }
 
@@ -1701,7 +1803,6 @@ void ModernMainWindow::StartHoverAnimation() {
 }
 
 void ModernMainWindow::HandleAnimationTimer() {
-    dropdownSuppressSelectionNotification_ = false;
     bool animating = false;
     constexpr float step = 0.18F;
     for (auto& [control, progress] : hoverProgress_) {
@@ -1721,7 +1822,12 @@ void ModernMainWindow::HandleAnimationTimer() {
                                       0.0F, 1.0F);
         if (next != progress) {
             progress = next;
-            InvalidateRect(list, nullptr, FALSE);
+            RECT itemRectangle{};
+            if (index >= 0 &&
+                SendMessageW(list, LB_GETITEMRECT, index,
+                             reinterpret_cast<LPARAM>(&itemRectangle)) != LB_ERR) {
+                InvalidateRect(list, &itemRectangle, FALSE);
+            }
         }
         if (!target && progress == 0.0F) {
             index = -1;
@@ -1863,7 +1969,6 @@ void ModernMainWindow::HideActiveDrawer() {
     }
     activeDrawerVisible_ = false;
     ShowWindow(activeList_, SW_HIDE);
-    ShowWindow(activeDrawerHeader_, SW_HIDE);
     InvalidateRect(activeStatus_, nullptr, FALSE);
 }
 

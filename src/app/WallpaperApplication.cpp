@@ -44,6 +44,7 @@ constexpr int kTraySoundCommand = 2102;
 constexpr int kTrayExitCommand = 2103;
 constexpr int kTrayCancelCommand = 2104;
 constexpr int kTrayPauseCommand = 2105;
+constexpr int kControlledLibraryDrawCountCommand = 2195;
 constexpr int kControlledFrameCountCommand = 2196;
 constexpr int kControlledTestSaveCommand = 2198;
 constexpr int kControlledTestExitCommand = 2199;
@@ -1936,6 +1937,13 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                     return 0;
                 }
                 if (controlledTestMode_ &&
+                    identifier == kControlledLibraryDrawCountCommand) {
+                    core::LogInfo(
+                        L"CONTROLLED_LIBRARY_DRAW_COUNT=" +
+                        std::to_wstring(mainWindow_.LibraryDrawCount()));
+                    return 0;
+                }
+                if (controlledTestMode_ &&
                     identifier == kControlledFrameCountCommand) {
                     core::LogInfo(
                         L"CONTROLLED_VIDEO_TRANSFER_COUNT=" +
@@ -1973,18 +1981,18 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                     return 0;
                 }
                 mainWindow_.CloseTransientUi();
-                if (identifier == ModernMainWindow::Import) {
+                if (identifier == ModernMainWindow::Import &&
+                    notification == BN_CLICKED) {
                     ChooseImport();
-                } else if (identifier == ModernMainWindow::Export) {
+                } else if (identifier == ModernMainWindow::Export &&
+                           notification == BN_CLICKED) {
                     ChooseExport();
-                } else if (identifier == ModernMainWindow::Apply ||
-                           (identifier == ModernMainWindow::Library &&
-                            notification == LBN_DBLCLK)) {
+                } else if (identifier == ModernMainWindow::Library &&
+                           notification == LBN_DBLCLK) {
                     ApplySelectedWallpaper();
-                } else if (identifier == ModernMainWindow::Sound) {
+                } else if (identifier == ModernMainWindow::Sound &&
+                           notification == BN_CLICKED) {
                     ToggleSound();
-                } else if (identifier == ModernMainWindow::CancelApplication) {
-                    CancelActiveWallpaper();
                 } else if (identifier == ModernMainWindow::RenameCommit &&
                            notification == BN_CLICKED) {
                     CommitWallpaperRename();

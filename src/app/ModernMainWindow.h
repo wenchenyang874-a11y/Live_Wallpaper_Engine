@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -27,14 +28,11 @@ public:
         Library = 1102,
         Import = 1103,
         Export = 1104,
-        Apply = 1105,
         Sound = 1106,
-        CancelApplication = 1107,
         RenameCommit = 1108,
         DropdownList = 1109,
         ActiveStatus = 1110,
         ActiveList = 1111,
-        ActiveDrawerHeader = 1112,
         DisplayModeChanged = 1113,
         CancelSelectedWallpaper = 1114,
         DisplayMode = 1199,
@@ -76,6 +74,7 @@ public:
     HWND SearchControl() const noexcept;
     HWND LibraryControl() const noexcept;
     HWND ActiveLibraryControl() const noexcept;
+    [[nodiscard]] std::uint64_t LibraryDrawCount() const noexcept;
 
 private:
     enum class FilterKind {
@@ -98,6 +97,7 @@ private:
     bool ShowFilterMenu();
     bool ShowDisplayModeMenu();
     bool ToggleDropdown(DropdownKind kind);
+    void SelectDropdownItem(std::size_t index);
     void HideDropdown();
     void ToggleActiveDrawer();
     void HideActiveDrawer();
@@ -135,15 +135,12 @@ private:
     HWND library_ = nullptr;
     HWND import_ = nullptr;
     HWND export_ = nullptr;
-    HWND apply_ = nullptr;
     HWND sound_ = nullptr;
-    HWND cancelApplication_ = nullptr;
     HWND renameEdit_ = nullptr;
     HWND displayMode_ = nullptr;
     HWND dropdownList_ = nullptr;
     HWND activeStatus_ = nullptr;
     HWND activeList_ = nullptr;
-    HWND activeDrawerHeader_ = nullptr;
     std::vector<DisplayOption> displayOptions_;
     HFONT titleFont_ = nullptr;
     HFONT headingFont_ = nullptr;
@@ -164,8 +161,6 @@ private:
     bool soundEnabled_ = false;
     bool spanAcrossDisplays_ = true;
     bool activeDrawerVisible_ = false;
-    bool dropdownUpdating_ = false;
-    bool dropdownSuppressSelectionNotification_ = false;
     DropdownKind dropdownKind_ = DropdownKind::None;
     std::vector<std::wstring> dropdownLabels_;
     std::vector<std::wstring> dropdownDescriptions_;
@@ -182,6 +177,7 @@ private:
     bool libraryHoverTarget_ = false;
     bool activeHoverTarget_ = false;
     bool dropdownHoverTarget_ = false;
+    mutable std::uint64_t libraryDrawCount_ = 0;
 
     void UpdateFilterSelectorText();
     void UpdateDisplayModeText();
