@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -25,12 +26,23 @@ public:
     struct DisplayOption final {
         std::wstring id;
         std::wstring label;
+        std::wstring activeWallpaperName;
         bool selected = false;
+
+        [[nodiscard]] bool Occupied() const noexcept {
+            return !activeWallpaperName.empty();
+        }
+    };
+
+    struct DisplayBadge final {
+        std::wstring label;
+        bool primary = false;
     };
 
     struct ActiveWallpaperInfo final {
         std::wstring path;
         std::wstring displayLabel;
+        std::vector<DisplayBadge> displayBadges;
     };
 
     enum ControlId : int {
@@ -135,6 +147,7 @@ private:
     void DrawWallpaperCard(const DRAWITEMSTRUCT& draw,
                             const core::WallpaperItem& item, bool active,
                             std::wstring_view displayLabel,
+                            std::span<const DisplayBadge> displayBadges,
                             bool showCancelButton, float hoverProgress,
                             bool showSelectionBox = false,
                             bool selectionChecked = false) const;
@@ -189,6 +202,7 @@ private:
     HFONT headingFont_ = nullptr;
     HFONT bodyFont_ = nullptr;
     HFONT smallFont_ = nullptr;
+    HFONT badgeFont_ = nullptr;
     HBRUSH editBrush_ = nullptr;
     HBRUSH panelBrush_ = nullptr;
     HICON appIcon_ = nullptr;
@@ -197,7 +211,7 @@ private:
     std::vector<std::size_t> activeVisibleIndices_;
     std::vector<ActiveWallpaperInfo> activeWallpapers_;
     std::wstring status_ = L"准备就绪";
-    std::wstring resourceUsage_ = L"CPU --\tGPU --\n内存 --\tGPU内存 --";
+    std::wstring resourceUsage_ = L"CPU --\tGPU --\n内存 --\t显存 --";
     std::wstring renamingPath_;
     std::unordered_map<std::wstring, HBITMAP> thumbnails_;
     FilterKind filterKind_ = FilterKind::All;

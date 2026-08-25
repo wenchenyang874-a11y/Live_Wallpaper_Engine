@@ -170,6 +170,30 @@ std::vector<std::wstring> SplitDisplayIds(const std::wstring_view value) {
     return identifiers;
 }
 
+bool AssignmentsUseUniqueDisplays(
+    const std::vector<core::WallpaperAssignmentSetting>& assignments,
+    const std::vector<shell::DisplayTarget>& displays) {
+    std::vector<std::wstring> claimedDisplays;
+    for (const core::WallpaperAssignmentSetting& assignment : assignments) {
+        std::vector<std::wstring> identifiers;
+        if (assignment.spanAcrossDisplays) {
+            identifiers.reserve(displays.size());
+            for (const shell::DisplayTarget& display : displays) {
+                identifiers.push_back(display.deviceId);
+            }
+        } else {
+            identifiers = SplitDisplayIds(assignment.displayTargets);
+        }
+        for (const std::wstring& identifier : identifiers) {
+            if (ContainsDisplayId(claimedDisplays, identifier)) {
+                return false;
+            }
+            claimedDisplays.push_back(identifier);
+        }
+    }
+    return true;
+}
+
 std::wstring FormatResourceUsage(
     const platform::ProcessResourceUsage& usage) {
     constexpr double mebibyte = 1024.0 * 1024.0;
@@ -183,7 +207,7 @@ std::wstring FormatResourceUsage(
     }
     text << L"\n内存 " << std::setprecision(0)
          << static_cast<double>(usage.workingSetBytes) / mebibyte
-         << L" MB\tGPU内存 ";
+         << L" MB\t显存 ";
     if (usage.videoMemoryBytes.has_value()) {
         text << static_cast<double>(*usage.videoMemoryBytes) / mebibyte << L" MB";
     } else {
@@ -1151,6 +1175,17 @@ bool WallpaperApplication::ApplyWallpaper(const std::wstring_view path,
     }
 
     NormalizeAssignments();
+    if (!AssignmentsUseUniqueDisplays(assignments_, displayTargets_)) {
+        assignments_ = previousAssignments;
+        core::LogError(L"Wallpaper assignment replacement left a display claimed twice.",
+                       E_UNEXPECTED);
+        if (showErrors) {
+            MessageBoxW(controlWindow_,
+                        L"无法完成屏幕壁纸替换，原来的屏幕分配保持不变。",
+                        kApplicationTitle, MB_OK | MB_ICONERROR);
+        }
+        return false;
+    }
 
     if (!RebuildPlaybackSessions(showErrors)) {
         assignments_ = previousAssignments;
@@ -1580,6 +1615,22 @@ void WallpaperApplication::RefreshDisplayTargets(const bool preserveSelection) {
         option.label = L"屏幕 " + std::to_wstring(index + 1U) +
                        (display.primary ? L"（主屏）" : L"") + L" · " +
                        std::to_wstring(width) + L"×" + std::to_wstring(height);
+        for (auto assignment = assignments_.rbegin();
+             assignment != assignments_.rend(); ++assignment) {
+            const bool targetsDisplay =
+                assignment->spanAcrossDisplays ||
+                ContainsDisplayId(SplitDisplayIds(assignment->displayTargets),
+                                  display.deviceId);
+            if (!targetsDisplay) {
+                continue;
+            }
+            const std::filesystem::path wallpaperPath(assignment->wallpaperPath);
+            option.activeWallpaperName = wallpaperPath.filename().native();
+            if (option.activeWallpaperName.empty()) {
+                option.activeWallpaperName = assignment->wallpaperPath;
+            }
+            break;
+        }
         option.selected = std::ranges::any_of(
             selectedDisplayIds_, [&](const std::wstring& identifier) {
                 return _wcsicmp(identifier.c_str(), display.deviceId.c_str()) == 0;
@@ -1733,6 +1784,11 @@ WallpaperApplication::ActiveWallpapers() const {
         wallpaper.path = path;
         if (spansAllDisplays) {
             wallpaper.displayLabel = L"跨屏扩展（全部屏幕）";
+            for (std::size_t index = 0; index < displayTargets_.size(); ++index) {
+                const shell::DisplayTarget& display = displayTargets_[index];
+                wallpaper.displayBadges.push_back(
+                    {L"屏幕" + std::to_wstring(index + 1U), display.primary});
+            }
         } else {
             for (std::size_t index = 0; index < displayTargets_.size(); ++index) {
                 const shell::DisplayTarget& display = displayTargets_[index];
@@ -1746,6 +1802,8 @@ WallpaperApplication::ActiveWallpapers() const {
                 if (display.primary) {
                     wallpaper.displayLabel += L"（主屏）";
                 }
+                wallpaper.displayBadges.push_back(
+                    {L"屏幕" + std::to_wstring(index + 1U), display.primary});
             }
             if (wallpaper.displayLabel.empty()) {
                 wallpaper.displayLabel = L"未连接屏幕";

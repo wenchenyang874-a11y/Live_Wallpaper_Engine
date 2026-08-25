@@ -144,7 +144,9 @@ struct ScreenSelectionDialogState final {
     std::vector<std::wstring> result;
     HFONT headingFont = nullptr;
     HFONT bodyFont = nullptr;
+    HFONT detailFont = nullptr;
     HBRUSH panelBrush = nullptr;
+    bool replaceSelected = false;
     bool accepted = false;
     bool complete = false;
 };
@@ -156,6 +158,9 @@ void RecreateScreenSelectionFonts(ScreenSelectionDialogState& state) {
     if (state.bodyFont != nullptr) {
         DeleteObject(state.bodyFont);
     }
+    if (state.detailFont != nullptr) {
+        DeleteObject(state.detailFont);
+    }
     const int dpi = static_cast<int>(GetDpiForWindow(state.window));
     state.headingFont = CreateFontW(
         -MulDiv(18, dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
@@ -165,9 +170,39 @@ void RecreateScreenSelectionFonts(ScreenSelectionDialogState& state) {
         -MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    state.detailFont = CreateFontW(
+        -MulDiv(12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
     for (const HWND control : {state.list, state.apply, state.cancel}) {
         SetControlFont(control, state.bodyFont);
     }
+}
+
+int ScreenSelectionItemHeight(const HWND window,
+                              const ModernMainWindow::DisplayOption& option) {
+    return Scale(window, option.Occupied() ? 78 : 56);
+}
+
+void UpdateScreenSelectionAction(ScreenSelectionDialogState& state) {
+    if (!IsWindow(state.list) || !IsWindow(state.apply) || state.options == nullptr) {
+        return;
+    }
+    bool hasSelection = false;
+    bool replacesWallpaper = false;
+    for (std::size_t index = 0; index < state.options->size(); ++index) {
+        if (SendMessageW(state.list, LB_GETSEL, index, 0) <= 0) {
+            continue;
+        }
+        hasSelection = true;
+        replacesWallpaper =
+            replacesWallpaper || (*state.options)[index].Occupied();
+    }
+    state.replaceSelected = replacesWallpaper;
+    SetWindowTextW(state.apply, replacesWallpaper ? L"替换壁纸到屏幕"
+                                                  : L"应用到所选屏幕");
+    EnableWindow(state.apply, hasSelection ? TRUE : FALSE);
+    InvalidateRect(state.apply, nullptr, FALSE);
 }
 
 void LayoutScreenSelectionDialog(ScreenSelectionDialogState& state) {
@@ -177,18 +212,20 @@ void LayoutScreenSelectionDialog(ScreenSelectionDialogState& state) {
     const int listTop = Scale(state.window, 70);
     const int footerHeight = Scale(state.window, 64);
     const int gap = Scale(state.window, 10);
-    const int buttonWidth = Scale(state.window, 112);
+    const int cancelWidth = Scale(state.window, 104);
+    const int applyWidth = Scale(state.window, 166);
     const int buttonHeight = Scale(state.window, 38);
     MoveWindow(state.list, margin, listTop,
                static_cast<int>(client.right) - margin * 2,
                std::max(1, static_cast<int>(client.bottom) - listTop -
                                footerHeight),
                TRUE);
-    MoveWindow(state.cancel, client.right - margin - buttonWidth * 2 - gap,
-               client.bottom - margin - buttonHeight, buttonWidth, buttonHeight,
+    MoveWindow(state.cancel,
+               client.right - margin - applyWidth - gap - cancelWidth,
+               client.bottom - margin - buttonHeight, cancelWidth, buttonHeight,
                TRUE);
-    MoveWindow(state.apply, client.right - margin - buttonWidth,
-               client.bottom - margin - buttonHeight, buttonWidth, buttonHeight,
+    MoveWindow(state.apply, client.right - margin - applyWidth,
+               client.bottom - margin - buttonHeight, applyWidth, buttonHeight,
                TRUE);
 }
 
@@ -199,12 +236,19 @@ void DrawScreenSelectionItem(const DRAWITEMSTRUCT& draw,
         draw.itemID >= state.options->size()) {
         return;
     }
+    const ModernMainWindow::DisplayOption& option =
+        (*state.options)[draw.itemID];
     const bool selected =
         SendMessageW(draw.hwndItem, LB_GETSEL, draw.itemID, 0) > 0;
     RECT card = draw.rcItem;
     InflateRect(&card, -Scale(state.window, 3), -Scale(state.window, 4));
-    FillRoundedRectangle(draw.hDC, card, selected ? kPanelHover : kPanel,
-                         selected ? kAccent : kBorder, Scale(state.window, 10),
+    COLORREF fill = selected ? kPanelHover : kPanel;
+    COLORREF outline = selected ? kAccent : kBorder;
+    if (option.Occupied()) {
+        fill = selected ? RGB(54, 36, 44) : RGB(34, 37, 53);
+        outline = selected ? RGB(193, 74, 91) : RGB(92, 83, 139);
+    }
+    FillRoundedRectangle(draw.hDC, card, fill, outline, Scale(state.window, 10),
                          selected ? 2 : 1);
 
     const int boxSize = Scale(state.window, 20);
@@ -232,9 +276,22 @@ void DrawScreenSelectionItem(const DRAWITEMSTRUCT& draw,
     RECT label = card;
     label.left = box.right + Scale(state.window, 14);
     label.right -= Scale(state.window, 12);
-    DrawTextLine(draw.hDC, (*state.options)[draw.itemID].label, label,
-                 state.bodyFont, kTextPrimary,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (option.Occupied()) {
+        label.top += Scale(state.window, 5);
+        label.bottom = label.top + Scale(state.window, 28);
+        DrawTextLine(draw.hDC, option.label, label, state.bodyFont, kTextPrimary,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT detail = label;
+        detail.top = label.bottom - Scale(state.window, 2);
+        detail.bottom = card.bottom - Scale(state.window, 5);
+        DrawTextLine(draw.hDC, L"正在使用：" + option.activeWallpaperName,
+                     detail, state.detailFont,
+                     selected ? RGB(244, 157, 169) : RGB(180, 172, 219),
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    } else {
+        DrawTextLine(draw.hDC, option.label, label, state.bodyFont, kTextPrimary,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
 }
 
 void DrawScreenSelectionButton(const DRAWITEMSTRUCT& draw,
@@ -242,11 +299,20 @@ void DrawScreenSelectionButton(const DRAWITEMSTRUCT& draw,
     wchar_t text[64]{};
     GetWindowTextW(draw.hwndItem, text, static_cast<int>(std::size(text)));
     const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
+    const bool disabled = (draw.itemState & ODS_DISABLED) != 0;
     COLORREF fill = kPanel;
     COLORREF outline = kBorder;
     if (draw.CtlID == kScreenSelectionApply) {
-        fill = pressed ? RGB(72, 99, 207) : kAccent;
-        outline = fill;
+        if (disabled) {
+            fill = RGB(39, 45, 57);
+            outline = RGB(58, 67, 84);
+        } else if (state.replaceSelected) {
+            fill = pressed ? RGB(146, 46, 63) : RGB(190, 61, 82);
+            outline = fill;
+        } else {
+            fill = pressed ? RGB(72, 99, 207) : kAccent;
+            outline = fill;
+        }
     } else if (pressed) {
         fill = kPanelHover;
     }
@@ -255,7 +321,8 @@ void DrawScreenSelectionButton(const DRAWITEMSTRUCT& draw,
     InflateRect(&button, -1, -1);
     FillRoundedRectangle(draw.hDC, button, fill, outline,
                          Scale(state.window, 10));
-    DrawTextLine(draw.hDC, text, button, state.bodyFont, kTextPrimary,
+    DrawTextLine(draw.hDC, text, button, state.bodyFont,
+                 disabled ? RGB(121, 132, 153) : kTextPrimary,
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
@@ -281,7 +348,7 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
             state->list = CreateWindowExW(
                 0, L"LISTBOX", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
-                    LBS_HASSTRINGS | LBS_MULTIPLESEL | LBS_OWNERDRAWFIXED |
+                    LBS_HASSTRINGS | LBS_MULTIPLESEL | LBS_OWNERDRAWVARIABLE |
                     LBS_NOINTEGRALHEIGHT,
                 0, 0, 1, 1, window,
                 reinterpret_cast<HMENU>(
@@ -308,21 +375,15 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
             SetWindowTheme(state->list, L"DarkMode_Explorer", nullptr);
             state->panelBrush = CreateSolidBrush(kPanel);
             RecreateScreenSelectionFonts(*state);
-            SendMessageW(state->list, LB_SETITEMHEIGHT, 0,
-                         Scale(window, 54));
-            bool hasSelection = false;
             for (std::size_t index = 0; index < state->options->size(); ++index) {
                 SendMessageW(state->list, LB_ADDSTRING, 0,
                              reinterpret_cast<LPARAM>(
                                  (*state->options)[index].label.c_str()));
-                if ((*state->options)[index].selected) {
+                if (!(*state->options)[index].Occupied()) {
                     SendMessageW(state->list, LB_SETSEL, TRUE, index);
-                    hasSelection = true;
                 }
             }
-            if (!hasSelection && !state->options->empty()) {
-                SendMessageW(state->list, LB_SETSEL, TRUE, 0);
-            }
+            UpdateScreenSelectionAction(*state);
             LayoutScreenSelectionDialog(*state);
             return 0;
         }
@@ -336,7 +397,11 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
                          suggested->bottom - suggested->top,
                          SWP_NOACTIVATE | SWP_NOZORDER);
             RecreateScreenSelectionFonts(*state);
-            SendMessageW(state->list, LB_SETITEMHEIGHT, 0, Scale(window, 54));
+            for (std::size_t index = 0; index < state->options->size(); ++index) {
+                SendMessageW(
+                    state->list, LB_SETITEMHEIGHT, index,
+                    ScreenSelectionItemHeight(window, (*state->options)[index]));
+            }
             return 0;
         }
         case WM_COMMAND: {
@@ -362,8 +427,21 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
             }
             if (identifier == kScreenSelectionList &&
                 HIWORD(wParam) == LBN_SELCHANGE) {
+                UpdateScreenSelectionAction(*state);
                 InvalidateRect(state->list, nullptr, FALSE);
                 return 0;
+            }
+            break;
+        }
+        case WM_MEASUREITEM: {
+            auto& measure = *reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
+            if (measure.CtlID == kScreenSelectionList && state->options != nullptr) {
+                const std::size_t index = measure.itemID;
+                measure.itemHeight = index < state->options->size()
+                                         ? ScreenSelectionItemHeight(
+                                               window, (*state->options)[index])
+                                         : Scale(window, 56);
+                return TRUE;
             }
             break;
         }
@@ -420,6 +498,10 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
                 DeleteObject(state->bodyFont);
                 state->bodyFont = nullptr;
             }
+            if (state->detailFont != nullptr) {
+                DeleteObject(state->detailFont);
+                state->detailFont = nullptr;
+            }
             if (state->panelBrush != nullptr) {
                 DeleteObject(state->panelBrush);
                 state->panelBrush = nullptr;
@@ -457,8 +539,14 @@ std::optional<std::vector<std::wstring>> ShowScreenSelectionDialog(
     state.owner = owner;
     state.options = &options;
     const int visibleRows = std::clamp(static_cast<int>(options.size()), 1, 5);
-    const int clientWidth = Scale(owner, 500);
-    const int clientHeight = Scale(owner, 70 + visibleRows * 54 + 64);
+    int visibleHeight = 0;
+    for (int index = 0; index < visibleRows; ++index) {
+        visibleHeight += options[static_cast<std::size_t>(index)].Occupied()
+                             ? 78
+                             : 56;
+    }
+    const int clientWidth = Scale(owner, 540);
+    const int clientHeight = Scale(owner, 70 + visibleHeight + 64);
     RECT outer{0, 0, clientWidth, clientHeight};
     AdjustWindowRectExForDpi(&outer, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
                              WS_EX_DLGMODALFRAME, GetDpiForWindow(owner));
@@ -884,7 +972,8 @@ ModernMainWindow::~ModernMainWindow() {
         }
     }
     ClearThumbnails();
-    for (const HFONT font : {titleFont_, headingFont_, bodyFont_, smallFont_}) {
+    for (const HFONT font :
+         {titleFont_, headingFont_, bodyFont_, smallFont_, badgeFont_}) {
         if (font != nullptr) {
             DeleteObject(font);
         }
@@ -995,7 +1084,8 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
 }
 
 void ModernMainWindow::RecreateFonts() {
-    for (HFONT* font : {&titleFont_, &headingFont_, &bodyFont_, &smallFont_}) {
+    for (HFONT* font :
+         {&titleFont_, &headingFont_, &bodyFont_, &smallFont_, &badgeFont_}) {
         if (*font != nullptr) {
             DeleteObject(*font);
             *font = nullptr;
@@ -1018,6 +1108,10 @@ void ModernMainWindow::RecreateFonts() {
                              FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH,
                              L"Segoe UI Variable Text");
+    badgeFont_ = CreateFontW(-MulDiv(9, dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE,
+                             FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                             CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH, L"Segoe UI Variable Text");
 
     for (const HWND control : {search_, filter_, library_, import_, export_, sound_,
                                displayMode_, renameEdit_, dropdownList_, activeStatus_,
@@ -1107,14 +1201,14 @@ void ModernMainWindow::Layout() {
     const int sidebarButtonWidth = sidebar - Scale(parent_, 32);
     const int sidebarButtonLeft = Scale(parent_, 16);
     const int sidebarButtonHeight = Scale(parent_, 40);
-    MoveWindow(sound_, sidebarButtonLeft, height - Scale(parent_, 56),
+    const int resourceBottom = height - Scale(parent_, 16);
+    const int resourceTop = resourceBottom - Scale(parent_, 62);
+    MoveWindow(sound_, sidebarButtonLeft,
+               resourceTop - Scale(parent_, 12) - sidebarButtonHeight,
                sidebarButtonWidth, sidebarButtonHeight, TRUE);
 
     const int statusTop = height - Scale(parent_, 82);
-    const int resourceWidth = std::clamp(contentWidth * 32 / 100,
-                                         Scale(parent_, 240),
-                                         Scale(parent_, 310));
-    const int statusRight = contentLeft + contentWidth - resourceWidth - gap;
+    const int statusRight = contentLeft + contentWidth;
     const int statusCardHeight = Scale(parent_, 54);
     MoveWindow(activeStatus_, contentLeft, statusTop,
                statusRight - contentLeft, statusCardHeight, TRUE);
@@ -1193,19 +1287,10 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
     FillRoundedRectangle(deviceContext, searchPanel, kPanel, kPanel,
                          Scale(parent_, 8));
 
-    const int contentLeft = Scale(parent_, 246);
-    const int contentRight = client.right - Scale(parent_, 30);
-    const int contentWidth = std::max(1, contentRight - contentLeft);
-    const int gap = Scale(parent_, 12);
-    const int resourceWidth = std::clamp(contentWidth * 32 / 100,
-                                         Scale(parent_, 240),
-                                         Scale(parent_, 310));
-    RECT statusCard{contentLeft, client.bottom - Scale(parent_, 82),
-                    contentRight - resourceWidth - gap,
-                    client.bottom - Scale(parent_, 28)};
-
-    RECT resourceCard{statusCard.right + gap, statusCard.top, contentRight,
-                      statusCard.bottom};
+    RECT resourceCard{Scale(parent_, 16),
+                      client.bottom - Scale(parent_, 78),
+                      Scale(parent_, 200),
+                      client.bottom - Scale(parent_, 16)};
     FillRoundedRectangle(deviceContext, resourceCard, kPanel, kBorder,
                          Scale(parent_, 12));
     const int resourceCenterX = (resourceCard.left + resourceCard.right) / 2;
@@ -1401,7 +1486,7 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
     const bool exportChecked =
         exportSelectedPaths_.contains(item.path.native());
     DrawWallpaperCard(draw, item, active,
-                      active ? activeInfo->displayLabel : std::wstring_view{},
+                      active ? activeInfo->displayLabel : std::wstring_view{}, {},
                       false,
                       std::max(hover, selected ? 1.0F : 0.0F),
                       exportSelectionMode_, exportChecked);
@@ -1438,14 +1523,19 @@ void ModernMainWindow::DrawActiveItem(const DRAWITEMSTRUCT& draw) const {
     DrawWallpaperCard(draw, item, true,
                       activeInfo != nullptr ? activeInfo->displayLabel
                                             : std::wstring_view{},
+                      activeInfo != nullptr
+                          ? std::span<const DisplayBadge>(
+                                activeInfo->displayBadges)
+                          : std::span<const DisplayBadge>{},
                       true,
                       std::max(hover, selected ? 1.0F : 0.0F));
 }
 
 void ModernMainWindow::DrawWallpaperCard(
     const DRAWITEMSTRUCT& draw, const core::WallpaperItem& item, const bool active,
-    const std::wstring_view displayLabel, const bool showCancelButton,
-    const float hoverProgress,
+    const std::wstring_view displayLabel,
+    const std::span<const DisplayBadge> displayBadges,
+    const bool showCancelButton, const float hoverProgress,
     const bool showSelectionBox, const bool selectionChecked) const {
     RECT card = draw.rcItem;
     InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
@@ -1510,13 +1600,50 @@ void ModernMainWindow::DrawWallpaperCard(
         }
     }
 
-    RECT name{icon.right + Scale(parent_, 14), card.top + Scale(parent_, 9),
+    int nameLeft = icon.right + Scale(parent_, 14);
+    if (!displayBadges.empty()) {
+        const int badgeWidth = Scale(parent_, 66);
+        const int badgeGap = Scale(parent_, 6);
+        const int nameMinimumWidth = Scale(parent_, 130);
+        const int nameRight = card.right - Scale(parent_, 120);
+        const int badgeLimit = std::max(
+            nameLeft,
+            nameRight - nameMinimumWidth);
+        for (std::size_t index = 0; index < displayBadges.size(); ++index) {
+            if (nameLeft + badgeWidth > badgeLimit) {
+                break;
+            }
+            const DisplayBadge& display = displayBadges[index];
+            RECT badge{nameLeft, card.top + Scale(parent_, 7),
+                       nameLeft + badgeWidth, card.top + Scale(parent_, 41)};
+            FillRoundedRectangle(draw.hDC, badge, RGB(36, 45, 64),
+                                 RGB(76, 96, 139), Scale(parent_, 8));
+            RECT badgeLabel = badge;
+            badgeLabel.top += Scale(parent_, 8);
+            DrawTextLine(draw.hDC, display.label, badgeLabel, smallFont_,
+                         RGB(211, 221, 244),
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE |
+                             DT_END_ELLIPSIS);
+            if (display.primary) {
+                RECT primary{badge.left + Scale(parent_, 35),
+                             badge.top + Scale(parent_, 1),
+                             badge.right - Scale(parent_, 4),
+                             badge.top + Scale(parent_, 13)};
+                DrawTextLine(draw.hDC, L"主屏", primary, badgeFont_,
+                             RGB(241, 103, 115),
+                             DT_RIGHT | DT_TOP | DT_SINGLELINE);
+            }
+            nameLeft = badge.right + badgeGap;
+        }
+    }
+
+    RECT name{nameLeft, card.top + Scale(parent_, 9),
               card.right - Scale(parent_, 120), card.top + Scale(parent_, 38)};
     DrawTextLine(draw.hDC, item.displayName, name, bodyFont_, kTextPrimary,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     std::wstring details;
-    if (active && !displayLabel.empty()) {
+    if (active && displayBadges.empty() && !displayLabel.empty()) {
         details = L"应用到：" + std::wstring(displayLabel) + L"  ·  ";
     }
     details += item.formatLabel;
@@ -1909,10 +2036,9 @@ void ModernMainWindow::InvalidateFooter() const {
     if (!GetClientRect(parent_, &client)) {
         return;
     }
-    RECT footer{Scale(parent_, 246), client.bottom - Scale(parent_, 84),
-                client.right - Scale(parent_, 28),
-                client.bottom - Scale(parent_, 26)};
-    InvalidateRect(parent_, &footer, FALSE);
+    RECT resource{Scale(parent_, 14), client.bottom - Scale(parent_, 80),
+                  Scale(parent_, 202), client.bottom - Scale(parent_, 14)};
+    InvalidateRect(parent_, &resource, FALSE);
     InvalidateRect(activeStatus_, nullptr, FALSE);
 }
 

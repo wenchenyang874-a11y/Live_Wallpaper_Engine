@@ -3,6 +3,8 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
     [string] $ScreenshotPath = (Join-Path $env:TEMP 'LWE-display-selection.png'),
+    [string] $OccupiedScreenshotPath = (Join-Path $env:TEMP 'LWE-display-occupied.png'),
+    [string] $ReplacementScreenshotPath = (Join-Path $env:TEMP 'LWE-display-replacement.png'),
     [string] $MainScreenshotPath = (Join-Path $env:TEMP 'LWE-display-mode-main.png'),
     [string] $ActiveScreenshotPath = (Join-Path $env:TEMP 'LWE-active-display-labels.png')
 )
@@ -33,6 +35,7 @@ public static class LweDisplayModeProbe
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr w, IntPtr dc, uint flags);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr w);
 
     public static IntPtr Find(uint processId, string targetClass)
     {
@@ -223,6 +226,21 @@ try {
     if ($screenCount -ne $screens.Count) {
         throw "The selector showed $screenCount screens; expected $($screens.Count)."
     }
+    $freeRowHeight = [int][LweDisplayModeProbe]::SendMessage(
+        $screenList, 0x01A1, [IntPtr]0, [IntPtr]::Zero)
+    $initialSelectedCount = [int][LweDisplayModeProbe]::SendMessage(
+        $screenList, 0x0190, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($initialSelectedCount -ne $screenCount) {
+        throw "Free screens default-selected $initialSelectedCount of $screenCount."
+    }
+    $dialogApply = [LweDisplayModeProbe]::GetDlgItem($dialog, 3101)
+    $applyText = -join @(
+        [char]0x5E94, [char]0x7528, [char]0x5230, [char]0x6240,
+        [char]0x9009, [char]0x5C4F, [char]0x5E55)
+    if ([LweDisplayModeProbe]::Text($dialogApply) -ne $applyText -or
+        -not [LweDisplayModeProbe]::IsWindowEnabled($dialogApply)) {
+        throw 'The free-screen apply action did not start enabled with the normal label.'
+    }
 
     # Temporarily keep the owned dialog above unrelated foreground windows so
     # the screenshot records the actual user-visible prompt, then remove the
@@ -243,7 +261,6 @@ try {
     if ($selectedCount -ne $screenCount) {
         throw "Multi-select selected $selectedCount of $screenCount screens."
     }
-    $dialogApply = [LweDisplayModeProbe]::GetDlgItem($dialog, 3101)
     [void][LweDisplayModeProbe]::PostMessage(
         $dialog, 0x0111, [LweDisplayModeProbe]::Command(3101, 0), $dialogApply)
     Start-Sleep -Seconds 2
@@ -280,12 +297,48 @@ try {
         throw 'The replacement wallpaper did not show the screen-selection dialog.'
     }
     $secondScreenList = [LweDisplayModeProbe]::GetDlgItem($secondDialog, 3100)
-    [void][LweDisplayModeProbe]::SendMessage(
-        $secondScreenList, 0x0185, [IntPtr]0, [IntPtr](-1))
+    $occupiedSelectedCount = [int][LweDisplayModeProbe]::SendMessage(
+        $secondScreenList, 0x0190, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($occupiedSelectedCount -ne 0) {
+        throw "All screens were occupied but $occupiedSelectedCount were default-selected."
+    }
+    $occupiedRowHeight = [int][LweDisplayModeProbe]::SendMessage(
+        $secondScreenList, 0x01A1, [IntPtr]0, [IntPtr]::Zero)
+    if ($occupiedRowHeight -le $freeRowHeight) {
+        throw "Occupied screen row height $occupiedRowHeight was not taller than free row height $freeRowHeight."
+    }
+    $secondApply = [LweDisplayModeProbe]::GetDlgItem($secondDialog, 3101)
+    if ([LweDisplayModeProbe]::Text($secondApply) -ne $applyText -or
+        [LweDisplayModeProbe]::IsWindowEnabled($secondApply)) {
+        throw 'An all-occupied selector did not start with its apply action disabled.'
+    }
+    [void][LweDisplayModeProbe]::SetWindowPos(
+        $secondDialog, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    Start-Sleep -Milliseconds 250
+    Save-WindowScreenshot $secondDialog $OccupiedScreenshotPath
+    [void][LweDisplayModeProbe]::SetWindowPos(
+        $secondDialog, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
+
     $replacementIndex = 1
     [void][LweDisplayModeProbe]::SendMessage(
         $secondScreenList, 0x0185, [IntPtr]1, [IntPtr]$replacementIndex)
-    $secondApply = [LweDisplayModeProbe]::GetDlgItem($secondDialog, 3101)
+    [void][LweDisplayModeProbe]::SendMessage(
+        $secondDialog, 0x0111, [LweDisplayModeProbe]::Command(3100, 1),
+        $secondScreenList)
+    $replaceText = -join @(
+        [char]0x66FF, [char]0x6362, [char]0x58C1, [char]0x7EB8,
+        [char]0x5230, [char]0x5C4F, [char]0x5E55)
+    if ([LweDisplayModeProbe]::Text($secondApply) -ne $replaceText -or
+        -not [LweDisplayModeProbe]::IsWindowEnabled($secondApply)) {
+        throw 'Selecting an occupied screen did not expose the red replacement action.'
+    }
+    [void][LweDisplayModeProbe]::SetWindowPos(
+        $secondDialog, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    Start-Sleep -Milliseconds 250
+    Save-WindowScreenshot $secondDialog $ReplacementScreenshotPath
+    [void][LweDisplayModeProbe]::SetWindowPos(
+        $secondDialog, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
+
     [void][LweDisplayModeProbe]::PostMessage(
         $secondDialog, 0x0111, [LweDisplayModeProbe]::Command(3101, 0), $secondApply)
     Start-Sleep -Seconds 2
@@ -346,6 +399,10 @@ try {
     "FILTER_TEXT=$filterText"
     'TEXT_TRIANGLE_PRESENT=False'
     "SCREEN_OPTION_COUNT=$screenCount"
+    "FREE_DEFAULT_SELECTED_COUNT=$initialSelectedCount"
+    "OCCUPIED_DEFAULT_SELECTED_COUNT=$occupiedSelectedCount"
+    "FREE_ROW_HEIGHT=$freeRowHeight"
+    "OCCUPIED_ROW_HEIGHT=$occupiedRowHeight"
     "MULTI_SELECTED_COUNT=$selectedCount"
     "SAVED_TARGET_COUNT=$($savedTargets.Count)"
     'SAME_SCREEN_REPLACEMENT=True'
@@ -355,6 +412,8 @@ try {
     'SYSTEM_WALLPAPER_UNCHANGED=True'
     "MAIN_SCREENSHOT=$MainScreenshotPath"
     "SCREENSHOT=$ScreenshotPath"
+    "OCCUPIED_SCREENSHOT=$OccupiedScreenshotPath"
+    "REPLACEMENT_SCREENSHOT=$ReplacementScreenshotPath"
     "ACTIVE_SCREENSHOT=$ActiveScreenshotPath"
 } finally {
     if ($null -ne $process -and -not $process.HasExited) {
