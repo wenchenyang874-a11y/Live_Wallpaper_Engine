@@ -99,6 +99,7 @@
     <ClCompile Include="src\app\WallpaperApplication.cpp" />
     <ClCompile Include="src\core\InstanceCoordinator.cpp" />
     <ClCompile Include="src\core\Logger.cpp" />
+    <ClCompile Include="src\core\ShareArchive.cpp" />
     <ClCompile Include="src\core\SettingsStore.cpp" />
     <ClCompile Include="src\core\WallpaperLibrary.cpp" />
     <ClCompile Include="src\core\WallpaperLibrarySelfTest.cpp" />
@@ -115,6 +116,7 @@
     <ClInclude Include="src\app\ModernMainWindow.h" />
     <ClInclude Include="src\core\InstanceCoordinator.h" />
     <ClInclude Include="src\core\Logger.h" />
+    <ClInclude Include="src\core\ShareArchive.h" />
     <ClInclude Include="src\core\SettingsStore.h" />
     <ClInclude Include="src\core\WallpaperLibrary.h" />
     <ClInclude Include="src\core\WallpaperLibrarySelfTest.h" />

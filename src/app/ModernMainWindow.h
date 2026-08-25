@@ -5,6 +5,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -16,6 +17,11 @@ namespace lwe::app {
 
 class ModernMainWindow final {
 public:
+    enum class ImportChoice {
+        MediaFiles,
+        SharePackage,
+    };
+
     struct DisplayOption final {
         std::wstring id;
         std::wstring label;
@@ -35,10 +41,16 @@ public:
         ActiveList = 1111,
         DisplayModeChanged = 1113,
         CancelSelectedWallpaper = 1114,
+        ExportSelectAll = 1115,
+        ExportClearAll = 1116,
+        ExportConfirm = 1117,
+        ExportCancel = 1118,
+        LibraryReordered = 1119,
         DisplayMode = 1199,
     };
 
     static constexpr UINT_PTR AnimationTimerId = 50;
+    static constexpr UINT_PTR DragScrollTimerId = 51;
 
     ModernMainWindow() = default;
     ~ModernMainWindow();
@@ -56,6 +68,7 @@ public:
     void HandleAnimationTimer();
     void CloseTransientUi();
     std::optional<std::vector<std::wstring>> ChooseDisplayTargets();
+    std::optional<ImportChoice> ChooseImportSource();
 
     void SetItems(std::vector<core::WallpaperItem> items);
     void SetActivePaths(std::vector<std::wstring> paths);
@@ -66,6 +79,13 @@ public:
     [[nodiscard]] bool SpanAcrossDisplays() const noexcept;
     std::optional<core::WallpaperItem> SelectedItem() const;
     std::optional<core::WallpaperItem> SelectedActiveItem() const;
+    void BeginExportSelection();
+    void EndExportSelection();
+    void SelectAllVisibleForExport();
+    void ClearExportSelection();
+    [[nodiscard]] bool ExportSelectionActive() const noexcept;
+    [[nodiscard]] std::vector<core::WallpaperItem> SelectedExportItems() const;
+    std::optional<std::vector<core::WallpaperItem>> TakePendingLibraryOrder();
     bool SelectItemAtScreenPoint(POINT screenPoint);
     bool SelectActiveItemAtScreenPoint(POINT screenPoint);
     void BeginRenameSelected();
@@ -109,11 +129,22 @@ private:
     void DrawDropdownItem(const DRAWITEMSTRUCT& draw) const;
     void DrawWallpaperCard(const DRAWITEMSTRUCT& draw,
                            const core::WallpaperItem& item, bool active,
-                           bool showCancelButton, float hoverProgress) const;
+                           bool showCancelButton, float hoverProgress,
+                           bool showSelectionBox = false,
+                           bool selectionChecked = false) const;
     void BeginRenameItem(const core::WallpaperItem& item, HWND list,
                          LRESULT selection);
     bool HitLibraryActiveBadge(POINT clientPoint, UINT& itemIndex) const;
+    bool HitLibraryExportCheckbox(POINT clientPoint, UINT& itemIndex) const;
     bool HitActiveCancelButton(POINT clientPoint, UINT& itemIndex) const;
+    void ToggleExportSelectionAt(UINT visibleIndex);
+    void UpdateExportSelectionControls();
+    void BeginLibraryDrag(POINT clientPoint);
+    void UpdateLibraryDrag(POINT clientPoint);
+    void FinishLibraryDrag(POINT clientPoint);
+    void CancelLibraryDrag();
+    void ScrollLibraryDuringDrag();
+    void UpdateLibraryDragTarget(POINT clientPoint);
     void SetControlHovered(HWND control, bool hovered);
     void SetListHovered(HWND list, POINT clientPoint, bool hovered);
     void StartHoverAnimation();
@@ -141,6 +172,10 @@ private:
     HWND dropdownList_ = nullptr;
     HWND activeStatus_ = nullptr;
     HWND activeList_ = nullptr;
+    HWND exportSelectAll_ = nullptr;
+    HWND exportClearAll_ = nullptr;
+    HWND exportConfirm_ = nullptr;
+    HWND exportCancel_ = nullptr;
     std::vector<DisplayOption> displayOptions_;
     HFONT titleFont_ = nullptr;
     HFONT headingFont_ = nullptr;
@@ -161,6 +196,7 @@ private:
     bool soundEnabled_ = false;
     bool spanAcrossDisplays_ = true;
     bool activeDrawerVisible_ = false;
+    bool exportSelectionMode_ = false;
     DropdownKind dropdownKind_ = DropdownKind::None;
     std::vector<std::wstring> dropdownLabels_;
     std::vector<std::wstring> dropdownDescriptions_;
@@ -177,6 +213,14 @@ private:
     bool libraryHoverTarget_ = false;
     bool activeHoverTarget_ = false;
     bool dropdownHoverTarget_ = false;
+    std::unordered_set<std::wstring> exportSelectedPaths_;
+    POINT libraryDragStart_{};
+    int libraryDragSourceVisibleIndex_ = -1;
+    int libraryDragTargetVisibleIndex_ = -1;
+    int libraryDragScrollDirection_ = 0;
+    bool libraryDragActive_ = false;
+    bool libraryDragInsertAfter_ = false;
+    std::optional<std::vector<core::WallpaperItem>> pendingLibraryOrder_;
     mutable std::uint64_t libraryDrawCount_ = 0;
 
     void UpdateFilterSelectorText();

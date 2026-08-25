@@ -6,12 +6,15 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <bcrypt.h>
 #include <shlobj.h>
 
 #include "core/Logger.h"
+#include "core/ShareArchive.h"
 #include "media/MediaProbe.h"
 
 namespace lwe::core {
@@ -22,6 +25,8 @@ constexpr std::uint32_t kPackageVersion = 1;
 constexpr std::uint32_t kMaximumNameBytes = 1024;
 constexpr std::uint64_t kMaximumPayloadBytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr DWORD kIoBufferBytes = 1024 * 1024;
+constexpr wchar_t kOrderFileName[] = L".library-order.v1";
+constexpr std::uint64_t kMaximumOrderFileBytes = 4ULL * 1024ULL * 1024ULL;
 
 #pragma pack(push, 1)
 struct PackageHeader final {
@@ -231,6 +236,33 @@ bool IsSafePackageFileName(const std::wstring_view name) {
     return std::filesystem::path(name).filename().native() == name;
 }
 
+std::wstring OrdinalKey(std::wstring value) {
+    if (!value.empty()) {
+        CharLowerBuffW(value.data(), static_cast<DWORD>(value.size()));
+    }
+    return value;
+}
+
+HRESULT CreateTemporaryDirectory(std::filesystem::path& directory) {
+    std::array<wchar_t, MAX_PATH> temporaryRoot{};
+    const DWORD length = GetTempPathW(static_cast<DWORD>(temporaryRoot.size()),
+                                      temporaryRoot.data());
+    if (length == 0 || length >= temporaryRoot.size()) {
+        return LastErrorResult();
+    }
+    std::array<wchar_t, MAX_PATH> temporaryFile{};
+    if (GetTempFileNameW(temporaryRoot.data(), L"LWE", 0,
+                         temporaryFile.data()) == 0) {
+        return LastErrorResult();
+    }
+    if (!DeleteFileW(temporaryFile.data()) ||
+        !CreateDirectoryW(temporaryFile.data(), nullptr)) {
+        return LastErrorResult();
+    }
+    directory = temporaryFile.data();
+    return S_OK;
+}
+
 HRESULT ResolveLibraryRoot(std::filesystem::path& root) {
     PWSTR localAppData = nullptr;
     const HRESULT result =
@@ -270,6 +302,122 @@ HRESULT WallpaperLibrary::InitializeAt(std::filesystem::path rootDirectory) {
     return S_OK;
 }
 
+std::vector<std::wstring> WallpaperLibrary::LoadOrder() const {
+    std::vector<std::wstring> order;
+    if (rootDirectory_.empty()) {
+        return order;
+    }
+    const std::filesystem::path path = rootDirectory_ / kOrderFileName;
+    HANDLE input = CreateFileW(path.c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                   FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN,
+                               nullptr);
+    if (input == INVALID_HANDLE_VALUE) {
+        return order;
+    }
+    std::uint64_t bytes = 0;
+    if (FAILED(FileSize(input, bytes)) || bytes > kMaximumOrderFileBytes) {
+        CloseHandle(input);
+        return order;
+    }
+    std::string contents(static_cast<std::size_t>(bytes), '\0');
+    const HRESULT result = contents.empty()
+                               ? S_OK
+                               : ReadExact(input, contents.data(), contents.size());
+    CloseHandle(input);
+    if (FAILED(result)) {
+        return order;
+    }
+
+    std::unordered_set<std::wstring> seen;
+    std::size_t start = 0;
+    while (start <= contents.size()) {
+        const std::size_t delimiter = contents.find('\n', start);
+        const std::size_t end = delimiter == std::string::npos
+                                    ? contents.size()
+                                    : delimiter;
+        std::string_view line(contents.data() + start, end - start);
+        if (!line.empty() && line.back() == '\r') {
+            line.remove_suffix(1);
+        }
+        const std::optional fileName = Utf8ToWide(line);
+        if (fileName.has_value() && IsSafePackageFileName(*fileName) &&
+            seen.insert(OrdinalKey(*fileName)).second) {
+            order.push_back(*fileName);
+        }
+        if (delimiter == std::string::npos) {
+            break;
+        }
+        start = delimiter + 1;
+    }
+    return order;
+}
+
+HRESULT WallpaperLibrary::SaveOrder(
+    const std::span<const std::wstring> fileNames) const {
+    if (rootDirectory_.empty()) {
+        return E_UNEXPECTED;
+    }
+    std::string contents;
+    std::unordered_set<std::wstring> seen;
+    for (const std::wstring& fileName : fileNames) {
+        if (!IsSafePackageFileName(fileName) ||
+            !seen.insert(OrdinalKey(fileName)).second) {
+            return E_INVALIDARG;
+        }
+        const std::optional utf8 = WideToUtf8(fileName);
+        if (!utf8.has_value() ||
+            contents.size() + utf8->size() + 1 > kMaximumOrderFileBytes) {
+            return HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
+        }
+        contents += *utf8;
+        contents.push_back('\n');
+    }
+
+    const std::filesystem::path destination = rootDirectory_ / kOrderFileName;
+    const std::filesystem::path temporary = destination.native() + L".tmp";
+    HANDLE output = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS,
+                                FILE_ATTRIBUTE_HIDDEN | FILE_FLAG_SEQUENTIAL_SCAN,
+                                nullptr);
+    if (output == INVALID_HANDLE_VALUE) {
+        return LastErrorResult();
+    }
+    HRESULT result = contents.empty()
+                         ? S_OK
+                         : WriteExact(output, contents.data(), contents.size());
+    if (SUCCEEDED(result) && !FlushFileBuffers(output)) {
+        result = LastErrorResult();
+    }
+    CloseHandle(output);
+    if (SUCCEEDED(result) &&
+        !MoveFileExW(temporary.c_str(), destination.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        result = LastErrorResult();
+    }
+    if (FAILED(result)) {
+        DeleteFileW(temporary.c_str());
+    }
+    return result;
+}
+
+HRESULT WallpaperLibrary::AppendOrderEntry(
+    const std::wstring_view fileName) const {
+    if (!IsSafePackageFileName(fileName)) {
+        return E_INVALIDARG;
+    }
+    std::vector<std::wstring> order;
+    for (const WallpaperItem& item : Scan()) {
+        if (_wcsicmp(item.path.filename().c_str(),
+                     std::wstring(fileName).c_str()) != 0) {
+            order.push_back(item.path.filename().native());
+        }
+    }
+    order.emplace_back(fileName);
+    return SaveOrder(order);
+}
+
 std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
     std::vector<WallpaperItem> items;
     if (rootDirectory_.empty()) {
@@ -286,6 +434,9 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
             continue;
         }
 
+        if (_wcsicmp(entry.path().filename().c_str(), kOrderFileName) == 0) {
+            continue;
+        }
         const std::wstring extension = entry.path().extension().native();
         if (_wcsicmp(extension.c_str(), L".lwewall") == 0 ||
             _wcsicmp(extension.c_str(), L".tmp") == 0 ||
@@ -302,6 +453,23 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
     std::ranges::sort(items, [](const WallpaperItem& left, const WallpaperItem& right) {
         return CompareStringOrdinal(left.displayName.c_str(), -1, right.displayName.c_str(),
                                     -1, TRUE) == CSTR_LESS_THAN;
+    });
+    const std::vector<std::wstring> order = LoadOrder();
+    std::unordered_map<std::wstring, std::size_t> rank;
+    for (std::size_t index = 0; index < order.size(); ++index) {
+        rank.emplace(OrdinalKey(order[index]), index);
+    }
+    std::ranges::stable_sort(items, [&](const WallpaperItem& left,
+                                       const WallpaperItem& right) {
+        const auto leftRank = rank.find(OrdinalKey(left.path.filename().native()));
+        const auto rightRank = rank.find(OrdinalKey(right.path.filename().native()));
+        if (leftRank == rank.end()) {
+            return false;
+        }
+        if (rightRank == rank.end()) {
+            return true;
+        }
+        return leftRank->second < rightRank->second;
     });
     return items;
 }
@@ -387,6 +555,11 @@ HRESULT WallpaperLibrary::ImportFile(const std::wstring_view sourcePath,
         DeleteFileW(destination.c_str());
         return result;
     }
+    const HRESULT orderResult = AppendOrderEntry(destination.filename().native());
+    if (FAILED(orderResult)) {
+        LogWarning(L"Wallpaper was imported, but its library order could not be saved: " +
+                   destination.native());
+    }
     LogInfo(L"Imported a wallpaper into the local library: " + destination.native());
     return S_OK;
 }
@@ -422,11 +595,31 @@ HRESULT WallpaperLibrary::Rename(const WallpaperItem& item,
     if (std::filesystem::exists(destination, error)) {
         return HRESULT_FROM_WIN32(ERROR_FILE_EXISTS);
     }
+    std::vector<std::wstring> order;
+    for (const WallpaperItem& existing : Scan()) {
+        order.push_back(existing.path.filename().native());
+    }
     if (!MoveFileExW(item.path.c_str(), destination.c_str(),
                      MOVEFILE_WRITE_THROUGH)) {
         return LastErrorResult();
     }
-    const HRESULT result = DescribeFile(destination, false, renamed);
+    HRESULT result = DescribeFile(destination, false, renamed);
+    if (FAILED(result)) {
+        MoveFileExW(destination.c_str(), item.path.c_str(), MOVEFILE_WRITE_THROUGH);
+        return result;
+    }
+    bool orderUpdated = false;
+    for (std::wstring& existingName : order) {
+        if (_wcsicmp(existingName.c_str(), item.path.filename().c_str()) == 0) {
+            existingName = destination.filename().native();
+            orderUpdated = true;
+            break;
+        }
+    }
+    if (!orderUpdated) {
+        order.push_back(destination.filename().native());
+    }
+    result = SaveOrder(order);
     if (FAILED(result)) {
         MoveFileExW(destination.c_str(), item.path.c_str(), MOVEFILE_WRITE_THROUGH);
         return result;
@@ -605,8 +798,188 @@ HRESULT WallpaperLibrary::ImportPackage(const std::wstring_view packagePath,
         DeleteFileW(destination.c_str());
         return result;
     }
+    const HRESULT orderResult = AppendOrderEntry(destination.filename().native());
+    if (FAILED(orderResult)) {
+        LogWarning(L"Wallpaper package was imported, but its library order could not be saved: " +
+                   destination.native());
+    }
     LogInfo(L"Imported and verified a wallpaper package: " + destination.native());
     return S_OK;
+}
+
+HRESULT WallpaperLibrary::ExportArchive(
+    const std::span<const WallpaperItem> items,
+    const std::wstring_view destinationPath) const {
+    if (items.empty() || destinationPath.empty()) {
+        return E_INVALIDARG;
+    }
+    std::filesystem::path temporaryRoot;
+    HRESULT result = CreateTemporaryDirectory(temporaryRoot);
+    if (FAILED(result)) {
+        return result;
+    }
+    const auto cleanup = [&] {
+        std::error_code error;
+        std::filesystem::remove_all(temporaryRoot, error);
+        if (error) {
+            LogWarning(L"Share archive export left a temporary directory: " +
+                       temporaryRoot.native());
+        }
+    };
+
+    std::vector<ShareArchiveEntry> entries;
+    std::unordered_set<std::wstring> usedNames;
+    entries.reserve(items.size());
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        std::wstring stem = items[index].path.stem().native();
+        if (stem.size() > 180) {
+            stem.resize(180);
+        }
+        if (stem.empty()) {
+            stem = L"wallpaper";
+        }
+        std::wstring entryName = stem + L".lwewall";
+        for (std::uint32_t suffix = 2;
+             usedNames.contains(OrdinalKey(entryName)); ++suffix) {
+            entryName = stem + L" (" + std::to_wstring(suffix) + L").lwewall";
+        }
+        usedNames.insert(OrdinalKey(entryName));
+        const std::filesystem::path package = temporaryRoot / entryName;
+        result = ExportPackage(items[index], package.native());
+        if (FAILED(result)) {
+            cleanup();
+            return result;
+        }
+        entries.push_back(ShareArchiveEntry{package, std::move(entryName)});
+    }
+
+    result = CreateShareArchive(entries, destinationPath);
+    cleanup();
+    if (SUCCEEDED(result)) {
+        LogInfo(L"Exported a ZIP wallpaper share archive containing " +
+                std::to_wstring(items.size()) + L" item(s): " +
+                std::wstring(destinationPath));
+    }
+    return result;
+}
+
+HRESULT WallpaperLibrary::ImportArchive(
+    const std::wstring_view archivePath,
+    std::vector<WallpaperItem>& imported) const {
+    imported.clear();
+    if (rootDirectory_.empty() || archivePath.empty()) {
+        return E_UNEXPECTED;
+    }
+    std::filesystem::path temporaryRoot;
+    HRESULT result = CreateTemporaryDirectory(temporaryRoot);
+    if (FAILED(result)) {
+        return result;
+    }
+    const auto cleanup = [&] {
+        std::error_code error;
+        std::filesystem::remove_all(temporaryRoot, error);
+        if (error) {
+            LogWarning(L"Share archive import left a temporary directory: " +
+                       temporaryRoot.native());
+        }
+    };
+
+    std::vector<std::filesystem::path> packages;
+    result = ExtractShareArchive(archivePath, temporaryRoot, packages);
+    for (const std::filesystem::path& package : packages) {
+        if (FAILED(result)) {
+            break;
+        }
+        WallpaperItem item;
+        result = ImportPackage(package.native(), item);
+        if (SUCCEEDED(result)) {
+            imported.push_back(std::move(item));
+        }
+    }
+    if (FAILED(result)) {
+        for (auto item = imported.rbegin(); item != imported.rend(); ++item) {
+            const HRESULT removeResult = Remove(*item);
+            if (FAILED(removeResult)) {
+                LogError(L"Failed to roll back an imported archive item: " +
+                             item->path.native(),
+                         removeResult);
+            }
+        }
+        imported.clear();
+    }
+    cleanup();
+    if (SUCCEEDED(result)) {
+        LogInfo(L"Imported a ZIP wallpaper share archive containing " +
+                std::to_wstring(imported.size()) + L" item(s): " +
+                std::wstring(archivePath));
+    }
+    return result;
+}
+
+HRESULT WallpaperLibrary::Remove(const WallpaperItem& item) const {
+    if (rootDirectory_.empty() || item.path.empty() || item.external ||
+        item.path.parent_path() != rootDirectory_) {
+        return E_INVALIDARG;
+    }
+    std::vector<std::wstring> previousOrder;
+    std::vector<std::wstring> nextOrder;
+    for (const WallpaperItem& existing : Scan()) {
+        const std::wstring fileName = existing.path.filename().native();
+        previousOrder.push_back(fileName);
+        if (_wcsicmp(existing.path.c_str(), item.path.c_str()) != 0) {
+            nextOrder.push_back(fileName);
+        }
+    }
+    if (previousOrder.size() == nextOrder.size()) {
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+    }
+    HRESULT result = SaveOrder(nextOrder);
+    if (FAILED(result)) {
+        return result;
+    }
+    if (!DeleteFileW(item.path.c_str())) {
+        result = LastErrorResult();
+        const HRESULT restoreResult = SaveOrder(previousOrder);
+        if (FAILED(restoreResult)) {
+            LogError(L"Failed to restore library order after a delete error.",
+                     restoreResult);
+        }
+        return result;
+    }
+    LogInfo(L"Removed a wallpaper from the local library: " + item.path.native());
+    return S_OK;
+}
+
+HRESULT WallpaperLibrary::Reorder(
+    const std::span<const WallpaperItem> items) const {
+    const std::vector<WallpaperItem> scanned = Scan();
+    if (items.size() != scanned.size()) {
+        return E_INVALIDARG;
+    }
+    std::unordered_set<std::wstring> expected;
+    for (const WallpaperItem& item : scanned) {
+        expected.insert(OrdinalKey(item.path.filename().native()));
+    }
+    std::vector<std::wstring> order;
+    std::unordered_set<std::wstring> seen;
+    order.reserve(items.size());
+    for (const WallpaperItem& item : items) {
+        if (item.external || item.path.parent_path() != rootDirectory_) {
+            return E_INVALIDARG;
+        }
+        const std::wstring fileName = item.path.filename().native();
+        const std::wstring key = OrdinalKey(fileName);
+        if (!expected.contains(key) || !seen.insert(key).second) {
+            return E_INVALIDARG;
+        }
+        order.push_back(fileName);
+    }
+    const HRESULT result = SaveOrder(order);
+    if (SUCCEEDED(result)) {
+        LogInfo(L"Persisted a custom wallpaper library order containing " +
+                std::to_wstring(order.size()) + L" item(s).");
+    }
+    return result;
 }
 
 const std::filesystem::path& WallpaperLibrary::RootDirectory() const noexcept {

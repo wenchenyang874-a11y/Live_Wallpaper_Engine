@@ -73,6 +73,10 @@ private:
     void ChooseImport();
     void ImportPaths(const std::vector<std::wstring>& paths);
     void ChooseExport();
+    void ExportWallpapers(const std::vector<core::WallpaperItem>& items);
+    void OpenWallpaperLocation(const core::WallpaperItem& item);
+    void RemoveWallpaperFromLibrary(const core::WallpaperItem& item);
+    void CommitLibraryOrder();
     void ApplySelectedWallpaper();
     void PreviewSelectedWallpaper();
     void PreviewWallpaper(const core::WallpaperItem& item);

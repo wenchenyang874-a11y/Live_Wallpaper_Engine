@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
+#include <iterator>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -14,6 +15,7 @@
 #include <mferror.h>
 #include <powrprof.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <wtsapi32.h>
 #include <windowsx.h>
@@ -51,6 +53,9 @@ constexpr int kControlledTestExitCommand = 2199;
 constexpr int kLibraryPreviewCommand = 2200;
 constexpr int kLibraryRenameCommand = 2201;
 constexpr int kLibraryApplyCommand = 2202;
+constexpr int kLibraryOpenLocationCommand = 2203;
+constexpr int kLibraryExportCommand = 2204;
+constexpr int kLibraryRemoveCommand = 2205;
 constexpr wchar_t kDesktopCompatibilityMutexName[] =
     L"cxWallpaperEngineGlobalMutex";
 
@@ -129,6 +134,10 @@ bool ContainsDisplayId(const std::vector<std::wstring>& identifiers,
 
 bool IsPackagePath(const std::wstring_view path) {
     return _wcsicmp(std::filesystem::path(path).extension().c_str(), L".lwewall") == 0;
+}
+
+bool IsArchivePath(const std::wstring_view path) {
+    return _wcsicmp(std::filesystem::path(path).extension().c_str(), L".zip") == 0;
 }
 
 std::wstring JoinDisplayIds(const std::vector<std::wstring>& identifiers) {
@@ -539,6 +548,11 @@ void WallpaperApplication::RefreshLibrary() {
 }
 
 void WallpaperApplication::ChooseImport() {
+    const std::optional choice = mainWindow_.ChooseImportSource();
+    if (!choice.has_value()) {
+        return;
+    }
+
     Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
     HRESULT result = CoCreateInstance(CLSID_FileOpenDialog, nullptr,
                                       CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
@@ -548,14 +562,24 @@ void WallpaperApplication::ChooseImport() {
         return;
     }
 
-    const COMDLG_FILTERSPEC filters[] = {
-        {L"支持的壁纸和分享包",
-         L"*.lwewall;*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.mp4;*.m4v;*.mov;*.wmv;*.avi"},
-        {L"Live Wallpaper 分享包 (*.lwewall)", L"*.lwewall"},
+    const COMDLG_FILTERSPEC mediaFilters[] = {
+        {L"支持的图片和视频",
+         L"*.jpg;*.jpeg;*.png;*.bmp;*.gif;*.mp4;*.m4v;*.mov;*.wmv;*.avi"},
         {L"图片和 GIF", L"*.jpg;*.jpeg;*.png;*.bmp;*.gif"},
         {L"视频", L"*.mp4;*.m4v;*.mov;*.wmv;*.avi"},
     };
-    result = dialog->SetFileTypes(static_cast<UINT>(std::size(filters)), filters);
+    const COMDLG_FILTERSPEC shareFilters[] = {
+        {L"壁纸分享包 (*.zip;*.lwewall)", L"*.zip;*.lwewall"},
+        {L"ZIP 壁纸分享包 (*.zip)", L"*.zip"},
+        {L"单个壁纸文件 (*.lwewall)", L"*.lwewall"},
+    };
+    const bool importingMedia =
+        *choice == ModernMainWindow::ImportChoice::MediaFiles;
+    result = importingMedia
+                 ? dialog->SetFileTypes(static_cast<UINT>(std::size(mediaFilters)),
+                                        mediaFilters)
+                 : dialog->SetFileTypes(static_cast<UINT>(std::size(shareFilters)),
+                                        shareFilters);
     FILEOPENDIALOGOPTIONS options{};
     if (SUCCEEDED(result)) {
         result = dialog->GetOptions(&options);
@@ -566,7 +590,8 @@ void WallpaperApplication::ChooseImport() {
                                     FOS_NOCHANGEDIR);
     }
     if (SUCCEEDED(result)) {
-        result = dialog->SetTitle(L"导入到我的壁纸");
+        result = dialog->SetTitle(importingMedia ? L"导入图片 / 视频"
+                                                 : L"导入壁纸分享包");
     }
     if (SUCCEEDED(result)) {
         result = dialog->Show(controlWindow_);
@@ -607,20 +632,34 @@ void WallpaperApplication::ChooseImport() {
 void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths) {
     std::vector<core::WallpaperItem> importedItems;
     std::size_t failedCount = 0;
+    bool importedArchive = false;
     for (const std::wstring& path : paths) {
-        core::WallpaperItem item;
-        const HRESULT result = IsPackagePath(path)
-                                   ? wallpaperLibrary_.ImportPackage(path, item)
-                                   : wallpaperLibrary_.ImportFile(path, item);
-        if (SUCCEEDED(result)) {
-            importedItems.push_back(std::move(item));
+        HRESULT result = S_OK;
+        if (IsArchivePath(path)) {
+            std::vector<core::WallpaperItem> archiveItems;
+            result = wallpaperLibrary_.ImportArchive(path, archiveItems);
+            if (SUCCEEDED(result)) {
+                importedArchive = true;
+                importedItems.insert(importedItems.end(),
+                                     std::make_move_iterator(archiveItems.begin()),
+                                     std::make_move_iterator(archiveItems.end()));
+            }
         } else {
+            core::WallpaperItem item;
+            result = IsPackagePath(path)
+                         ? wallpaperLibrary_.ImportPackage(path, item)
+                         : wallpaperLibrary_.ImportFile(path, item);
+            if (SUCCEEDED(result)) {
+                importedItems.push_back(std::move(item));
+            }
+        }
+        if (FAILED(result)) {
             ++failedCount;
             core::LogError(L"Wallpaper import failed: " + path, result);
         }
     }
 
-    if (!importedItems.empty()) {
+    if (!importedItems.empty() && !importedArchive) {
         ApplyWallpaperWithTargetPrompt(importedItems.front().path.native(), true,
                                        true);
     }
@@ -636,10 +675,20 @@ void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths) {
 }
 
 void WallpaperApplication::ChooseExport() {
-    const std::optional selected = mainWindow_.SelectedItem();
-    if (!selected.has_value()) {
-        MessageBoxW(controlWindow_, L"请先在“我的壁纸”中选择一项。",
+    if (wallpaperLibrary_.Scan().empty()) {
+        MessageBoxW(controlWindow_, L"“我的壁纸”中还没有可导出的壁纸。",
                     kApplicationTitle, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    mainWindow_.BeginExportSelection();
+    mainWindow_.SetStatus(L"请选择要导出的壁纸，可全选或取消全选");
+}
+
+void WallpaperApplication::ExportWallpapers(
+    const std::vector<core::WallpaperItem>& items) {
+    if (items.empty()) {
+        MessageBoxW(controlWindow_, L"请至少选择一张壁纸。", kApplicationTitle,
+                    MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -649,14 +698,15 @@ void WallpaperApplication::ChooseExport() {
     if (FAILED(result)) {
         return;
     }
-    const COMDLG_FILTERSPEC filter{L"Live Wallpaper 分享包 (*.lwewall)",
-                                   L"*.lwewall"};
+    const COMDLG_FILTERSPEC filter{L"ZIP 壁纸分享包 (*.zip)", L"*.zip"};
     result = dialog->SetFileTypes(1, &filter);
     if (SUCCEEDED(result)) {
-        result = dialog->SetDefaultExtension(L"lwewall");
+        result = dialog->SetDefaultExtension(L"zip");
     }
     const std::wstring suggestedName =
-        selected->path.stem().native() + L".lwewall";
+        items.size() == 1
+            ? items.front().path.stem().native() + L"-分享包.zip"
+            : L"LiveWallpaper-壁纸分享包.zip";
     if (SUCCEEDED(result)) {
         result = dialog->SetFileName(suggestedName.c_str());
     }
@@ -679,18 +729,20 @@ void WallpaperApplication::ChooseExport() {
         result = destinationItem->GetDisplayName(SIGDN_FILESYSPATH, &destination);
     }
     if (SUCCEEDED(result) && destination != nullptr) {
-        result = wallpaperLibrary_.ExportPackage(*selected, destination);
+        result = wallpaperLibrary_.ExportArchive(items, destination);
     }
     CoTaskMemFree(destination);
 
     if (FAILED(result)) {
-        std::wstring message = L"壁纸包导出失败。\r\n\r\n";
+        std::wstring message = L"ZIP 壁纸分享包导出失败。\r\n\r\n";
         message += core::HResultMessage(result);
         MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
                     MB_OK | MB_ICONERROR);
         return;
     }
-    mainWindow_.SetStatus(L"壁纸包已导出 · 可以直接分享给其他用户导入");
+    mainWindow_.EndExportSelection();
+    mainWindow_.SetStatus(L"已导出 " + std::to_wstring(items.size()) +
+                          L" 张壁纸 · ZIP 分享包可以直接发送给其他用户");
 }
 
 void WallpaperApplication::ApplySelectedWallpaper() {
@@ -731,6 +783,71 @@ void WallpaperApplication::PreviewWallpaper(const core::WallpaperItem& item) {
     if (reinterpret_cast<INT_PTR>(opened) <= 32) {
         MessageBoxW(controlWindow_, L"Windows 无法打开该壁纸的预览程序。",
                     kApplicationTitle, MB_OK | MB_ICONERROR);
+    }
+}
+
+void WallpaperApplication::OpenWallpaperLocation(
+    const core::WallpaperItem& item) {
+    const std::wstring parameters = L"/select,\"" + item.path.native() + L"\"";
+    const HINSTANCE opened = ShellExecuteW(
+        controlWindow_, L"open", L"explorer.exe", parameters.c_str(), nullptr,
+        SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+        MessageBoxW(controlWindow_, L"无法在文件资源管理器中定位该壁纸。",
+                    kApplicationTitle, MB_OK | MB_ICONERROR);
+    }
+}
+
+void WallpaperApplication::RemoveWallpaperFromLibrary(
+    const core::WallpaperItem& item) {
+    if (item.external) {
+        return;
+    }
+    const bool active = std::ranges::any_of(
+        assignments_, [&](const core::WallpaperAssignmentSetting& assignment) {
+            return SamePath(assignment.wallpaperPath, item.path.native());
+        });
+    std::wstring question = L"确定从“我的壁纸”中删除“" + item.displayName +
+                            L"”吗？\r\n\r\n";
+    if (active) {
+        question += L"该壁纸正在使用，删除前会先取消应用。\r\n";
+    }
+    question += L"只删除软件本地壁纸库中的副本，不影响最初导入的源文件。";
+    if (MessageBoxW(controlWindow_, question.c_str(), kApplicationTitle,
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+    if (active) {
+        CancelWallpaper(item, false, true);
+    }
+    const HRESULT result = wallpaperLibrary_.Remove(item);
+    if (FAILED(result)) {
+        std::wstring message = L"无法从“我的壁纸”中删除该壁纸。\r\n\r\n";
+        message += core::HResultMessage(result);
+        MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
+                    MB_OK | MB_ICONERROR);
+        RefreshLibrary();
+        return;
+    }
+    RefreshLibrary();
+    mainWindow_.SetStatus(L"已从“我的壁纸”中删除 · " + item.displayName);
+}
+
+void WallpaperApplication::CommitLibraryOrder() {
+    const auto order = mainWindow_.TakePendingLibraryOrder();
+    if (!order.has_value()) {
+        return;
+    }
+    const HRESULT result = wallpaperLibrary_.Reorder(*order);
+    if (FAILED(result)) {
+        std::wstring message = L"壁纸顺序保存失败。\r\n\r\n";
+        message += core::HResultMessage(result);
+        MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
+                    MB_OK | MB_ICONERROR);
+    }
+    RefreshLibrary();
+    if (SUCCEEDED(result)) {
+        mainWindow_.SetStatus(L"壁纸顺序已保存");
     }
 }
 
@@ -802,8 +919,14 @@ void WallpaperApplication::ShowLibraryContextMenu(POINT screenPoint) {
     AppendMenuW(menu, MF_STRING, kLibraryPreviewCommand, L"预览壁纸");
     AppendMenuW(menu, MF_STRING | (selected->external ? MF_GRAYED : 0),
                 kLibraryRenameCommand, L"重命名");
+    AppendMenuW(menu, MF_STRING, kLibraryOpenLocationCommand,
+                L"打开文件所在位置");
+    AppendMenuW(menu, MF_STRING, kLibraryExportCommand, L"导出分享包");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kLibraryApplyCommand, L"应用到所选屏幕");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (selected->external ? MF_GRAYED : 0),
+                kLibraryRemoveCommand, L"从我的壁纸中删除");
     const UINT command = TrackPopupMenu(
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, screenPoint.x,
         screenPoint.y, 0, controlWindow_, nullptr);
@@ -812,8 +935,14 @@ void WallpaperApplication::ShowLibraryContextMenu(POINT screenPoint) {
         PreviewSelectedWallpaper();
     } else if (command == kLibraryRenameCommand) {
         mainWindow_.BeginRenameSelected();
+    } else if (command == kLibraryOpenLocationCommand) {
+        OpenWallpaperLocation(*selected);
+    } else if (command == kLibraryExportCommand) {
+        ExportWallpapers({*selected});
     } else if (command == kLibraryApplyCommand) {
         ApplySelectedWallpaper();
+    } else if (command == kLibraryRemoveCommand) {
+        RemoveWallpaperFromLibrary(*selected);
     }
 }
 
@@ -1980,6 +2109,32 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                     }
                     return 0;
                 }
+                if (identifier == ModernMainWindow::ExportSelectAll &&
+                    notification == BN_CLICKED) {
+                    mainWindow_.SelectAllVisibleForExport();
+                    return 0;
+                }
+                if (identifier == ModernMainWindow::ExportClearAll &&
+                    notification == BN_CLICKED) {
+                    mainWindow_.ClearExportSelection();
+                    return 0;
+                }
+                if (identifier == ModernMainWindow::ExportConfirm &&
+                    notification == BN_CLICKED) {
+                    ExportWallpapers(mainWindow_.SelectedExportItems());
+                    return 0;
+                }
+                if (identifier == ModernMainWindow::ExportCancel &&
+                    notification == BN_CLICKED) {
+                    mainWindow_.EndExportSelection();
+                    mainWindow_.SetStatus(L"已退出导出选择");
+                    return 0;
+                }
+                if (identifier == ModernMainWindow::LibraryReordered &&
+                    notification == BN_CLICKED) {
+                    CommitLibraryOrder();
+                    return 0;
+                }
                 mainWindow_.CloseTransientUi();
                 if (identifier == ModernMainWindow::Import &&
                     notification == BN_CLICKED) {
@@ -1989,7 +2144,9 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                     ChooseExport();
                 } else if (identifier == ModernMainWindow::Library &&
                            notification == LBN_DBLCLK) {
-                    ApplySelectedWallpaper();
+                    if (!mainWindow_.ExportSelectionActive()) {
+                        ApplySelectedWallpaper();
+                    }
                 } else if (identifier == ModernMainWindow::Sound &&
                            notification == BN_CLICKED) {
                     ToggleSound();

@@ -15,6 +15,7 @@ namespace lwe::core {
 namespace {
 
 constexpr std::uint64_t kPackageNameOffset = 60;
+constexpr std::uint64_t kZipEntryNameOffset = 30;
 
 HRESULT LastErrorResult() {
     return HRESULT_FROM_WIN32(GetLastError());
@@ -151,15 +152,26 @@ int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
 
     WallpaperLibrary sourceLibrary;
     WallpaperLibrary destinationLibrary;
+    WallpaperLibrary archiveDestinationLibrary;
     WallpaperItem importedSource;
     WallpaperItem importedPackage;
+    WallpaperItem secondSource;
     const std::filesystem::path package = temporaryRoot / L"shared.lwewall";
     const std::filesystem::path corrupted = temporaryRoot / L"corrupted.lwewall";
     const std::filesystem::path unsafeName = temporaryRoot / L"unsafe-name.lwewall";
+    const std::filesystem::path archive = temporaryRoot / L"shared.zip";
+    const std::filesystem::path corruptedArchive =
+        temporaryRoot / L"corrupted.zip";
+    const std::filesystem::path unsafeArchive =
+        temporaryRoot / L"unsafe-entry.zip";
 
     result = sourceLibrary.InitializeAt(temporaryRoot / L"source-library");
     if (SUCCEEDED(result)) {
         result = destinationLibrary.InitializeAt(temporaryRoot / L"destination-library");
+    }
+    if (SUCCEEDED(result)) {
+        result = archiveDestinationLibrary.InitializeAt(
+            temporaryRoot / L"archive-destination-library");
     }
     if (SUCCEEDED(result)) {
         result = sourceLibrary.ImportFile(sourcePath, importedSource);
@@ -209,6 +221,74 @@ int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
         return 1;
     }
     LogInfo(L"SELF_TEST_LIBRARY_UNSAFE_NAME_REJECTED=True");
+
+    if (SUCCEEDED(result)) {
+        result = sourceLibrary.ImportFile(sourcePath, secondSource);
+    }
+    std::vector<WallpaperItem> reordered = sourceLibrary.Scan();
+    if (SUCCEEDED(result) && reordered.size() == 2) {
+        std::ranges::reverse(reordered);
+        result = sourceLibrary.Reorder(reordered);
+    } else if (SUCCEEDED(result)) {
+        result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
+    const std::vector<WallpaperItem> persistedOrder = sourceLibrary.Scan();
+    if (FAILED(result) || persistedOrder.size() != 2 ||
+        _wcsicmp(persistedOrder.front().path.c_str(),
+                 reordered.front().path.c_str()) != 0) {
+        LogError(L"Library persisted reorder self-test failed.",
+                 FAILED(result) ? result : HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+        cleanup();
+        return 1;
+    }
+    LogInfo(L"SELF_TEST_LIBRARY_REORDER_PERSISTED=True");
+
+    result = sourceLibrary.ExportArchive(persistedOrder, archive.native());
+    std::vector<WallpaperItem> archiveItems;
+    if (SUCCEEDED(result)) {
+        result = archiveDestinationLibrary.ImportArchive(archive.native(),
+                                                          archiveItems);
+    }
+    if (FAILED(result) || archiveItems.size() != 2 ||
+        !std::ranges::all_of(archiveItems, [&](const WallpaperItem& item) {
+            return FilesEqual(importedSource.path, item.path);
+        })) {
+        LogError(L"Library ZIP archive round-trip self-test failed.",
+                 FAILED(result) ? result : HRESULT_FROM_WIN32(ERROR_CRC));
+        cleanup();
+        return 1;
+    }
+    LogInfo(L"SELF_TEST_LIBRARY_ZIP_ROUNDTRIP=True");
+
+    if (!CopyFileW(archive.c_str(), corruptedArchive.c_str(), TRUE) ||
+        FAILED(ModifyByte(corruptedArchive, 0, true)) ||
+        SUCCEEDED(archiveDestinationLibrary.ImportArchive(
+            corruptedArchive.native(), archiveItems))) {
+        LogError(L"Library ZIP archive corruption self-test failed.");
+        cleanup();
+        return 1;
+    }
+    LogInfo(L"SELF_TEST_LIBRARY_ZIP_CORRUPTION_REJECTED=True");
+
+    if (!CopyFileW(archive.c_str(), unsafeArchive.c_str(), TRUE) ||
+        FAILED(ModifyByte(unsafeArchive, kZipEntryNameOffset, false)) ||
+        SUCCEEDED(archiveDestinationLibrary.ImportArchive(
+            unsafeArchive.native(), archiveItems))) {
+        LogError(L"Library unsafe ZIP entry self-test failed.");
+        cleanup();
+        return 1;
+    }
+    LogInfo(L"SELF_TEST_LIBRARY_ZIP_UNSAFE_ENTRY_REJECTED=True");
+
+    result = sourceLibrary.Remove(persistedOrder.front());
+    const auto remainingSourceItems = sourceLibrary.Scan();
+    if (FAILED(result) || remainingSourceItems.size() != 1) {
+        LogError(L"Library remove self-test failed.",
+                 FAILED(result) ? result : HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+        cleanup();
+        return 1;
+    }
+    LogInfo(L"SELF_TEST_LIBRARY_REMOVE=True");
 
     const auto destinationItems = destinationLibrary.Scan();
     if (destinationItems.size() != 1) {

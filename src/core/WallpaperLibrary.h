@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,10 +33,16 @@ public:
 
     HRESULT ImportFile(std::wstring_view sourcePath, WallpaperItem& imported) const;
     HRESULT ImportPackage(std::wstring_view packagePath, WallpaperItem& imported) const;
+    HRESULT ImportArchive(std::wstring_view archivePath,
+                          std::vector<WallpaperItem>& imported) const;
     HRESULT ExportPackage(const WallpaperItem& item,
+                          std::wstring_view destinationPath) const;
+    HRESULT ExportArchive(std::span<const WallpaperItem> items,
                           std::wstring_view destinationPath) const;
     HRESULT Rename(const WallpaperItem& item, std::wstring_view newDisplayName,
                    WallpaperItem& renamed) const;
+    HRESULT Remove(const WallpaperItem& item) const;
+    HRESULT Reorder(std::span<const WallpaperItem> items) const;
 
     [[nodiscard]] const std::filesystem::path& RootDirectory() const noexcept;
 
@@ -43,6 +50,9 @@ private:
     HRESULT DescribeFile(const std::filesystem::path& path, bool external,
                          WallpaperItem& item) const;
     std::filesystem::path UniqueDestination(std::wstring_view fileName) const;
+    std::vector<std::wstring> LoadOrder() const;
+    HRESULT SaveOrder(std::span<const std::wstring> fileNames) const;
+    HRESULT AppendOrderEntry(std::wstring_view fileName) const;
 
     std::filesystem::path rootDirectory_;
 };

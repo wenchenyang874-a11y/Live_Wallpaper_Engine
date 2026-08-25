@@ -4,6 +4,7 @@ param(
     [string] $Configuration = 'Release',
     [Parameter(Mandatory = $true)]
     [string] $VideoPath,
+    [string] $LibraryScreenshot = (Join-Path $env:TEMP 'LWE-active-library.png'),
     [string] $DropdownScreenshot = (Join-Path $env:TEMP 'LWE-modern-dropdown.png'),
     [string] $ActiveDrawerScreenshot = (Join-Path $env:TEMP 'LWE-active-drawer.png')
 )
@@ -163,6 +164,7 @@ try {
     [void][LweUiPlaybackProbe]::ShowWindow($control, 5)
     [void][LweUiPlaybackProbe]::SetForegroundWindow($control)
     Start-Sleep -Milliseconds 200
+    Save-WindowScreenshot $control $LibraryScreenshot
 
     $displayMode = [LweUiPlaybackProbe]::GetDlgItem($control, 1199)
     $dropdown = [LweUiPlaybackProbe]::GetDlgItem($control, 1109)
@@ -396,6 +398,7 @@ try {
     'PER_ITEM_CANCEL_CONFIRMED=True'
     "DROPDOWN_SCREENSHOT=$DropdownScreenshot"
     "ACTIVE_DRAWER_SCREENSHOT=$ActiveDrawerScreenshot"
+    "ACTIVE_LIBRARY_SCREENSHOT=$LibraryScreenshot"
 } finally {
     if ($null -ne $process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -ErrorAction SilentlyContinue

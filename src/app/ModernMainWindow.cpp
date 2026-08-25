@@ -32,6 +32,10 @@ constexpr wchar_t kScreenSelectionWindowClass[] =
 constexpr int kScreenSelectionList = 3100;
 constexpr int kScreenSelectionApply = 3101;
 constexpr int kScreenSelectionCancel = 3102;
+constexpr wchar_t kImportChoiceWindowClass[] =
+    L"LiveWallpaperEngine.ImportChoice";
+constexpr int kImportChoiceMedia = 3200;
+constexpr int kImportChoicePackage = 3201;
 
 COLORREF BlendColor(const COLORREF from, const COLORREF to, const float amount) {
     const float value = std::clamp(amount, 0.0F, 1.0F);
@@ -520,6 +524,350 @@ std::optional<std::vector<std::wstring>> ShowScreenSelectionDialog(
     return state.result;
 }
 
+struct ImportChoiceDialogState final {
+    HINSTANCE instance = nullptr;
+    HWND window = nullptr;
+    HWND media = nullptr;
+    HWND package = nullptr;
+    HFONT headingFont = nullptr;
+    HFONT bodyFont = nullptr;
+    HFONT detailFont = nullptr;
+    int hoveredControl = 0;
+    std::optional<ModernMainWindow::ImportChoice> result;
+    bool complete = false;
+};
+
+void RecreateImportChoiceFonts(ImportChoiceDialogState& state) {
+    for (HFONT* font : {&state.headingFont, &state.bodyFont, &state.detailFont}) {
+        if (*font != nullptr) {
+            DeleteObject(*font);
+        }
+    }
+    const int dpi = static_cast<int>(GetDpiForWindow(state.window));
+    state.headingFont = CreateFontW(
+        -MulDiv(21, dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Display");
+    state.bodyFont = CreateFontW(
+        -MulDiv(16, dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    state.detailFont = CreateFontW(
+        -MulDiv(12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    SetControlFont(state.media, state.bodyFont);
+    SetControlFont(state.package, state.bodyFont);
+}
+
+void LayoutImportChoiceDialog(ImportChoiceDialogState& state) {
+    RECT client{};
+    GetClientRect(state.window, &client);
+    const int margin = Scale(state.window, 24);
+    const int gap = Scale(state.window, 14);
+    const int top = Scale(state.window, 84);
+    const int height = std::max(1, static_cast<int>(client.bottom) - top - margin);
+    const int width =
+        std::max(1, (static_cast<int>(client.right) - margin * 2 - gap) / 2);
+    MoveWindow(state.media, margin, top, width, height, TRUE);
+    MoveWindow(state.package, margin + width + gap, top,
+               client.right - (margin + width + gap) - margin, height, TRUE);
+}
+
+void DrawImportChoiceButton(const DRAWITEMSTRUCT& draw,
+                            const ImportChoiceDialogState& state) {
+    FillRectangle(draw.hDC, draw.rcItem, kBackground);
+    const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
+    const bool hovered = state.hoveredControl == static_cast<int>(draw.CtlID);
+    RECT card = draw.rcItem;
+    InflateRect(&card, -1, -1);
+    const COLORREF fill = pressed
+                              ? RGB(40, 51, 76)
+                              : (hovered ? kPanelHover : kPanel);
+    FillRoundedRectangle(draw.hDC, card, fill,
+                         hovered || pressed ? kAccent : kBorder,
+                         Scale(state.window, 12), hovered || pressed ? 2 : 1);
+
+    RECT icon{card.left + Scale(state.window, 18),
+              card.top + Scale(state.window, 20),
+              card.left + Scale(state.window, 54),
+              card.top + Scale(state.window, 56)};
+    FillRoundedRectangle(draw.hDC, icon,
+                         draw.CtlID == kImportChoiceMedia
+                             ? RGB(47, 79, 133)
+                             : RGB(75, 60, 125),
+                         draw.CtlID == kImportChoiceMedia
+                             ? RGB(82, 134, 207)
+                             : RGB(126, 103, 196),
+                         Scale(state.window, 8));
+    const HPEN iconPen = CreatePen(PS_SOLID, std::max(1, Scale(state.window, 2)),
+                                   RGB(222, 229, 247));
+    const HGDIOBJ previousPen = SelectObject(draw.hDC, iconPen);
+    if (draw.CtlID == kImportChoiceMedia) {
+        MoveToEx(draw.hDC, icon.left + Scale(state.window, 7),
+                 icon.bottom - Scale(state.window, 9), nullptr);
+        LineTo(draw.hDC, icon.left + Scale(state.window, 15),
+               icon.top + Scale(state.window, 18));
+        LineTo(draw.hDC, icon.left + Scale(state.window, 21),
+               icon.top + Scale(state.window, 24));
+        LineTo(draw.hDC, icon.right - Scale(state.window, 6),
+               icon.top + Scale(state.window, 12));
+    } else {
+        const HGDIOBJ previousBrush =
+            SelectObject(draw.hDC, GetStockObject(HOLLOW_BRUSH));
+        Rectangle(draw.hDC, icon.left + Scale(state.window, 8),
+                  icon.top + Scale(state.window, 10),
+                  icon.right - Scale(state.window, 8),
+                  icon.bottom - Scale(state.window, 8));
+        SelectObject(draw.hDC, previousBrush);
+        MoveToEx(draw.hDC, icon.left + Scale(state.window, 8),
+                 icon.top + Scale(state.window, 17), nullptr);
+        LineTo(draw.hDC, icon.right - Scale(state.window, 8),
+               icon.top + Scale(state.window, 17));
+    }
+    SelectObject(draw.hDC, previousPen);
+    DeleteObject(iconPen);
+
+    const std::wstring_view title =
+        draw.CtlID == kImportChoiceMedia ? L"导入图片 / 视频"
+                                         : L"导入分享包";
+    const std::wstring_view description =
+        draw.CtlID == kImportChoiceMedia
+            ? L"JPG、PNG、GIF、MP4 等常见格式"
+            : L"ZIP 分享包或解压后的 .lwewall";
+    RECT titleRectangle{icon.right + Scale(state.window, 14), icon.top,
+                        card.right - Scale(state.window, 14),
+                        icon.top + Scale(state.window, 22)};
+    DrawTextLine(draw.hDC, title, titleRectangle, state.bodyFont, kTextPrimary,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    RECT descriptionRectangle{titleRectangle.left,
+                              titleRectangle.bottom + Scale(state.window, 2),
+                              titleRectangle.right, icon.bottom};
+    DrawTextLine(draw.hDC, description, descriptionRectangle, state.detailFont,
+                 kTextSecondary,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+LRESULT CALLBACK ImportChoiceButtonProcedure(
+    const HWND window, const UINT message, const WPARAM wParam,
+    const LPARAM lParam, const UINT_PTR, const DWORD_PTR referenceData) {
+    auto* state = reinterpret_cast<ImportChoiceDialogState*>(referenceData);
+    if (state != nullptr && message == WM_MOUSEMOVE) {
+        const int identifier = GetDlgCtrlID(window);
+        if (state->hoveredControl != identifier) {
+            state->hoveredControl = identifier;
+            InvalidateRect(state->media, nullptr, FALSE);
+            InvalidateRect(state->package, nullptr, FALSE);
+        }
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+        TrackMouseEvent(&tracking);
+    } else if (state != nullptr && message == WM_MOUSELEAVE) {
+        if (state->hoveredControl == GetDlgCtrlID(window)) {
+            state->hoveredControl = 0;
+            InvalidateRect(window, nullptr, FALSE);
+        }
+    }
+    return DefSubclassProc(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK ImportChoiceWindowProcedure(const HWND window,
+                                             const UINT message,
+                                             const WPARAM wParam,
+                                             const LPARAM lParam) {
+    auto* state = reinterpret_cast<ImportChoiceDialogState*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = static_cast<ImportChoiceDialogState*>(create->lpCreateParams);
+        state->window = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(state));
+    }
+    if (state == nullptr) {
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+    switch (message) {
+        case WM_CREATE:
+            state->media = CreateWindowExW(
+                0, L"BUTTON", L"导入图片 / 视频",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 1, 1,
+                window,
+                reinterpret_cast<HMENU>(
+                    static_cast<INT_PTR>(kImportChoiceMedia)),
+                state->instance, nullptr);
+            state->package = CreateWindowExW(
+                0, L"BUTTON", L"导入分享包",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 1, 1,
+                window,
+                reinterpret_cast<HMENU>(
+                    static_cast<INT_PTR>(kImportChoicePackage)),
+                state->instance, nullptr);
+            if (state->media == nullptr || state->package == nullptr) {
+                return -1;
+            }
+            for (const HWND control : {state->media, state->package}) {
+                SetWindowSubclass(control, &ImportChoiceButtonProcedure, 1,
+                                  reinterpret_cast<DWORD_PTR>(state));
+            }
+            RecreateImportChoiceFonts(*state);
+            LayoutImportChoiceDialog(*state);
+            return 0;
+        case WM_SIZE:
+            LayoutImportChoiceDialog(*state);
+            return 0;
+        case WM_DPICHANGED: {
+            const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+            SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOACTIVATE | SWP_NOZORDER);
+            RecreateImportChoiceFonts(*state);
+            LayoutImportChoiceDialog(*state);
+            InvalidateRect(window, nullptr, TRUE);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (HIWORD(wParam) == BN_CLICKED &&
+                (LOWORD(wParam) == kImportChoiceMedia ||
+                 LOWORD(wParam) == kImportChoicePackage)) {
+                state->result = LOWORD(wParam) == kImportChoiceMedia
+                                    ? ModernMainWindow::ImportChoice::MediaFiles
+                                    : ModernMainWindow::ImportChoice::SharePackage;
+                DestroyWindow(window);
+                return 0;
+            }
+            break;
+        case WM_DRAWITEM: {
+            const auto& draw = *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (draw.CtlID == kImportChoiceMedia ||
+                draw.CtlID == kImportChoicePackage) {
+                DrawImportChoiceButton(draw, *state);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC context = BeginPaint(window, &paint);
+            RECT client{};
+            GetClientRect(window, &client);
+            FillRectangle(context, client, kBackground);
+            RECT title{Scale(window, 24), Scale(window, 14),
+                       client.right - Scale(window, 24), Scale(window, 46)};
+            DrawTextLine(context, L"导入壁纸", title, state->headingFont,
+                         kTextPrimary,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            RECT subtitle{title.left, Scale(window, 44), title.right,
+                          Scale(window, 76)};
+            DrawTextLine(context, L"选择要导入的内容类型", subtitle,
+                         state->detailFont, kTextSecondary,
+                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_CLOSE:
+            DestroyWindow(window);
+            return 0;
+        case WM_DESTROY:
+            state->complete = true;
+            return 0;
+        case WM_NCDESTROY:
+            for (const HWND control : {state->media, state->package}) {
+                if (control != nullptr) {
+                    RemoveWindowSubclass(control, &ImportChoiceButtonProcedure, 1);
+                }
+            }
+            for (HFONT* font : {&state->headingFont, &state->bodyFont,
+                                &state->detailFont}) {
+                if (*font != nullptr) {
+                    DeleteObject(*font);
+                    *font = nullptr;
+                }
+            }
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            return 0;
+        default:
+            break;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+bool RegisterImportChoiceWindowClass(const HINSTANCE instance) {
+    WNDCLASSEXW windowClass{};
+    windowClass.cbSize = sizeof(windowClass);
+    windowClass.style = CS_HREDRAW | CS_VREDRAW;
+    windowClass.lpfnWndProc = &ImportChoiceWindowProcedure;
+    windowClass.hInstance = instance;
+    windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.lpszClassName = kImportChoiceWindowClass;
+    return RegisterClassExW(&windowClass) != 0 ||
+           GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
+}
+
+std::optional<ModernMainWindow::ImportChoice> ShowImportChoiceDialog(
+    const HWND owner, const HINSTANCE instance) {
+    if (!IsWindow(owner) || !RegisterImportChoiceWindowClass(instance)) {
+        return std::nullopt;
+    }
+    ImportChoiceDialogState state;
+    state.instance = instance;
+    const int clientWidth = Scale(owner, 620);
+    const int clientHeight = Scale(owner, 218);
+    RECT outer{0, 0, clientWidth, clientHeight};
+    AdjustWindowRectExForDpi(&outer, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
+                             WS_EX_DLGMODALFRAME, GetDpiForWindow(owner));
+    RECT ownerRectangle{};
+    GetWindowRect(owner, &ownerRectangle);
+    const int width = outer.right - outer.left;
+    const int height = outer.bottom - outer.top;
+    const int left = ownerRectangle.left +
+                     (ownerRectangle.right - ownerRectangle.left - width) / 2;
+    const int top = ownerRectangle.top +
+                    (ownerRectangle.bottom - ownerRectangle.top - height) / 2;
+    const HWND dialog = CreateWindowExW(
+        WS_EX_DLGMODALFRAME, kImportChoiceWindowClass, L"导入壁纸",
+        WS_POPUP | WS_CAPTION | WS_SYSMENU, left, top, width, height, owner,
+        nullptr, instance, &state);
+    if (dialog == nullptr) {
+        return std::nullopt;
+    }
+    const BOOL dark = TRUE;
+    DwmSetWindowAttribute(dialog, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
+                          sizeof(dark));
+    EnableWindow(owner, FALSE);
+    ShowWindow(dialog, SW_SHOWNORMAL);
+    SetForegroundWindow(dialog);
+    SetFocus(state.media);
+    bool receivedQuit = false;
+    WPARAM quitCode = 0;
+    MSG message{};
+    while (!state.complete && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE) {
+            PostMessageW(dialog, WM_CLOSE, 0, 0);
+            continue;
+        }
+        if (!IsDialogMessageW(dialog, &message)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    if (message.message == WM_QUIT) {
+        receivedQuit = true;
+        quitCode = message.wParam;
+    }
+    if (IsWindow(dialog)) {
+        DestroyWindow(dialog);
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    if (receivedQuit) {
+        PostQuitMessage(static_cast<int>(quitCode));
+    }
+    return state.result;
+}
+
 }  // namespace
 
 ModernMainWindow::~ModernMainWindow() {
@@ -528,7 +876,8 @@ ModernMainWindow::~ModernMainWindow() {
     }
     for (const HWND control : {filter_, library_, import_, export_, sound_,
                                displayMode_, dropdownList_, activeStatus_,
-                               activeList_}) {
+                               activeList_, exportSelectAll_, exportClearAll_,
+                               exportConfirm_, exportCancel_}) {
         if (control != nullptr) {
             RemoveWindowSubclass(control,
                                  &ModernMainWindow::InteractiveControlProcedure, 2);
@@ -596,6 +945,14 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     sound_ = createButton(Sound, L"声音：关闭");
     displayMode_ = createButton(DisplayMode, L"显示方式：跨屏扩展");
     activeStatus_ = createButton(ActiveStatus, L"");
+    exportSelectAll_ = createButton(ExportSelectAll, L"全选");
+    exportClearAll_ = createButton(ExportClearAll, L"取消全选");
+    exportConfirm_ = createButton(ExportConfirm, L"导出选中（0）");
+    exportCancel_ = createButton(ExportCancel, L"退出选择");
+    for (const HWND control : {exportSelectAll_, exportClearAll_, exportConfirm_,
+                               exportCancel_}) {
+        ShowWindow(control, SW_HIDE);
+    }
     renameEdit_ = CreateWindowExW(
         WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 1, 1,
         parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(RenameCommit)),
@@ -605,7 +962,9 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
         import_ == nullptr || export_ == nullptr || sound_ == nullptr ||
         displayMode_ == nullptr || renameEdit_ == nullptr ||
         dropdownList_ == nullptr || activeStatus_ == nullptr ||
-        activeList_ == nullptr) {
+        activeList_ == nullptr || exportSelectAll_ == nullptr ||
+        exportClearAll_ == nullptr || exportConfirm_ == nullptr ||
+        exportCancel_ == nullptr) {
         return false;
     }
 
@@ -618,7 +977,8 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
                       reinterpret_cast<DWORD_PTR>(this));
     for (const HWND control : {filter_, library_, import_, export_, sound_,
                                displayMode_, dropdownList_, activeStatus_,
-                               activeList_}) {
+                               activeList_, exportSelectAll_, exportClearAll_,
+                               exportConfirm_, exportCancel_}) {
         SetWindowSubclass(control, &ModernMainWindow::InteractiveControlProcedure, 2,
                           reinterpret_cast<DWORD_PTR>(this));
         hoverProgress_.emplace(control, 0.0F);
@@ -661,7 +1021,8 @@ void ModernMainWindow::RecreateFonts() {
 
     for (const HWND control : {search_, filter_, library_, import_, export_, sound_,
                                displayMode_, renameEdit_, dropdownList_, activeStatus_,
-                               activeList_}) {
+                               activeList_, exportSelectAll_, exportClearAll_,
+                               exportConfirm_, exportCancel_}) {
         SetControlFont(control, bodyFont_);
     }
     SendMessageW(library_, LB_SETITEMHEIGHT, 0, Scale(parent_, 78));
@@ -704,12 +1065,38 @@ void ModernMainWindow::Layout() {
                controlHeight, TRUE);
 
     const int actionTop = searchTop + controlHeight + gap;
-    const int actionWidth = std::max(1, (contentWidth - gap * 2) / 3);
-    MoveWindow(import_, contentLeft, actionTop, actionWidth, controlHeight, TRUE);
-    MoveWindow(export_, contentLeft + actionWidth + gap, actionTop, actionWidth,
-               controlHeight, TRUE);
-    MoveWindow(displayMode_, contentLeft + (actionWidth + gap) * 2, actionTop,
-               contentWidth - (actionWidth + gap) * 2, controlHeight, TRUE);
+    if (exportSelectionMode_) {
+        for (const HWND control : {import_, export_, displayMode_}) {
+            ShowWindow(control, SW_HIDE);
+        }
+        const int selectionWidth = std::max(1, (contentWidth - gap * 3) / 4);
+        const std::array selectionControls{exportSelectAll_, exportClearAll_,
+                                           exportConfirm_, exportCancel_};
+        for (std::size_t index = 0; index < selectionControls.size(); ++index) {
+            const int left = contentLeft +
+                             static_cast<int>(index) * (selectionWidth + gap);
+            const int widthForControl =
+                index + 1 == selectionControls.size()
+                    ? contentLeft + contentWidth - left
+                    : selectionWidth;
+            SetWindowPos(selectionControls[index], HWND_TOP, left, actionTop,
+                         widthForControl, controlHeight, SWP_SHOWWINDOW);
+        }
+    } else {
+        for (const HWND control : {exportSelectAll_, exportClearAll_, exportConfirm_,
+                                   exportCancel_}) {
+            ShowWindow(control, SW_HIDE);
+        }
+        const int actionWidth = std::max(1, (contentWidth - gap * 2) / 3);
+        SetWindowPos(import_, HWND_TOP, contentLeft, actionTop, actionWidth,
+                     controlHeight, SWP_SHOWWINDOW);
+        SetWindowPos(export_, HWND_TOP, contentLeft + actionWidth + gap, actionTop,
+                     actionWidth, controlHeight, SWP_SHOWWINDOW);
+        SetWindowPos(displayMode_, HWND_TOP,
+                     contentLeft + (actionWidth + gap) * 2, actionTop,
+                     contentWidth - (actionWidth + gap) * 2, controlHeight,
+                     SWP_SHOWWINDOW);
+    }
 
     const int statusHeight = Scale(parent_, 62);
     const int listTop = actionTop + controlHeight + Scale(parent_, 16);
@@ -891,7 +1278,7 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
     COLORREF fill = kPanel;
     COLORREF outline = kBorder;
     COLORREF foreground = disabled ? RGB(90, 98, 114) : kTextPrimary;
-    if (draw.CtlID == Import) {
+    if (draw.CtlID == Import || draw.CtlID == ExportConfirm) {
         fill = pressed ? RGB(72, 99, 207)
                        : BlendColor(kAccent, kAccentHover, hover);
         outline = fill;
@@ -975,8 +1362,26 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
     const float hover = static_cast<int>(draw.itemID) == libraryHoverIndex_
                             ? libraryHoverProgress_
                             : 0.0F;
+    const bool exportChecked =
+        exportSelectedPaths_.contains(item.path.native());
     DrawWallpaperCard(draw, item, active, false,
-                      std::max(hover, selected ? 1.0F : 0.0F));
+                      std::max(hover, selected ? 1.0F : 0.0F),
+                      exportSelectionMode_, exportChecked);
+    if (libraryDragActive_ &&
+        static_cast<int>(draw.itemID) == libraryDragTargetVisibleIndex_) {
+        RECT marker = draw.rcItem;
+        marker.left += Scale(parent_, 8);
+        marker.right -= Scale(parent_, 8);
+        const int y = libraryDragInsertAfter_ ? marker.bottom - Scale(parent_, 2)
+                                              : marker.top;
+        const HPEN pen = CreatePen(PS_SOLID, std::max(2, Scale(parent_, 3)),
+                                   kAccentHover);
+        const HGDIOBJ previous = SelectObject(draw.hDC, pen);
+        MoveToEx(draw.hDC, marker.left, y, nullptr);
+        LineTo(draw.hDC, marker.right, y);
+        SelectObject(draw.hDC, previous);
+        DeleteObject(pen);
+    }
 }
 
 void ModernMainWindow::DrawActiveItem(const DRAWITEMSTRUCT& draw) const {
@@ -996,7 +1401,8 @@ void ModernMainWindow::DrawActiveItem(const DRAWITEMSTRUCT& draw) const {
 
 void ModernMainWindow::DrawWallpaperCard(
     const DRAWITEMSTRUCT& draw, const core::WallpaperItem& item, const bool active,
-    const bool showCancelButton, const float hoverProgress) const {
+    const bool showCancelButton, const float hoverProgress,
+    const bool showSelectionBox, const bool selectionChecked) const {
     RECT card = draw.rcItem;
     InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
     const COLORREF cardFill = BlendColor(kPanel, kPanelHover, hoverProgress);
@@ -1004,8 +1410,35 @@ void ModernMainWindow::DrawWallpaperCard(
                          active ? kAccent : kBorder, Scale(parent_, 12),
                          active ? 2 : 1);
 
-    RECT icon{card.left + Scale(parent_, 12), card.top + Scale(parent_, 9),
-              card.left + Scale(parent_, 94), card.bottom - Scale(parent_, 9)};
+    int contentLeft = card.left + Scale(parent_, 12);
+    if (showSelectionBox) {
+        const int boxSize = Scale(parent_, 20);
+        RECT box{contentLeft,
+                 card.top + (card.bottom - card.top - boxSize) / 2,
+                 contentLeft + boxSize,
+                 card.top + (card.bottom - card.top + boxSize) / 2};
+        FillRoundedRectangle(draw.hDC, box,
+                             selectionChecked ? kAccent : kPanel,
+                             selectionChecked ? kAccent : kTextSecondary,
+                             Scale(parent_, 5));
+        if (selectionChecked) {
+            const HPEN pen = CreatePen(PS_SOLID, std::max(1, Scale(parent_, 2)),
+                                       RGB(255, 255, 255));
+            const HGDIOBJ previous = SelectObject(draw.hDC, pen);
+            MoveToEx(draw.hDC, box.left + Scale(parent_, 5),
+                     box.top + Scale(parent_, 10), nullptr);
+            LineTo(draw.hDC, box.left + Scale(parent_, 9),
+                   box.top + Scale(parent_, 14));
+            LineTo(draw.hDC, box.left + Scale(parent_, 16),
+                   box.top + Scale(parent_, 6));
+            SelectObject(draw.hDC, previous);
+            DeleteObject(pen);
+        }
+        contentLeft = box.right + Scale(parent_, 12);
+    }
+
+    RECT icon{contentLeft, card.top + Scale(parent_, 9),
+              contentLeft + Scale(parent_, 82), card.bottom - Scale(parent_, 9)};
     FillRoundedRectangle(draw.hDC, icon, RGB(10, 12, 17), kBorder,
                          Scale(parent_, 8));
     const auto thumbnail = thumbnails_.find(item.path.native());
@@ -1073,11 +1506,15 @@ void ModernMainWindow::DrawWallpaperCard(
                    card.right - Scale(parent_, 14), card.top + Scale(parent_, 48)};
         const COLORREF badgeFill =
             static_cast<int>(draw.itemID) == libraryBadgeHoverIndex_
-                ? RGB(61, 82, 145)
-                : RGB(47, 62, 108);
-        FillRoundedRectangle(draw.hDC, badge, badgeFill, badgeFill,
+                ? RGB(38, 126, 91)
+                : RGB(30, 101, 76);
+        const COLORREF badgeOutline =
+            static_cast<int>(draw.itemID) == libraryBadgeHoverIndex_
+                ? RGB(74, 169, 126)
+                : RGB(52, 137, 103);
+        FillRoundedRectangle(draw.hDC, badge, badgeFill, badgeOutline,
                              Scale(parent_, 9));
-        DrawTextLine(draw.hDC, L"使用中", badge, smallFont_, RGB(190, 204, 255),
+        DrawTextLine(draw.hDC, L"使用中", badge, smallFont_, RGB(205, 247, 226),
                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
@@ -1301,7 +1738,32 @@ ModernMainWindow::ChooseDisplayTargets() {
     return selected;
 }
 
+std::optional<ModernMainWindow::ImportChoice>
+ModernMainWindow::ChooseImportSource() {
+    CloseTransientUi();
+    return ShowImportChoiceDialog(
+        parent_, reinterpret_cast<HINSTANCE>(
+                     GetWindowLongPtrW(parent_, GWLP_HINSTANCE)));
+}
+
 void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
+    std::unordered_set<std::wstring> currentPaths;
+    for (const core::WallpaperItem& item : items) {
+        currentPaths.insert(item.path.native());
+    }
+    for (auto thumbnail = thumbnails_.begin(); thumbnail != thumbnails_.end();) {
+        if (!currentPaths.contains(thumbnail->first)) {
+            if (thumbnail->second != nullptr) {
+                DeleteObject(thumbnail->second);
+            }
+            thumbnail = thumbnails_.erase(thumbnail);
+        } else {
+            ++thumbnail;
+        }
+    }
+    std::erase_if(exportSelectedPaths_, [&](const std::wstring& path) {
+        return !currentPaths.contains(path);
+    });
     items_ = std::move(items);
     for (const core::WallpaperItem& item : items_) {
         const std::wstring key = item.path.native();
@@ -1311,6 +1773,7 @@ void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
     }
     RefreshVisibleItems();
     RefreshActiveItems();
+    UpdateExportSelectionControls();
 }
 
 void ModernMainWindow::SetActivePaths(std::vector<std::wstring> paths) {
@@ -1412,6 +1875,88 @@ std::optional<core::WallpaperItem> ModernMainWindow::SelectedActiveItem() const 
         return std::nullopt;
     }
     return items_[activeVisibleIndices_[static_cast<std::size_t>(selection)]];
+}
+
+void ModernMainWindow::BeginExportSelection() {
+    if (exportSelectionMode_) {
+        return;
+    }
+    CloseTransientUi();
+    HideActiveDrawer();
+    CancelRename();
+    exportSelectionMode_ = true;
+    exportSelectedPaths_.clear();
+    UpdateExportSelectionControls();
+    Layout();
+    InvalidateRect(library_, nullptr, FALSE);
+}
+
+void ModernMainWindow::EndExportSelection() {
+    if (!exportSelectionMode_) {
+        return;
+    }
+    exportSelectionMode_ = false;
+    exportSelectedPaths_.clear();
+    UpdateExportSelectionControls();
+    Layout();
+    InvalidateRect(library_, nullptr, FALSE);
+}
+
+void ModernMainWindow::SelectAllVisibleForExport() {
+    if (!exportSelectionMode_) {
+        return;
+    }
+    for (const std::size_t itemIndex : visibleIndices_) {
+        exportSelectedPaths_.insert(items_[itemIndex].path.native());
+    }
+    UpdateExportSelectionControls();
+    InvalidateRect(library_, nullptr, FALSE);
+}
+
+void ModernMainWindow::ClearExportSelection() {
+    if (!exportSelectionMode_ || exportSelectedPaths_.empty()) {
+        return;
+    }
+    exportSelectedPaths_.clear();
+    UpdateExportSelectionControls();
+    InvalidateRect(library_, nullptr, FALSE);
+}
+
+bool ModernMainWindow::ExportSelectionActive() const noexcept {
+    return exportSelectionMode_;
+}
+
+std::vector<core::WallpaperItem> ModernMainWindow::SelectedExportItems() const {
+    std::vector<core::WallpaperItem> selected;
+    for (const core::WallpaperItem& item : items_) {
+        if (exportSelectedPaths_.contains(item.path.native())) {
+            selected.push_back(item);
+        }
+    }
+    return selected;
+}
+
+std::optional<std::vector<core::WallpaperItem>>
+ModernMainWindow::TakePendingLibraryOrder() {
+    std::optional order = std::move(pendingLibraryOrder_);
+    pendingLibraryOrder_.reset();
+    return order;
+}
+
+void ModernMainWindow::UpdateExportSelectionControls() {
+    if (exportConfirm_ == nullptr) {
+        return;
+    }
+    const std::wstring label = L"导出选中（" +
+                               std::to_wstring(exportSelectedPaths_.size()) +
+                               L"）";
+    SetWindowTextW(exportConfirm_, label.c_str());
+    EnableWindow(exportConfirm_, !exportSelectedPaths_.empty());
+    EnableWindow(exportClearAll_, !exportSelectedPaths_.empty());
+    EnableWindow(exportSelectAll_, !visibleIndices_.empty());
+    InvalidateRect(exportConfirm_, nullptr, FALSE);
+    InvalidateRect(exportClearAll_, nullptr, FALSE);
+    InvalidateRect(exportSelectAll_, nullptr, FALSE);
 }
 
 bool ModernMainWindow::SelectItemAtScreenPoint(const POINT screenPoint) {
@@ -1563,6 +2108,195 @@ void ModernMainWindow::CancelRename() {
     SetFocus(library_);
 }
 
+void ModernMainWindow::BeginLibraryDrag(const POINT clientPoint) {
+    if (exportSelectionMode_) {
+        return;
+    }
+    const LRESULT hit = SendMessageW(
+        library_, LB_ITEMFROMPOINT, 0,
+        MAKELPARAM(clientPoint.x, clientPoint.y));
+    const UINT visibleIndex = LOWORD(hit);
+    if (HIWORD(hit) != 0 || visibleIndex >= visibleIndices_.size() ||
+        items_[visibleIndices_[visibleIndex]].external) {
+        libraryDragSourceVisibleIndex_ = -1;
+        return;
+    }
+    libraryDragStart_ = clientPoint;
+    libraryDragSourceVisibleIndex_ = static_cast<int>(visibleIndex);
+    libraryDragTargetVisibleIndex_ = static_cast<int>(visibleIndex);
+    libraryDragInsertAfter_ = false;
+    libraryDragActive_ = false;
+    libraryDragScrollDirection_ = 0;
+}
+
+void ModernMainWindow::UpdateLibraryDrag(const POINT clientPoint) {
+    if (libraryDragSourceVisibleIndex_ < 0 || exportSelectionMode_) {
+        return;
+    }
+    if (!libraryDragActive_) {
+        const int thresholdX = std::max(4, GetSystemMetrics(SM_CXDRAG));
+        const int thresholdY = std::max(4, GetSystemMetrics(SM_CYDRAG));
+        if (std::abs(clientPoint.x - libraryDragStart_.x) < thresholdX &&
+            std::abs(clientPoint.y - libraryDragStart_.y) < thresholdY) {
+            return;
+        }
+        if (GetCapture() != library_) {
+            SetCapture(library_);
+        }
+        libraryDragActive_ = true;
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    }
+
+    RECT client{};
+    GetClientRect(library_, &client);
+    const int edge = Scale(parent_, 34);
+    const int nextScrollDirection = clientPoint.y < client.top + edge
+                                        ? -1
+                                        : (clientPoint.y > client.bottom - edge
+                                               ? 1
+                                               : 0);
+    if (nextScrollDirection != libraryDragScrollDirection_) {
+        libraryDragScrollDirection_ = nextScrollDirection;
+        if (libraryDragScrollDirection_ == 0) {
+            KillTimer(library_, DragScrollTimerId);
+        } else {
+            SetTimer(library_, DragScrollTimerId, 60, nullptr);
+        }
+    }
+    UpdateLibraryDragTarget(clientPoint);
+}
+
+void ModernMainWindow::UpdateLibraryDragTarget(POINT clientPoint) {
+    if (!libraryDragActive_ || visibleIndices_.empty()) {
+        return;
+    }
+    RECT client{};
+    GetClientRect(library_, &client);
+    clientPoint.x = std::clamp(clientPoint.x, client.left,
+                               std::max(client.left, client.right - 1));
+    clientPoint.y = std::clamp(clientPoint.y, client.top,
+                               std::max(client.top, client.bottom - 1));
+    const LRESULT hit = SendMessageW(
+        library_, LB_ITEMFROMPOINT, 0,
+        MAKELPARAM(clientPoint.x, clientPoint.y));
+    const UINT visibleIndex = LOWORD(hit);
+    if (visibleIndex >= visibleIndices_.size() ||
+        items_[visibleIndices_[visibleIndex]].external) {
+        return;
+    }
+    RECT itemRectangle{};
+    if (SendMessageW(library_, LB_GETITEMRECT, visibleIndex,
+                     reinterpret_cast<LPARAM>(&itemRectangle)) == LB_ERR) {
+        return;
+    }
+    const bool insertAfter =
+        clientPoint.y >= (itemRectangle.top + itemRectangle.bottom) / 2;
+    if (libraryDragTargetVisibleIndex_ == static_cast<int>(visibleIndex) &&
+        libraryDragInsertAfter_ == insertAfter) {
+        return;
+    }
+    const int previousTarget = libraryDragTargetVisibleIndex_;
+    libraryDragTargetVisibleIndex_ = static_cast<int>(visibleIndex);
+    libraryDragInsertAfter_ = insertAfter;
+    for (const int target : {previousTarget, libraryDragTargetVisibleIndex_}) {
+        RECT rectangle{};
+        if (target >= 0 &&
+            SendMessageW(library_, LB_GETITEMRECT, target,
+                         reinterpret_cast<LPARAM>(&rectangle)) != LB_ERR) {
+            InvalidateRect(library_, &rectangle, FALSE);
+        }
+    }
+}
+
+void ModernMainWindow::ScrollLibraryDuringDrag() {
+    if (!libraryDragActive_ || libraryDragScrollDirection_ == 0) {
+        return;
+    }
+    const int count = static_cast<int>(
+        SendMessageW(library_, LB_GETCOUNT, 0, 0));
+    const int top = static_cast<int>(
+        SendMessageW(library_, LB_GETTOPINDEX, 0, 0));
+    RECT client{};
+    GetClientRect(library_, &client);
+    const int rowHeight = std::max(
+        1, static_cast<int>(SendMessageW(library_, LB_GETITEMHEIGHT, 0, 0)));
+    const int visibleRows =
+        std::max(1, (static_cast<int>(client.bottom - client.top) + rowHeight - 1) /
+                        rowHeight);
+    const int maximumTop = std::max(0, count - visibleRows);
+    const int next = std::clamp(top + libraryDragScrollDirection_, 0,
+                                maximumTop);
+    if (next != top) {
+        SendMessageW(library_, LB_SETTOPINDEX, next, 0);
+        InvalidateRect(library_, nullptr, FALSE);
+    }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    ScreenToClient(library_, &cursor);
+    UpdateLibraryDragTarget(cursor);
+}
+
+void ModernMainWindow::FinishLibraryDrag(const POINT clientPoint) {
+    if (!libraryDragActive_ || libraryDragSourceVisibleIndex_ < 0 ||
+        libraryDragTargetVisibleIndex_ < 0 ||
+        static_cast<std::size_t>(libraryDragSourceVisibleIndex_) >=
+            visibleIndices_.size() ||
+        static_cast<std::size_t>(libraryDragTargetVisibleIndex_) >=
+            visibleIndices_.size()) {
+        CancelLibraryDrag();
+        return;
+    }
+    UpdateLibraryDragTarget(clientPoint);
+    const std::size_t sourceIndex =
+        visibleIndices_[static_cast<std::size_t>(libraryDragSourceVisibleIndex_)];
+    const std::size_t targetIndex =
+        visibleIndices_[static_cast<std::size_t>(libraryDragTargetVisibleIndex_)];
+    std::vector<core::WallpaperItem> reordered = items_;
+    core::WallpaperItem moving = reordered[sourceIndex];
+    reordered.erase(reordered.begin() + static_cast<std::ptrdiff_t>(sourceIndex));
+    std::size_t insertion = targetIndex + (libraryDragInsertAfter_ ? 1U : 0U);
+    if (sourceIndex < insertion) {
+        --insertion;
+    }
+    insertion = std::min(insertion, reordered.size());
+    reordered.insert(reordered.begin() + static_cast<std::ptrdiff_t>(insertion),
+                     std::move(moving));
+
+    std::vector<core::WallpaperItem> localOrder;
+    for (const core::WallpaperItem& item : reordered) {
+        if (!item.external) {
+            localOrder.push_back(item);
+        }
+    }
+    const bool changed = sourceIndex != insertion;
+    CancelLibraryDrag();
+    if (changed) {
+        pendingLibraryOrder_ = std::move(localOrder);
+        PostMessageW(parent_, WM_COMMAND,
+                     MAKEWPARAM(LibraryReordered, BN_CLICKED),
+                     reinterpret_cast<LPARAM>(library_));
+    }
+}
+
+void ModernMainWindow::CancelLibraryDrag() {
+    const int previousTarget = libraryDragTargetVisibleIndex_;
+    libraryDragSourceVisibleIndex_ = -1;
+    libraryDragTargetVisibleIndex_ = -1;
+    libraryDragScrollDirection_ = 0;
+    libraryDragActive_ = false;
+    libraryDragInsertAfter_ = false;
+    KillTimer(library_, DragScrollTimerId);
+    if (GetCapture() == library_) {
+        ReleaseCapture();
+    }
+    RECT rectangle{};
+    if (previousTarget >= 0 &&
+        SendMessageW(library_, LB_GETITEMRECT, previousTarget,
+                     reinterpret_cast<LPARAM>(&rectangle)) != LB_ERR) {
+        InvalidateRect(library_, &rectangle, FALSE);
+    }
+}
+
 LRESULT CALLBACK ModernMainWindow::RenameEditProcedure(
     const HWND window, const UINT message, const WPARAM wParam, const LPARAM lParam,
     const UINT_PTR, const DWORD_PTR referenceData) {
@@ -1593,10 +2327,20 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         return DefSubclassProc(window, message, wParam, lParam);
     }
 
-    if (message == WM_MOUSEMOVE) {
+    if (message == WM_LBUTTONDOWN && window == self->library_) {
+        self->BeginLibraryDrag(
+            POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+    } else if (message == WM_MOUSEMOVE) {
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
         TrackMouseEvent(&tracking);
         const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (window == self->library_ && (wParam & MK_LBUTTON) != 0 &&
+            self->libraryDragSourceVisibleIndex_ >= 0) {
+            self->UpdateLibraryDrag(point);
+            if (self->libraryDragActive_) {
+                return 0;
+            }
+        }
         if (window == self->library_ || window == self->activeList_ ||
             window == self->dropdownList_) {
             self->SetListHovered(window, point, true);
@@ -1618,9 +2362,19 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
             self->SetControlHovered(window, false);
         }
     } else if (message == WM_LBUTTONUP && window == self->library_) {
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (self->libraryDragActive_) {
+            self->FinishLibraryDrag(point);
+            return 0;
+        }
+        self->CancelLibraryDrag();
         UINT index = 0;
-        if (self->HitLibraryActiveBadge(
-                POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, index)) {
+        if (self->HitLibraryExportCheckbox(point, index)) {
+            SendMessageW(window, LB_SETCURSEL, index, 0);
+            self->ToggleExportSelectionAt(index);
+            return 0;
+        }
+        if (self->HitLibraryActiveBadge(point, index)) {
             SendMessageW(window, LB_SETCURSEL, index, 0);
             InvalidateRect(window, nullptr, FALSE);
             PostMessageW(self->parent_, WM_COMMAND,
@@ -1695,7 +2449,20 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
             self->SelectDropdownItem(static_cast<std::size_t>(selected));
         }
         return 0;
+    } else if (message == WM_TIMER && window == self->library_ &&
+               wParam == DragScrollTimerId) {
+        self->ScrollLibraryDuringDrag();
+        return 0;
+    } else if (message == WM_CAPTURECHANGED && window == self->library_) {
+        self->CancelLibraryDrag();
+    } else if (message == WM_SETCURSOR && window == self->library_ &&
+               self->libraryDragActive_) {
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+        return TRUE;
     } else if (message == WM_KEYDOWN && wParam == VK_ESCAPE) {
+        if (self->exportSelectionMode_) {
+            self->EndExportSelection();
+        }
         self->HideDropdown();
         return 0;
     }
@@ -1881,6 +2648,53 @@ bool ModernMainWindow::HitLibraryActiveBadge(const POINT clientPoint,
     return PtInRect(&badge, clientPoint) != FALSE;
 }
 
+bool ModernMainWindow::HitLibraryExportCheckbox(const POINT clientPoint,
+                                                UINT& itemIndex) const {
+    if (!exportSelectionMode_) {
+        return false;
+    }
+    const LRESULT item = SendMessageW(
+        library_, LB_ITEMFROMPOINT, 0,
+        MAKELPARAM(clientPoint.x, clientPoint.y));
+    itemIndex = LOWORD(item);
+    if (HIWORD(item) != 0 || itemIndex >= visibleIndices_.size()) {
+        return false;
+    }
+    RECT itemRectangle{};
+    if (SendMessageW(library_, LB_GETITEMRECT, itemIndex,
+                     reinterpret_cast<LPARAM>(&itemRectangle)) == LB_ERR) {
+        return false;
+    }
+    RECT card = itemRectangle;
+    InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
+    const int boxSize = Scale(parent_, 20);
+    const RECT box{card.left + Scale(parent_, 12),
+                   card.top + (card.bottom - card.top - boxSize) / 2,
+                   card.left + Scale(parent_, 12) + boxSize,
+                   card.top + (card.bottom - card.top + boxSize) / 2};
+    RECT hitBox = box;
+    InflateRect(&hitBox, Scale(parent_, 6), Scale(parent_, 6));
+    return PtInRect(&hitBox, clientPoint) != FALSE;
+}
+
+void ModernMainWindow::ToggleExportSelectionAt(const UINT visibleIndex) {
+    if (!exportSelectionMode_ || visibleIndex >= visibleIndices_.size()) {
+        return;
+    }
+    const std::wstring path = items_[visibleIndices_[visibleIndex]].path.native();
+    if (exportSelectedPaths_.contains(path)) {
+        exportSelectedPaths_.erase(path);
+    } else {
+        exportSelectedPaths_.insert(path);
+    }
+    RECT itemRectangle{};
+    if (SendMessageW(library_, LB_GETITEMRECT, visibleIndex,
+                     reinterpret_cast<LPARAM>(&itemRectangle)) != LB_ERR) {
+        InvalidateRect(library_, &itemRectangle, FALSE);
+    }
+    UpdateExportSelectionControls();
+}
+
 bool ModernMainWindow::HitActiveCancelButton(const POINT clientPoint,
                                              UINT& itemIndex) const {
     const LRESULT item = SendMessageW(
@@ -1925,6 +2739,7 @@ void ModernMainWindow::RefreshVisibleItems() {
     SendMessageW(library_, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(library_, nullptr, TRUE);
     InvalidateRect(parent_, nullptr, FALSE);
+    UpdateExportSelectionControls();
 }
 
 void ModernMainWindow::RefreshActiveItems() {
