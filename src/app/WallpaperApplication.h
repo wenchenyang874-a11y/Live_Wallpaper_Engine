@@ -85,7 +85,6 @@ private:
     void ShowActiveWallpaperContextMenu(POINT screenPoint);
     void CancelActiveWallpaper(bool persistSelection = true);
     void CancelWallpaper(const core::WallpaperItem& item,
-                         bool confirmCancellation = true,
                          bool persistSelection = true);
     bool ApplyWallpaperWithTargetPrompt(std::wstring_view path,
                                         bool persistSelection = true,

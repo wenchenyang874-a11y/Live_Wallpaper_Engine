@@ -850,7 +850,7 @@ void WallpaperApplication::RemoveWallpaperFromLibrary(
         return;
     }
     if (active) {
-        CancelWallpaper(item, false, true);
+        CancelWallpaper(item, true);
     }
     const HRESULT result = wallpaperLibrary_.Remove(item);
     if (FAILED(result)) {
@@ -1042,8 +1042,7 @@ void WallpaperApplication::CancelActiveWallpaper(const bool persistSelection) {
 }
 
 void WallpaperApplication::CancelWallpaper(
-    const core::WallpaperItem& item, const bool confirmCancellation,
-    const bool persistSelection) {
+    const core::WallpaperItem& item, const bool persistSelection) {
     const bool isActive = std::ranges::any_of(
         assignments_, [&](const core::WallpaperAssignmentSetting& assignment) {
             return SamePath(assignment.wallpaperPath, item.path.native());
@@ -1051,15 +1050,6 @@ void WallpaperApplication::CancelWallpaper(
     if (!isActive) {
         return;
     }
-    if (confirmCancellation) {
-        std::wstring prompt = L"确认取消应用“" + item.displayName +
-                              L"”？\r\n\r\n该壁纸在所有屏幕上的应用都会取消。";
-        if (MessageBoxW(controlWindow_, prompt.c_str(), kApplicationTitle,
-                        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) {
-            return;
-        }
-    }
-
     const std::scoped_lock playbackLock(playbackMutex_);
 
     // Removing one wallpaper must not rebuild unrelated video decoders. Their

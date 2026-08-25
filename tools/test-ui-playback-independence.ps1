@@ -300,33 +300,6 @@ try {
         throw "Stationary-row mouse movement repainted the wallpaper list: $drawBefore -> $drawAfter"
     }
 
-    # Locate the active library badge through the same hit-test path used by a
-    # real click. Rejecting the confirmation must keep the wallpaper active.
-    $libraryClient = New-Object LweUiPlaybackProbe+RECT
-    [void][LweUiPlaybackProbe]::GetClientRect($library, [ref]$libraryClient)
-    $libraryCount = [int][LweUiPlaybackProbe]::SendMessage(
-        $library, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
-    $itemHeight = [int][LweUiPlaybackProbe]::SendMessage(
-        $library, 0x01A1, [IntPtr]::Zero, [IntPtr]::Zero)
-    $activeBadgeRow = -1
-    for ($index = 0; $index -lt $libraryCount; $index++) {
-        [void][LweUiPlaybackProbe]::PostMessage(
-            $library, 0x0202, [IntPtr]::Zero,
-            [LweUiPlaybackProbe]::Point(
-                $libraryClient.Right - 48, $index * $itemHeight + $itemHeight / 2))
-        $badgeConfirmation = Wait-Window $process.Id '#32770' 4
-        if ($badgeConfirmation -ne [IntPtr]::Zero) {
-            $activeBadgeRow = $index
-            [void][LweUiPlaybackProbe]::PostMessage(
-                $badgeConfirmation, 0x0111, [IntPtr]7, [IntPtr]::Zero)
-            break
-        }
-    }
-    if ($activeBadgeRow -lt 0) {
-        throw 'Clicking the active library badge did not show a confirmation.'
-    }
-    Start-Sleep -Milliseconds 300
-
     $activeStatus = [LweUiPlaybackProbe]::GetDlgItem($control, 1110)
     $activeList = [LweUiPlaybackProbe]::GetDlgItem($control, 1111)
     # Rapid synchronous toggles must alternate deterministically. An even
@@ -359,20 +332,18 @@ try {
     Save-WindowScreenshot $control $ActiveDrawerScreenshot
     [void][LweUiPlaybackProbe]::ShowWindow($library, 5)
 
-    # Click the per-item cancel action and keep its confirmation open. Frames
-    # must continue even while the modal confirmation owns the UI thread.
+    # The per-item cancel action must cancel immediately without opening a
+    # modal confirmation window.
     $activeClient = New-Object LweUiPlaybackProbe+RECT
     [void][LweUiPlaybackProbe]::GetClientRect($activeList, [ref]$activeClient)
     [void][LweUiPlaybackProbe]::PostMessage(
         $activeList, 0x0202, [IntPtr]::Zero,
         [LweUiPlaybackProbe]::Point($activeClient.Right - 48, 38))
-    $confirmation = Wait-Window $process.Id '#32770' 50
-    if ($confirmation -eq [IntPtr]::Zero) {
-        throw 'Per-wallpaper cancel did not show its confirmation.'
-    }
-    [void][LweUiPlaybackProbe]::PostMessage(
-        $confirmation, 0x0111, [IntPtr]6, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 500
+    $confirmation = Wait-Window $process.Id '#32770' 3
+    if ($confirmation -ne [IntPtr]::Zero) {
+        throw 'Per-wallpaper cancel still showed a confirmation window.'
+    }
     if ([int][LweUiPlaybackProbe]::SendMessage(
             $activeList, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero) -ne 0) {
         throw 'Confirmed per-wallpaper cancel left the wallpaper active.'
@@ -398,9 +369,8 @@ try {
     "APPLY_BUTTON_REMOVED=$applyButtonRemoved"
     "GLOBAL_CANCEL_BUTTON_REMOVED=$globalCancelButtonRemoved"
     "ACTIVE_DRAWER_HEADER_REMOVED=$activeDrawerHeaderRemoved"
-    "ACTIVE_BADGE_ROW=$activeBadgeRow"
-    'ACTIVE_BADGE_CONFIRMATION=True'
-    'PER_ITEM_CANCEL_CONFIRMED=True'
+    'CANCEL_CONFIRMATION_SHOWN=False'
+    'PER_ITEM_CANCEL_IMMEDIATE=True'
     "DROPDOWN_SCREENSHOT=$DropdownScreenshot"
     "ACTIVE_DRAWER_SCREENSHOT=$ActiveDrawerScreenshot"
     "ACTIVE_LIBRARY_SCREENSHOT=$LibraryScreenshot"

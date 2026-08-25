@@ -349,7 +349,7 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
                 0, L"LISTBOX", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
                     LBS_HASSTRINGS | LBS_MULTIPLESEL | LBS_OWNERDRAWVARIABLE |
-                    LBS_NOINTEGRALHEIGHT,
+                    LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
                 0, 0, 1, 1, window,
                 reinterpret_cast<HMENU>(
                     static_cast<INT_PTR>(kScreenSelectionList)),
@@ -1486,7 +1486,10 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
     const bool exportChecked =
         exportSelectedPaths_.contains(item.path.native());
     DrawWallpaperCard(draw, item, active,
-                      active ? activeInfo->displayLabel : std::wstring_view{}, {},
+                      active ? activeInfo->displayLabel : std::wstring_view{},
+                      active ? std::span<const DisplayBadge>(
+                                   activeInfo->displayBadges)
+                             : std::span<const DisplayBadge>{},
                       false,
                       std::max(hover, selected ? 1.0F : 0.0F),
                       exportSelectionMode_, exportChecked);
@@ -1614,12 +1617,17 @@ void ModernMainWindow::DrawWallpaperCard(
                 break;
             }
             const DisplayBadge& display = displayBadges[index];
-            RECT badge{nameLeft, card.top + Scale(parent_, 7),
-                       nameLeft + badgeWidth, card.top + Scale(parent_, 41)};
+            const int badgeHeight = Scale(parent_, 34);
+            const int badgeTop =
+                card.top + (card.bottom - card.top - badgeHeight) / 2;
+            RECT badge{nameLeft, badgeTop, nameLeft + badgeWidth,
+                       badgeTop + badgeHeight};
             FillRoundedRectangle(draw.hDC, badge, RGB(36, 45, 64),
                                  RGB(76, 96, 139), Scale(parent_, 8));
             RECT badgeLabel = badge;
-            badgeLabel.top += Scale(parent_, 8);
+            if (display.primary) {
+                badgeLabel.top += Scale(parent_, 8);
+            }
             DrawTextLine(draw.hDC, display.label, badgeLabel, smallFont_,
                          RGB(211, 221, 244),
                          DT_CENTER | DT_VCENTER | DT_SINGLELINE |

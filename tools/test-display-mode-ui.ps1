@@ -31,11 +31,13 @@ public static class LweDisplayModeProbe
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr w, int id);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")] public static extern IntPtr SendMessageRect(IntPtr w, uint m, IntPtr a, ref RECT b);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr w, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr w, IntPtr dc, uint flags);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr w);
+    [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr w, IntPtr update, IntPtr region, uint flags);
 
     public static IntPtr Find(uint processId, string targetClass)
     {
@@ -65,6 +67,11 @@ public static class LweDisplayModeProbe
     {
         return (IntPtr)((notification << 16) | (identifier & 0xffff));
     }
+
+    public static IntPtr Point(int x, int y)
+    {
+        return (IntPtr)(((y & 0xffff) << 16) | (x & 0xffff));
+    }
 }
 '@
 
@@ -86,21 +93,21 @@ function Restore-FileSnapshot([string] $Path, [AllowNull()][string] $Snapshot) {
 }
 
 function Save-WindowScreenshot([IntPtr] $Window, [string] $Path) {
+    [void][LweDisplayModeProbe]::RedrawWindow(
+        $Window, [IntPtr]::Zero, [IntPtr]::Zero, 0x0185)
     $bounds = New-Object LweDisplayModeProbe+RECT
     [void][LweDisplayModeProbe]::GetWindowRect($Window, [ref]$bounds)
     $bitmap = [System.Drawing.Bitmap]::new(
         $bounds.Right - $bounds.Left, $bounds.Bottom - $bounds.Top)
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $deviceContext = $graphics.GetHdc()
     try {
-        if (-not [LweDisplayModeProbe]::PrintWindow($Window, $deviceContext, 2)) {
-            throw 'PrintWindow failed while capturing the UI.'
-        }
+        $graphics.CopyFromScreen(
+            $bounds.Left, $bounds.Top, 0, 0, $bitmap.Size,
+            [System.Drawing.CopyPixelOperation]::SourceCopy)
     } finally {
-        $graphics.ReleaseHdc($deviceContext)
+        $graphics.Dispose()
     }
     $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
-    $graphics.Dispose()
     $bitmap.Dispose()
 }
 
@@ -320,11 +327,19 @@ try {
         $secondDialog, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
 
     $replacementIndex = 1
+    $replacementRectangle = New-Object LweDisplayModeProbe+RECT
+    if ([LweDisplayModeProbe]::SendMessageRect(
+            $secondScreenList, 0x0198, [IntPtr]$replacementIndex,
+            [ref]$replacementRectangle) -eq [IntPtr](-1)) {
+        throw 'The occupied replacement row could not be located.'
+    }
+    $replacementPoint = [LweDisplayModeProbe]::Point(
+        $replacementRectangle.Left + 20,
+        ($replacementRectangle.Top + $replacementRectangle.Bottom) / 2)
     [void][LweDisplayModeProbe]::SendMessage(
-        $secondScreenList, 0x0185, [IntPtr]1, [IntPtr]$replacementIndex)
+        $secondScreenList, 0x0201, [IntPtr]1, $replacementPoint)
     [void][LweDisplayModeProbe]::SendMessage(
-        $secondDialog, 0x0111, [LweDisplayModeProbe]::Command(3100, 1),
-        $secondScreenList)
+        $secondScreenList, 0x0202, [IntPtr]::Zero, $replacementPoint)
     $replaceText = -join @(
         [char]0x66FF, [char]0x6362, [char]0x58C1, [char]0x7EB8,
         [char]0x5230, [char]0x5C4F, [char]0x5E55)
