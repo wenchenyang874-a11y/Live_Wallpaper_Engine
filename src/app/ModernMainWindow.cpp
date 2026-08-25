@@ -1111,9 +1111,9 @@ void ModernMainWindow::Layout() {
                sidebarButtonWidth, sidebarButtonHeight, TRUE);
 
     const int statusTop = height - Scale(parent_, 82);
-    const int resourceWidth = std::clamp(contentWidth * 42 / 100,
-                                         Scale(parent_, 260),
-                                         Scale(parent_, 390));
+    const int resourceWidth = std::clamp(contentWidth * 32 / 100,
+                                         Scale(parent_, 240),
+                                         Scale(parent_, 310));
     const int statusRight = contentLeft + contentWidth - resourceWidth - gap;
     const int statusCardHeight = Scale(parent_, 54);
     MoveWindow(activeStatus_, contentLeft, statusTop,
@@ -1197,9 +1197,9 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
     const int contentRight = client.right - Scale(parent_, 30);
     const int contentWidth = std::max(1, contentRight - contentLeft);
     const int gap = Scale(parent_, 12);
-    const int resourceWidth = std::clamp(contentWidth * 42 / 100,
-                                         Scale(parent_, 260),
-                                         Scale(parent_, 390));
+    const int resourceWidth = std::clamp(contentWidth * 32 / 100,
+                                         Scale(parent_, 240),
+                                         Scale(parent_, 310));
     RECT statusCard{contentLeft, client.bottom - Scale(parent_, 82),
                     contentRight - resourceWidth - gap,
                     client.bottom - Scale(parent_, 28)};
@@ -1208,12 +1208,49 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
                       statusCard.bottom};
     FillRoundedRectangle(deviceContext, resourceCard, kPanel, kBorder,
                          Scale(parent_, 12));
-    RECT resourceText = resourceCard;
-    resourceText.left += Scale(parent_, 12);
-    resourceText.right -= Scale(parent_, 12);
-    DrawTextLine(deviceContext, resourceUsage_, resourceText, smallFont_,
-                 kTextSecondary,
-                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const int resourceCenterX = (resourceCard.left + resourceCard.right) / 2;
+    const int resourceCenterY = (resourceCard.top + resourceCard.bottom) / 2;
+    const HPEN divider = CreatePen(PS_SOLID, std::max(1, Scale(parent_, 1)),
+                                   BlendColor(kPanel, kBorder, 0.72F));
+    const HGDIOBJ previousPen = SelectObject(deviceContext, divider);
+    MoveToEx(deviceContext, resourceCenterX,
+             resourceCard.top + Scale(parent_, 9), nullptr);
+    LineTo(deviceContext, resourceCenterX,
+           resourceCard.bottom - Scale(parent_, 9));
+    MoveToEx(deviceContext, resourceCard.left + Scale(parent_, 12),
+             resourceCenterY, nullptr);
+    LineTo(deviceContext, resourceCard.right - Scale(parent_, 12),
+           resourceCenterY);
+    SelectObject(deviceContext, previousPen);
+    DeleteObject(divider);
+
+    std::array<std::wstring_view, 4> resourceCells{};
+    std::wstring_view remaining = resourceUsage_;
+    for (std::size_t index = 0; index < resourceCells.size(); ++index) {
+        const std::size_t delimiter = remaining.find_first_of(L"\t\n");
+        resourceCells[index] = remaining.substr(0, delimiter);
+        if (delimiter == std::wstring_view::npos) {
+            remaining = {};
+        } else {
+            remaining.remove_prefix(delimiter + 1U);
+        }
+    }
+    const int cellInset = Scale(parent_, 5);
+    const std::array<RECT, 4> cellRectangles{
+        RECT{resourceCard.left + cellInset, resourceCard.top + Scale(parent_, 2),
+             resourceCenterX - cellInset, resourceCenterY},
+        RECT{resourceCenterX + cellInset, resourceCard.top + Scale(parent_, 2),
+             resourceCard.right - cellInset, resourceCenterY},
+        RECT{resourceCard.left + cellInset, resourceCenterY,
+             resourceCenterX - cellInset, resourceCard.bottom - Scale(parent_, 2)},
+        RECT{resourceCenterX + cellInset, resourceCenterY,
+             resourceCard.right - cellInset,
+             resourceCard.bottom - Scale(parent_, 2)}};
+    for (std::size_t index = 0; index < resourceCells.size(); ++index) {
+        DrawTextLine(deviceContext, resourceCells[index], cellRectangles[index],
+                     smallFont_, kTextSecondary,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
 }
 
 bool ModernMainWindow::DrawItem(const DRAWITEMSTRUCT& draw) const {
@@ -1355,16 +1392,17 @@ void ModernMainWindow::DrawLibraryItem(const DRAWITEMSTRUCT& draw) const {
     }
     const core::WallpaperItem& item = items_[visibleIndices_[draw.itemID]];
     const bool selected = (draw.itemState & ODS_SELECTED) != 0;
-    const bool active = std::ranges::any_of(
-        activePaths_, [&](const std::wstring& path) {
-            return _wcsicmp(item.path.c_str(), path.c_str()) == 0;
-        });
+    const ActiveWallpaperInfo* activeInfo =
+        FindActiveWallpaper(item.path.native());
+    const bool active = activeInfo != nullptr;
     const float hover = static_cast<int>(draw.itemID) == libraryHoverIndex_
                             ? libraryHoverProgress_
                             : 0.0F;
     const bool exportChecked =
         exportSelectedPaths_.contains(item.path.native());
-    DrawWallpaperCard(draw, item, active, false,
+    DrawWallpaperCard(draw, item, active,
+                      active ? activeInfo->displayLabel : std::wstring_view{},
+                      false,
                       std::max(hover, selected ? 1.0F : 0.0F),
                       exportSelectionMode_, exportChecked);
     if (libraryDragActive_ &&
@@ -1391,17 +1429,23 @@ void ModernMainWindow::DrawActiveItem(const DRAWITEMSTRUCT& draw) const {
         return;
     }
     const core::WallpaperItem& item = items_[activeVisibleIndices_[draw.itemID]];
+    const ActiveWallpaperInfo* activeInfo =
+        FindActiveWallpaper(item.path.native());
     const bool selected = (draw.itemState & ODS_SELECTED) != 0;
     const float hover = static_cast<int>(draw.itemID) == activeHoverIndex_
                             ? activeHoverProgress_
                             : 0.0F;
-    DrawWallpaperCard(draw, item, true, true,
+    DrawWallpaperCard(draw, item, true,
+                      activeInfo != nullptr ? activeInfo->displayLabel
+                                            : std::wstring_view{},
+                      true,
                       std::max(hover, selected ? 1.0F : 0.0F));
 }
 
 void ModernMainWindow::DrawWallpaperCard(
     const DRAWITEMSTRUCT& draw, const core::WallpaperItem& item, const bool active,
-    const bool showCancelButton, const float hoverProgress,
+    const std::wstring_view displayLabel, const bool showCancelButton,
+    const float hoverProgress,
     const bool showSelectionBox, const bool selectionChecked) const {
     RECT card = draw.rcItem;
     InflateRect(&card, -Scale(parent_, 4), -Scale(parent_, 5));
@@ -1471,7 +1515,11 @@ void ModernMainWindow::DrawWallpaperCard(
     DrawTextLine(draw.hDC, item.displayName, name, bodyFont_, kTextPrimary,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    std::wstring details = item.formatLabel;
+    std::wstring details;
+    if (active && !displayLabel.empty()) {
+        details = L"应用到：" + std::wstring(displayLabel) + L"  ·  ";
+    }
+    details += item.formatLabel;
     if (item.width > 0 && item.height > 0) {
         details += L"  ·  " + std::to_wstring(item.width) + L"×" +
                    std::to_wstring(item.height);
@@ -1481,7 +1529,8 @@ void ModernMainWindow::DrawWallpaperCard(
         details += item.hasAudio ? L"  ·  含音轨" : L"  ·  无音轨";
     }
     RECT detail{name.left, card.top + Scale(parent_, 37),
-                card.right - Scale(parent_, showCancelButton ? 126 : 20),
+                card.right - Scale(parent_,
+                                   showCancelButton ? 126 : (active ? 112 : 20)),
                 card.bottom - Scale(parent_, 7)};
     DrawTextLine(draw.hDC, details, detail, smallFont_, kTextSecondary,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -1776,15 +1825,26 @@ void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
     UpdateExportSelectionControls();
 }
 
-void ModernMainWindow::SetActivePaths(std::vector<std::wstring> paths) {
-    activePaths_ = std::move(paths);
-    EnableWindow(activeStatus_, !activePaths_.empty());
+void ModernMainWindow::SetActiveWallpapers(
+    std::vector<ActiveWallpaperInfo> wallpapers) {
+    activeWallpapers_ = std::move(wallpapers);
+    EnableWindow(activeStatus_, !activeWallpapers_.empty());
     RefreshActiveItems();
-    if (activePaths_.empty()) {
+    if (activeWallpapers_.empty()) {
         HideActiveDrawer();
     }
     InvalidateRect(library_, nullptr, FALSE);
     InvalidateRect(activeStatus_, nullptr, FALSE);
+}
+
+const ModernMainWindow::ActiveWallpaperInfo*
+ModernMainWindow::FindActiveWallpaper(const std::wstring_view path) const {
+    const std::wstring requestedPath(path);
+    const auto found = std::ranges::find_if(
+        activeWallpapers_, [&](const ActiveWallpaperInfo& wallpaper) {
+            return _wcsicmp(wallpaper.path.c_str(), requestedPath.c_str()) == 0;
+        });
+    return found == activeWallpapers_.end() ? nullptr : &*found;
 }
 
 void ModernMainWindow::SetStatus(std::wstring status) {
@@ -2630,10 +2690,7 @@ bool ModernMainWindow::HitLibraryActiveBadge(const POINT clientPoint,
         return false;
     }
     const core::WallpaperItem& wallpaper = items_[visibleIndices_[itemIndex]];
-    const bool active = std::ranges::any_of(
-        activePaths_, [&](const std::wstring& path) {
-            return _wcsicmp(wallpaper.path.c_str(), path.c_str()) == 0;
-        });
+    const bool active = FindActiveWallpaper(wallpaper.path.native()) != nullptr;
     RECT itemRectangle{};
     if (!active || SendMessageW(library_, LB_GETITEMRECT, itemIndex,
                                 reinterpret_cast<LPARAM>(&itemRectangle)) == LB_ERR) {
@@ -2746,10 +2803,11 @@ void ModernMainWindow::RefreshActiveItems() {
     activeVisibleIndices_.clear();
     SendMessageW(activeList_, WM_SETREDRAW, FALSE, 0);
     SendMessageW(activeList_, LB_RESETCONTENT, 0, 0);
-    for (const std::wstring& path : activePaths_) {
+    for (const ActiveWallpaperInfo& activeWallpaper : activeWallpapers_) {
         const auto item = std::ranges::find_if(
             items_, [&](const core::WallpaperItem& candidate) {
-                return _wcsicmp(candidate.path.c_str(), path.c_str()) == 0;
+                return _wcsicmp(candidate.path.c_str(),
+                                activeWallpaper.path.c_str()) == 0;
             });
         if (item == items_.end()) {
             continue;

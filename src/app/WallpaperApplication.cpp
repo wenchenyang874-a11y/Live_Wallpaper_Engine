@@ -175,14 +175,15 @@ std::wstring FormatResourceUsage(
     constexpr double mebibyte = 1024.0 * 1024.0;
     std::wostringstream text;
     text << std::fixed << std::setprecision(1) << L"CPU " << usage.cpuPercent
-         << L"%  GPU ";
+         << L"%\tGPU ";
     if (usage.gpuAvailable) {
         text << usage.gpuPercent << L'%';
     } else {
         text << L"--";
     }
-    text << L"  内存 " << std::setprecision(0)
-         << static_cast<double>(usage.workingSetBytes) / mebibyte << L" MB  显存 ";
+    text << L"\n内存 " << std::setprecision(0)
+         << static_cast<double>(usage.workingSetBytes) / mebibyte
+         << L" MB\tGPU内存 ";
     if (usage.videoMemoryBytes.has_value()) {
         text << static_cast<double>(*usage.videoMemoryBytes) / mebibyte << L" MB";
     } else {
@@ -499,6 +500,13 @@ bool WallpaperApplication::RestoreSavedWallpaperSelection() {
     spanAcrossDisplays_ = settings->spanAcrossDisplays;
     assignments_ = settings->assignments;
     RefreshDisplayTargets(true);
+    const bool assignmentsRepaired = NormalizeAssignments();
+    if (assignmentsRepaired && !controlledTestMode_ &&
+        FAILED(SaveCurrentSelection())) {
+        core::LogWarning(
+            L"Overlapping wallpaper assignments were repaired in memory, but the "
+            L"normalized settings could not be saved.");
+    }
     mainWindow_.SetSoundEnabled(soundEnabled_);
     if (assignments_.empty()) {
         return false;
@@ -543,7 +551,7 @@ void WallpaperApplication::RefreshLibrary() {
         }
     }
     mainWindow_.SetItems(std::move(items));
-    mainWindow_.SetActivePaths(ActiveWallpaperPaths());
+    mainWindow_.SetActiveWallpapers(ActiveWallpapers());
     mainWindow_.SetSoundEnabled(soundEnabled_);
 }
 
@@ -1000,7 +1008,7 @@ void WallpaperApplication::CancelActiveWallpaper(const bool persistSelection) {
     if (IsWindow(wallpaperWindow_)) {
         ShowWindow(wallpaperWindow_, SW_HIDE);
     }
-    mainWindow_.SetActivePaths({});
+    mainWindow_.SetActiveWallpapers({});
     mainWindow_.SetStatus(L"当前未应用壁纸 · Windows 原壁纸已恢复显示");
     RefreshLibrary();
     if (persistSelection && FAILED(SaveCurrentSelection())) {
@@ -1060,7 +1068,7 @@ void WallpaperApplication::CancelWallpaper(
         playbackMode_ = PlaybackMode::Active;
         ConfigureWallpaperWindowRegion();
     }
-    mainWindow_.SetActivePaths(ActiveWallpaperPaths());
+    mainWindow_.SetActiveWallpapers(ActiveWallpapers());
     mainWindow_.SetStatus(ActivePlaybackStatus());
     RefreshLibrary();
     WakePlaybackRenderThread();
@@ -1142,6 +1150,8 @@ bool WallpaperApplication::ApplyWallpaper(const std::wstring_view path,
         }
     }
 
+    NormalizeAssignments();
+
     if (!RebuildPlaybackSessions(showErrors)) {
         assignments_ = previousAssignments;
         RebuildPlaybackSessions(false);
@@ -1157,7 +1167,7 @@ bool WallpaperApplication::ApplyWallpaper(const std::wstring_view path,
     if (persistSelection) {
         saveResult = SaveCurrentSelection();
     }
-    mainWindow_.SetActivePaths(ActiveWallpaperPaths());
+    mainWindow_.SetActiveWallpapers(ActiveWallpapers());
     mainWindow_.SetStatus(ActivePlaybackStatus());
     mainWindow_.SetSoundEnabled(soundEnabled_);
     RefreshLibrary();
@@ -1167,6 +1177,100 @@ bool WallpaperApplication::ApplyWallpaper(const std::wstring_view path,
                     kApplicationTitle, MB_OK | MB_ICONWARNING);
     }
     return true;
+}
+
+bool WallpaperApplication::NormalizeAssignments() {
+    if (assignments_.empty() || displayTargets_.empty()) {
+        return false;
+    }
+
+    const std::vector<core::WallpaperAssignmentSetting> previous = assignments_;
+    std::vector<core::WallpaperAssignmentSetting> newestFirst;
+    std::vector<std::wstring> claimedDisplays;
+    newestFirst.reserve(assignments_.size());
+
+    for (auto assignment = assignments_.rbegin(); assignment != assignments_.rend();
+         ++assignment) {
+        std::vector<std::wstring> requestedDisplays;
+        if (assignment->spanAcrossDisplays) {
+            requestedDisplays.reserve(displayTargets_.size());
+            for (const shell::DisplayTarget& display : displayTargets_) {
+                requestedDisplays.push_back(display.deviceId);
+            }
+        } else {
+            requestedDisplays = SplitDisplayIds(assignment->displayTargets);
+        }
+
+        std::vector<std::wstring> availableDisplays;
+        for (const shell::DisplayTarget& display : displayTargets_) {
+            if (ContainsDisplayId(requestedDisplays, display.deviceId) &&
+                !ContainsDisplayId(claimedDisplays, display.deviceId)) {
+                availableDisplays.push_back(display.deviceId);
+            }
+        }
+        if (availableDisplays.empty()) {
+            continue;
+        }
+
+        core::WallpaperAssignmentSetting normalized = *assignment;
+        if (assignment->spanAcrossDisplays && claimedDisplays.empty() &&
+            availableDisplays.size() == displayTargets_.size()) {
+            normalized.displayTargets.clear();
+            normalized.spanAcrossDisplays = true;
+            newestFirst.push_back(std::move(normalized));
+            break;
+        }
+        normalized.displayTargets = JoinDisplayIds(availableDisplays);
+        normalized.spanAcrossDisplays = false;
+        newestFirst.push_back(std::move(normalized));
+        claimedDisplays.insert(claimedDisplays.end(), availableDisplays.begin(),
+                               availableDisplays.end());
+    }
+
+    std::ranges::reverse(newestFirst);
+    std::vector<core::WallpaperAssignmentSetting> merged;
+    for (core::WallpaperAssignmentSetting& assignment : newestFirst) {
+        if (assignment.spanAcrossDisplays) {
+            merged.clear();
+            merged.push_back(std::move(assignment));
+            break;
+        }
+        auto existing = std::ranges::find_if(
+            merged, [&](const core::WallpaperAssignmentSetting& candidate) {
+                return !candidate.spanAcrossDisplays &&
+                       candidate.wallpaperKind == assignment.wallpaperKind &&
+                       SamePath(candidate.wallpaperPath, assignment.wallpaperPath);
+            });
+        if (existing == merged.end()) {
+            merged.push_back(std::move(assignment));
+            continue;
+        }
+        std::vector<std::wstring> identifiers =
+            SplitDisplayIds(existing->displayTargets);
+        for (const std::wstring& identifier :
+             SplitDisplayIds(assignment.displayTargets)) {
+            if (!ContainsDisplayId(identifiers, identifier)) {
+                identifiers.push_back(identifier);
+            }
+        }
+        existing->displayTargets = JoinDisplayIds(identifiers);
+    }
+    assignments_ = std::move(merged);
+
+    const auto sameAssignment = [](const core::WallpaperAssignmentSetting& left,
+                                   const core::WallpaperAssignmentSetting& right) {
+        return left.wallpaperKind == right.wallpaperKind &&
+               SamePath(left.wallpaperPath, right.wallpaperPath) &&
+               SamePath(left.displayTargets, right.displayTargets) &&
+               left.spanAcrossDisplays == right.spanAcrossDisplays;
+    };
+    const bool changed = previous.size() != assignments_.size() ||
+                         !std::ranges::equal(previous, assignments_, sameAssignment);
+    if (changed) {
+        core::LogInfo(
+            L"Normalized wallpaper assignments so each display has one wallpaper.");
+    }
+    return changed;
 }
 
 bool WallpaperApplication::RebuildPlaybackSessions(const bool showErrors) {
@@ -1373,7 +1477,7 @@ bool WallpaperApplication::RemoveFailedPlaybackSessions() {
         playbackMode_ = PlaybackMode::Active;
         ConfigureWallpaperWindowRegion();
     }
-    mainWindow_.SetActivePaths(ActiveWallpaperPaths());
+    mainWindow_.SetActiveWallpapers(ActiveWallpapers());
     mainWindow_.SetStatus(
         assignments_.empty()
             ? L"视频播放失败，已停止该壁纸 · 程序仍在运行"
@@ -1601,6 +1705,55 @@ std::vector<std::wstring> WallpaperApplication::ActiveWallpaperPaths() const {
         }
     }
     return paths;
+}
+
+std::vector<ModernMainWindow::ActiveWallpaperInfo>
+WallpaperApplication::ActiveWallpapers() const {
+    std::vector<ModernMainWindow::ActiveWallpaperInfo> wallpapers;
+    for (const std::wstring& path : ActiveWallpaperPaths()) {
+        bool spansAllDisplays = false;
+        std::vector<std::wstring> identifiers;
+        for (const core::WallpaperAssignmentSetting& assignment : assignments_) {
+            if (!SamePath(assignment.wallpaperPath, path)) {
+                continue;
+            }
+            if (assignment.spanAcrossDisplays) {
+                spansAllDisplays = true;
+                break;
+            }
+            for (const std::wstring& identifier :
+                 SplitDisplayIds(assignment.displayTargets)) {
+                if (!ContainsDisplayId(identifiers, identifier)) {
+                    identifiers.push_back(identifier);
+                }
+            }
+        }
+
+        ModernMainWindow::ActiveWallpaperInfo wallpaper;
+        wallpaper.path = path;
+        if (spansAllDisplays) {
+            wallpaper.displayLabel = L"跨屏扩展（全部屏幕）";
+        } else {
+            for (std::size_t index = 0; index < displayTargets_.size(); ++index) {
+                const shell::DisplayTarget& display = displayTargets_[index];
+                if (!ContainsDisplayId(identifiers, display.deviceId)) {
+                    continue;
+                }
+                if (!wallpaper.displayLabel.empty()) {
+                    wallpaper.displayLabel += L"、";
+                }
+                wallpaper.displayLabel += L"屏幕 " + std::to_wstring(index + 1U);
+                if (display.primary) {
+                    wallpaper.displayLabel += L"（主屏）";
+                }
+            }
+            if (wallpaper.displayLabel.empty()) {
+                wallpaper.displayLabel = L"未连接屏幕";
+            }
+        }
+        wallpapers.push_back(std::move(wallpaper));
+    }
+    return wallpapers;
 }
 
 std::wstring WallpaperApplication::ActivePlaybackStatus() const {

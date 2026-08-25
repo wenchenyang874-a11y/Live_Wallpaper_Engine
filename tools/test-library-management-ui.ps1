@@ -20,8 +20,6 @@ public static class LweLibraryManagementProbe
     public delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)]
-    public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc p, IntPtr x);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr w, out uint p);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr w, StringBuilder n, int c);
@@ -34,10 +32,8 @@ public static class LweLibraryManagementProbe
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr w, out RECT r);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr w);
-    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr w);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, UIntPtr e);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
 
     public static IntPtr Find(uint processId, string targetClass)
     {
@@ -153,6 +149,9 @@ try {
     if ($control -eq [IntPtr]::Zero) {
         throw 'The main control window was not created.'
     }
+    [void][LweLibraryManagementProbe]::ShowWindow($control, 5)
+    [void][LweLibraryManagementProbe]::SetForegroundWindow($control)
+    Start-Sleep -Milliseconds 200
 
     $library = [LweLibraryManagementProbe]::GetDlgItem($control, 1102)
     $import = [LweLibraryManagementProbe]::GetDlgItem($control, 1103)
@@ -240,23 +239,22 @@ try {
     $startX = [Math]::Max(20, ($first.Left + $first.Right) / 2)
     $startY = ($first.Top + $first.Bottom) / 2
     $dropY = $second.Bottom - 4
-    $libraryBounds = New-Object LweLibraryManagementProbe+RECT
-    $savedCursor = New-Object LweLibraryManagementProbe+POINT
-    [void][LweLibraryManagementProbe]::GetWindowRect($library, [ref]$libraryBounds)
-    [void][LweLibraryManagementProbe]::GetCursorPos([ref]$savedCursor)
-    [void][LweLibraryManagementProbe]::SetForegroundWindow($control)
-    [void][LweLibraryManagementProbe]::SetCursorPos(
-        $libraryBounds.Left + $startX, $libraryBounds.Top + $startY)
-    Start-Sleep -Milliseconds 60
-    [LweLibraryManagementProbe]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+    # Drive the list control through the same mouse messages Windows delivers.
+    # This remains deterministic even when an automated desktop prevents the
+    # test process from taking foreground ownership for global mouse_event.
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x0201, [IntPtr]1,
+        [LweLibraryManagementProbe]::Point($startX, $startY))
     for ($step = 1; $step -le 5; $step++) {
         $nextY = $startY + [int](($dropY - $startY) * $step / 5)
-        [void][LweLibraryManagementProbe]::SetCursorPos(
-            $libraryBounds.Left + $startX, $libraryBounds.Top + $nextY)
+        [void][LweLibraryManagementProbe]::SendMessage(
+            $library, 0x0200, [IntPtr]1,
+            [LweLibraryManagementProbe]::Point($startX, $nextY))
         Start-Sleep -Milliseconds 20
     }
-    [LweLibraryManagementProbe]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
-    [void][LweLibraryManagementProbe]::SetCursorPos($savedCursor.X, $savedCursor.Y)
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x0202, [IntPtr]::Zero,
+        [LweLibraryManagementProbe]::Point($startX, $dropY))
     Start-Sleep -Milliseconds 250
     $nextOrderSnapshot = Get-FileSnapshot $orderPath
     if ($null -eq $nextOrderSnapshot -or

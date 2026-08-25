@@ -264,6 +264,9 @@ try {
     # Once the hover transition has settled, moving inside the same wallpaper
     # row must not repaint it again. This catches the visible flash caused by
     # invalidating the whole list on every WM_MOUSEMOVE.
+    [void][LweUiPlaybackProbe]::SetWindowPos(
+        $control, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    [void][LweUiPlaybackProbe]::SetForegroundWindow($control)
     $libraryBounds = New-Object LweUiPlaybackProbe+RECT
     [void][LweUiPlaybackProbe]::GetWindowRect($library, [ref]$libraryBounds)
     [void][LweUiPlaybackProbe]::SetCursorPos(
@@ -291,6 +294,8 @@ try {
     }
     $drawBefore = [uint64]$drawMatches[$drawMatches.Count - 2].Groups[1].Value
     $drawAfter = [uint64]$drawMatches[$drawMatches.Count - 1].Groups[1].Value
+    [void][LweUiPlaybackProbe]::SetWindowPos(
+        $control, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
     if ($drawAfter - $drawBefore -gt 1) {
         throw "Stationary-row mouse movement repainted the wallpaper list: $drawBefore -> $drawAfter"
     }

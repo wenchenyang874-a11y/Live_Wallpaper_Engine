@@ -28,6 +28,11 @@ public:
         bool selected = false;
     };
 
+    struct ActiveWallpaperInfo final {
+        std::wstring path;
+        std::wstring displayLabel;
+    };
+
     enum ControlId : int {
         Search = 1100,
         Filter = 1101,
@@ -71,7 +76,7 @@ public:
     std::optional<ImportChoice> ChooseImportSource();
 
     void SetItems(std::vector<core::WallpaperItem> items);
-    void SetActivePaths(std::vector<std::wstring> paths);
+    void SetActiveWallpapers(std::vector<ActiveWallpaperInfo> wallpapers);
     void SetStatus(std::wstring status);
     void SetSoundEnabled(bool enabled);
     void SetDisplayOptions(std::vector<DisplayOption> displays, bool spanDisplays);
@@ -128,10 +133,13 @@ private:
     void DrawActiveItem(const DRAWITEMSTRUCT& draw) const;
     void DrawDropdownItem(const DRAWITEMSTRUCT& draw) const;
     void DrawWallpaperCard(const DRAWITEMSTRUCT& draw,
-                           const core::WallpaperItem& item, bool active,
-                           bool showCancelButton, float hoverProgress,
-                           bool showSelectionBox = false,
-                           bool selectionChecked = false) const;
+                            const core::WallpaperItem& item, bool active,
+                            std::wstring_view displayLabel,
+                            bool showCancelButton, float hoverProgress,
+                            bool showSelectionBox = false,
+                            bool selectionChecked = false) const;
+    [[nodiscard]] const ActiveWallpaperInfo* FindActiveWallpaper(
+        std::wstring_view path) const;
     void BeginRenameItem(const core::WallpaperItem& item, HWND list,
                          LRESULT selection);
     bool HitLibraryActiveBadge(POINT clientPoint, UINT& itemIndex) const;
@@ -187,9 +195,9 @@ private:
     std::vector<core::WallpaperItem> items_;
     std::vector<std::size_t> visibleIndices_;
     std::vector<std::size_t> activeVisibleIndices_;
-    std::vector<std::wstring> activePaths_;
+    std::vector<ActiveWallpaperInfo> activeWallpapers_;
     std::wstring status_ = L"准备就绪";
-    std::wstring resourceUsage_ = L"CPU --  GPU --  内存 --  显存 --";
+    std::wstring resourceUsage_ = L"CPU --\tGPU --\n内存 --\tGPU内存 --";
     std::wstring renamingPath_;
     std::unordered_map<std::wstring, HBITMAP> thumbnails_;
     FilterKind filterKind_ = FilterKind::All;

@@ -103,7 +103,9 @@ try {
             [ordered]@{
                 wallpaperType = 'static_image'
                 wallpaperPath = $resolvedImage
-                displayTargets = $firstDisplay
+                # Deliberately overlaps the second display. The later video
+                # assignment must win there while the image stays on display 1.
+                displayTargets = "$firstDisplay|$secondDisplay"
                 spanAcrossDisplays = $false
             },
             [ordered]@{
@@ -143,7 +145,24 @@ try {
     Start-Sleep -Milliseconds 300
     $saved = Get-Content -Raw -Encoding UTF8 $settingsPath | ConvertFrom-Json
     if ($saved.version -ne 4 -or @($saved.assignments).Count -ne 2) {
-        throw 'The v4 per-display settings were not loaded intact.'
+        throw 'The overlapping v4 settings were not normalized to two assignments.'
+    }
+    $normalizedTargets = @{}
+    foreach ($assignment in @($saved.assignments)) {
+        foreach ($identifier in @($assignment.displayTargets -split '\|')) {
+            if ($normalizedTargets.ContainsKey($identifier)) {
+                throw "Display remained assigned to multiple wallpapers: $identifier"
+            }
+            $normalizedTargets[$identifier] = $assignment.wallpaperPath
+        }
+    }
+    $imageAssignment = @($saved.assignments | Where-Object wallpaperPath -EQ $resolvedImage)
+    $videoAssignment = @($saved.assignments | Where-Object wallpaperPath -EQ $resolvedVideo)
+    if ($imageAssignment.Count -ne 1 -or
+        $imageAssignment[0].displayTargets -ne $firstDisplay -or
+        $videoAssignment.Count -ne 1 -or
+        $videoAssignment[0].displayTargets -ne $secondDisplay) {
+        throw 'The later assignment did not exclusively replace its overlapping screen.'
     }
     $process.Refresh()
     $workingSet = $process.WorkingSet64
@@ -180,6 +199,7 @@ try {
     "FIRST_DISPLAY=$firstDisplay"
     "SECOND_DISPLAY=$secondDisplay"
     'DISTINCT_WALLPAPER_SESSIONS=2'
+    'OVERLAPPING_ASSIGNMENTS_NORMALIZED=True'
     'STATIC_AND_VIDEO_CONCURRENT=True'
     "WORKING_SET_BYTES=$workingSet"
     'SYSTEM_WALLPAPER_UNCHANGED=True'

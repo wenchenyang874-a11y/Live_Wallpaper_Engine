@@ -3,7 +3,8 @@ param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
     [string] $ScreenshotPath = (Join-Path $env:TEMP 'LWE-display-selection.png'),
-    [string] $MainScreenshotPath = (Join-Path $env:TEMP 'LWE-display-mode-main.png')
+    [string] $MainScreenshotPath = (Join-Path $env:TEMP 'LWE-display-mode-main.png'),
+    [string] $ActiveScreenshotPath = (Join-Path $env:TEMP 'LWE-active-display-labels.png')
 )
 
 Set-StrictMode -Version Latest
@@ -30,6 +31,8 @@ public static class LweDisplayModeProbe
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr w, out RECT r);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
+    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr w, IntPtr dc, uint flags);
 
     public static IntPtr Find(uint processId, string targetClass)
     {
@@ -79,6 +82,25 @@ function Restore-FileSnapshot([string] $Path, [AllowNull()][string] $Snapshot) {
     [IO.File]::WriteAllBytes($Path, [Convert]::FromBase64String($Snapshot))
 }
 
+function Save-WindowScreenshot([IntPtr] $Window, [string] $Path) {
+    $bounds = New-Object LweDisplayModeProbe+RECT
+    [void][LweDisplayModeProbe]::GetWindowRect($Window, [ref]$bounds)
+    $bitmap = [System.Drawing.Bitmap]::new(
+        $bounds.Right - $bounds.Left, $bounds.Bottom - $bounds.Top)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $deviceContext = $graphics.GetHdc()
+    try {
+        if (-not [LweDisplayModeProbe]::PrintWindow($Window, $deviceContext, 2)) {
+            throw 'PrintWindow failed while capturing the UI.'
+        }
+    } finally {
+        $graphics.ReleaseHdc($deviceContext)
+    }
+    $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+    $graphics.Dispose()
+    $bitmap.Dispose()
+}
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $executable = [IO.Path]::GetFullPath(
     (Join-Path $repositoryRoot "out\x64\$Configuration\LiveWallpaperEngine.exe"))
@@ -96,8 +118,9 @@ if ($screens.Count -lt 2) {
 }
 $settingsDirectory = Join-Path $env:LOCALAPPDATA 'LiveWallpaperEngine'
 $libraryDirectory = Join-Path $settingsDirectory 'library'
-if (@(Get-ChildItem -LiteralPath $libraryDirectory -File -ErrorAction SilentlyContinue).Count -eq 0) {
-    throw 'The local wallpaper library must contain at least one item.'
+$libraryFiles = @(Get-ChildItem -LiteralPath $libraryDirectory -File -ErrorAction SilentlyContinue)
+if ($libraryFiles.Count -lt 2) {
+    throw 'The local wallpaper library must contain at least two items.'
 }
 $settingsPath = Join-Path $settingsDirectory 'settings.json'
 $legacySettingsPath = Join-Path $settingsDirectory 'settings.v1.json'
@@ -121,7 +144,7 @@ try {
         [Text.UTF8Encoding]::new($false))
 
     $process = Start-Process -FilePath $executable `
-        -ArgumentList '--test-seconds=30' -PassThru
+        -ArgumentList '--test-seconds=60' -PassThru
     $control = [IntPtr]::Zero
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
         Start-Sleep -Milliseconds 100
@@ -132,6 +155,7 @@ try {
     if ($control -eq [IntPtr]::Zero) {
         throw 'The main control window was not created.'
     }
+    [void][LweDisplayModeProbe]::ShowWindow($control, 5)
 
     $displayMode = [LweDisplayModeProbe]::GetDlgItem($control, 1199)
     $filter = [LweDisplayModeProbe]::GetDlgItem($control, 1101)
@@ -160,23 +184,18 @@ try {
     Start-Sleep -Seconds 1
     [void][LweDisplayModeProbe]::SetWindowPos(
         $control, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    [void][LweDisplayModeProbe]::ShowWindow($control, 5)
     Start-Sleep -Milliseconds 250
-    $mainBounds = New-Object LweDisplayModeProbe+RECT
-    [void][LweDisplayModeProbe]::GetWindowRect($control, [ref]$mainBounds)
-    $mainBitmap = [System.Drawing.Bitmap]::new(
-        $mainBounds.Right - $mainBounds.Left,
-        $mainBounds.Bottom - $mainBounds.Top)
-    $mainGraphics = [System.Drawing.Graphics]::FromImage($mainBitmap)
-    $mainGraphics.CopyFromScreen(
-        $mainBounds.Left, $mainBounds.Top, 0, 0, $mainBitmap.Size)
-    $mainBitmap.Save(
-        $MainScreenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
-    $mainGraphics.Dispose()
-    $mainBitmap.Dispose()
+    Save-WindowScreenshot $control $MainScreenshotPath
     [void][LweDisplayModeProbe]::SetWindowPos(
         $control, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
 
     $library = [LweDisplayModeProbe]::GetDlgItem($control, 1102)
+    $libraryCount = [int][LweDisplayModeProbe]::SendMessage(
+        $library, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($libraryCount -lt 2) {
+        throw "The visible library exposed $libraryCount items; expected at least two."
+    }
     [void][LweDisplayModeProbe]::SendMessage(
         $library, 0x0186, [IntPtr]::Zero, [IntPtr]::Zero)
     if ([LweDisplayModeProbe]::GetDlgItem($control, 1105) -ne [IntPtr]::Zero) {
@@ -211,17 +230,7 @@ try {
     [void][LweDisplayModeProbe]::SetWindowPos(
         $dialog, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
     Start-Sleep -Milliseconds 250
-    $dialogBounds = New-Object LweDisplayModeProbe+RECT
-    [void][LweDisplayModeProbe]::GetWindowRect($dialog, [ref]$dialogBounds)
-    $bitmap = [System.Drawing.Bitmap]::new(
-        $dialogBounds.Right - $dialogBounds.Left,
-        $dialogBounds.Bottom - $dialogBounds.Top)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen(
-        $dialogBounds.Left, $dialogBounds.Top, 0, 0, $bitmap.Size)
-    $bitmap.Save($ScreenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
-    $graphics.Dispose()
-    $bitmap.Dispose()
+    Save-WindowScreenshot $dialog $ScreenshotPath
     [void][LweDisplayModeProbe]::SetWindowPos(
         $dialog, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
 
@@ -253,6 +262,74 @@ try {
         throw "The split assignment saved $($savedTargets.Count) targets; expected $($screens.Count)."
     }
 
+    # Apply a different wallpaper to only one already occupied screen. Exactly
+    # that screen moves to the new assignment; every other screen keeps the
+    # first wallpaper and no display can exist in both assignments.
+    [void][LweDisplayModeProbe]::SendMessage(
+        $library, 0x0186, [IntPtr]1, [IntPtr]::Zero)
+    [void][LweDisplayModeProbe]::PostMessage(
+        $control, 0x0111, [LweDisplayModeProbe]::Command(1102, 2), $library)
+    $secondDialog = [IntPtr]::Zero
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        Start-Sleep -Milliseconds 100
+        $secondDialog = [LweDisplayModeProbe]::Find(
+            [uint32]$process.Id, 'LiveWallpaperEngine.ScreenSelection')
+        if ($secondDialog -ne [IntPtr]::Zero -or $process.HasExited) { break }
+    }
+    if ($secondDialog -eq [IntPtr]::Zero) {
+        throw 'The replacement wallpaper did not show the screen-selection dialog.'
+    }
+    $secondScreenList = [LweDisplayModeProbe]::GetDlgItem($secondDialog, 3100)
+    [void][LweDisplayModeProbe]::SendMessage(
+        $secondScreenList, 0x0185, [IntPtr]0, [IntPtr](-1))
+    $replacementIndex = 1
+    [void][LweDisplayModeProbe]::SendMessage(
+        $secondScreenList, 0x0185, [IntPtr]1, [IntPtr]$replacementIndex)
+    $secondApply = [LweDisplayModeProbe]::GetDlgItem($secondDialog, 3101)
+    [void][LweDisplayModeProbe]::PostMessage(
+        $secondDialog, 0x0111, [LweDisplayModeProbe]::Command(3101, 0), $secondApply)
+    Start-Sleep -Seconds 2
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw "Replacing one occupied screen exited early with code $($process.ExitCode)."
+    }
+
+    $replaced = Get-Content -Raw -Encoding UTF8 $settingsPath | ConvertFrom-Json
+    if (@($replaced.assignments).Count -ne 2) {
+        throw "Screen replacement saved $(@($replaced.assignments).Count) assignments; expected 2."
+    }
+    $assigned = @{}
+    foreach ($assignment in @($replaced.assignments)) {
+        foreach ($identifier in @($assignment.displayTargets -split '\|')) {
+            if ($assigned.ContainsKey($identifier)) {
+                throw "The same screen belongs to two wallpaper assignments: $identifier"
+            }
+            $assigned[$identifier] = $assignment.wallpaperPath
+        }
+    }
+    if ($assigned.Count -ne $screenCount -or
+        -not $assigned.ContainsKey($screens[$replacementIndex].DeviceName)) {
+        throw 'The replacement did not leave exactly one wallpaper on every screen.'
+    }
+
+    $activeStatus = [LweDisplayModeProbe]::GetDlgItem($control, 1110)
+    [void][LweDisplayModeProbe]::PostMessage(
+        $control, 0x0111, [LweDisplayModeProbe]::Command(1110, 0), $activeStatus)
+    Start-Sleep -Milliseconds 400
+    $activeList = [LweDisplayModeProbe]::GetDlgItem($control, 1111)
+    $activeCount = [int][LweDisplayModeProbe]::SendMessage(
+        $activeList, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($activeCount -ne 2) {
+        throw "The active drawer showed $activeCount wallpapers; expected 2."
+    }
+
+    [void][LweDisplayModeProbe]::SetWindowPos(
+        $control, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
+    Start-Sleep -Milliseconds 250
+    Save-WindowScreenshot $control $ActiveScreenshotPath
+    [void][LweDisplayModeProbe]::SetWindowPos(
+        $control, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
+
     [void][LweDisplayModeProbe]::PostMessage(
         $control, 0x0111, [LweDisplayModeProbe]::Command(2199, 0),
         [IntPtr]::Zero)
@@ -271,11 +348,14 @@ try {
     "SCREEN_OPTION_COUNT=$screenCount"
     "MULTI_SELECTED_COUNT=$selectedCount"
     "SAVED_TARGET_COUNT=$($savedTargets.Count)"
+    'SAME_SCREEN_REPLACEMENT=True'
+    'ACTIVE_SCREEN_LABELS=VerifiedByAssignmentStateAndScreenshot'
     'EARLY_EXIT=False'
     'NORMAL_EXIT=True'
     'SYSTEM_WALLPAPER_UNCHANGED=True'
     "MAIN_SCREENSHOT=$MainScreenshotPath"
     "SCREENSHOT=$ScreenshotPath"
+    "ACTIVE_SCREENSHOT=$ActiveScreenshotPath"
 } finally {
     if ($null -ne $process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -ErrorAction SilentlyContinue

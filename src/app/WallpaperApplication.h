@@ -92,6 +92,7 @@ private:
                                         bool showErrors = true);
     bool ApplyWallpaper(std::wstring_view path, bool persistSelection = true,
                         bool showErrors = true);
+    bool NormalizeAssignments();
     bool RebuildPlaybackSessions(bool showErrors);
     HRESULT StartWallpaperSession(WallpaperSession& session);
     HRESULT RenderStaticImage(std::wstring_view path,
@@ -108,6 +109,7 @@ private:
     std::vector<RECT> DestinationsForAssignment(
         const core::WallpaperAssignmentSetting& assignment) const;
     std::vector<std::wstring> ActiveWallpaperPaths() const;
+    std::vector<ModernMainWindow::ActiveWallpaperInfo> ActiveWallpapers() const;
     std::wstring ActivePlaybackStatus() const;
     bool HasDynamicPlayback() const;
     std::uint64_t VideoTransferredFrameCount() const;
