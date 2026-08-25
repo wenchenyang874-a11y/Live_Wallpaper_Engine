@@ -1,40 +1,88 @@
 # Live Wallpaper Engine
 
-面向 Windows 10/11 x64 的轻量级、本地动态壁纸软件。
+面向 Windows 10/11 x64 的轻量级、本地动态壁纸软件。支持图片、GIF 和常见视频格式，可按屏幕分配不同壁纸，也可以让一个画面横跨整个桌面。
 
-> 当前为 `0.x` 预览阶段。程序完全本地运行，不需要账户、服务器或管理员权限。
+[下载最新版本](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest) · [查看更新记录](CHANGELOG.md) · [Apache-2.0 License](LICENSE)
 
-## 当前验证内容
+> 项目目前处于 `0.x` 预览阶段。程序完全在本地运行，不需要账号、服务器或管理员权限；当前安装包尚未进行代码签名。
 
-- C++20、Win32 和 Direct3D 11 原生实现。
-- 识别 Windows 11 raised desktop 与传统 WorkerW 桌面结构。
-- 壁纸窗口不进入 Alt+Tab、不获取焦点，并将鼠标输入交还桌面。
-- 单实例运行；再次双击程序会唤醒已有的状态窗口，不会重复创建渲染器。
-- 提供现代化“我的壁纸”界面，可搜索并通过分类下拉菜单按静态图片、GIF、视频筛选。
-- 壁纸条目显示系统生成的图片/视频缩略图；右键可预览、重命名、打开文件所在位置、导出分享包、应用或从本地壁纸库删除。
-- “我的壁纸”支持拖动排序；拖到列表上下边缘时会自动滚动，顺序保存在本地并在重启后恢复。
-- 点击“导入壁纸”可选择导入图片/视频或分享包，也支持把 JPG/JPEG、PNG、BMP、GIF、受系统解码器支持的视频、ZIP 分享包和单个 `.lwewall` 拖入窗口。
-- GIF 由 WIC 按帧解码和合成；视频通过 Media Foundation/Media Engine 帧服务器解码到同一 D3D11 交换链并循环播放，优先使用系统硬件解码能力。
-- 视频默认静音，可在主界面或托盘开启声音；选择会保存在当前用户的本地设置中。
-- 动态内容在会话锁定、系统睡眠、显示器关闭和检测到符合规则的全屏应用时暂停。
-- 导出分享包会进入批量勾选状态，可全选或取消全选；无论导出一个还是多个壁纸，结果都是标准 ZIP，其中每张壁纸分别保存为带 SHA-256 完整性校验的 `.lwewall` 文件。
-- 静态图片经居中裁剪后只呈现一帧到桌面覆盖层，空闲时使用事件等待而非定时轮询。
-- 显示方式只保留“跨屏扩展 / 分屏显示”一个入口；分屏模式在每次应用壁纸时弹出屏幕多选窗口，可应用到一个或多个显示器。不同显示器可以同时使用不同壁纸，同一壁纸分配给多个屏幕时复用一个解码会话。
-- 当前壁纸可从底部上拉列表、壁纸库的“使用中”或托盘菜单取消应用；覆盖窗口随即隐藏并显露原 Windows 壁纸。
-- 点击底部正在使用状态可上拉查看全部活动壁纸，支持逐项取消和右键操作；壁纸库的“使用中”也可点击确认取消。
-- 动态壁纸呈现由独立播放线程驱动，打开下拉列表、菜单或对话框不会阻塞桌面取帧与呈现。
-- 状态栏实时显示本进程 CPU、GPU、内存和显存；GPU 与任务管理器进程页一样采用最繁忙 GPU 引擎，而不是把不同引擎相加。
-- 不修改 Windows 原壁纸；退出程序会销毁覆盖窗口，原壁纸随即自然显露。
-- 壁纸库位于 `%LOCALAPPDATA%\LiveWallpaperEngine\library`，设置保存在同一应用数据目录；自定义顺序记录在壁纸库的 `.library-order.v1`，重启后自动恢复。
-- Windows 11 layered desktop 使用兼容的 D3D11 BitBlt 交换链。
-- 支持 `--test-seconds=N` 受控运行，便于自动退出和验证。
-- 日志写入 `%LOCALAPPDATA%\LiveWallpaperEngine\logs\LiveWallpaperEngine.log`。
+![Live Wallpaper Engine 应用预览](assets/application-preview.png)
+
+## 功能亮点
+
+- **本地、原生、轻量**：使用 C++20、Win32 和 Direct3D 11 实现，不修改 Windows 原壁纸，退出后原壁纸自然恢复。
+- **常见壁纸格式**：支持 JPG/JPEG、PNG、BMP、GIF，以及系统 Media Foundation 能够解码的常见视频格式。
+- **多屏自由分配**：支持跨屏扩展和分屏显示；分屏模式下，同一壁纸可应用到多个屏幕，不同屏幕也可使用不同壁纸。
+- **动态壁纸播放**：GIF 和视频循环播放，视频默认静音，可在主界面或托盘菜单中开关声音、暂停或继续播放。
+- **本地壁纸库**：提供搜索、分类筛选、缩略图、预览、重命名、定位文件、删除和拖动排序；拖到列表边缘时会自动滚动。
+- **导入与分享**：可批量导入图片/视频，也可导入或导出标准 ZIP 分享包；每张壁纸独立保存为带 SHA-256 校验的 `.lwewall` 文件。
+- **播放与界面解耦**：动态壁纸由独立播放线程驱动，打开菜单、下拉框或对话框不会阻塞桌面取帧与呈现。
+- **资源状态可见**：主界面实时显示本进程的 CPU、GPU、内存和显存占用。
+
+## 下载与使用
+
+从 [GitHub Releases](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest) 下载最新的 Windows x64 安装包。安装程序默认安装到当前用户目录，不需要管理员权限。
+
+1. 点击“导入壁纸”，选择导入图片/视频或分享包；也可以把支持的文件直接拖入窗口。
+2. 选择“跨屏扩展”或“分屏显示”。
+3. 双击壁纸，或右键选择“应用”。分屏显示时，可在随后出现的窗口中单选或多选目标屏幕。
+4. 关闭主窗口会隐藏到系统托盘；左键托盘图标重新打开，右键仅显示播放、声音、取消应用和退出等操作。
+
+| 类型 | 支持内容 |
+| --- | --- |
+| 静态图片 | JPG、JPEG、PNG、BMP |
+| 动态图片 | GIF |
+| 视频 | MP4、M4V、MOV、WMV、AVI 等，实际兼容性取决于 Windows 系统解码器 |
+| 分享文件 | 软件导出的 ZIP 分享包、单个 `.lwewall` 文件 |
+
+动态内容会在会话锁定、系统睡眠、显示器关闭，以及检测到符合规则的全屏应用时暂停。视频使用 Media Foundation/Media Engine 解码并优先利用系统硬件解码能力；GIF 使用 WIC 按帧解码与合成。
+
+## 多屏显示
+
+- **跨屏扩展**：一个画面覆盖整个虚拟桌面，适合连续构图的超宽壁纸。
+- **分屏显示**：每次应用壁纸时选择一个或多个目标屏幕，只替换所选屏幕，其他屏幕继续保留原有分配。
+
+分屏模式支持把同一壁纸分配给多个显示器，也支持逐次为不同显示器设置不同壁纸。同一壁纸用于多个屏幕时会复用解码会话，避免不必要的重复解码。
+
+## 壁纸分享包
+
+无论导出一张还是多张壁纸，软件都会生成一个标准 ZIP 压缩包。每张壁纸在压缩包中保持独立，多个壁纸不会被合并进同一个 `.lwewall`：
+
+```text
+分享包.zip
+├── 壁纸 A.lwewall
+├── 壁纸 B.lwewall
+└── 壁纸 C.lwewall
+```
+
+点击“导出分享包”后可多选壁纸，也可以全选或取消全选。导入时既可以选择完整 ZIP，也可以选择解压后的单个 `.lwewall` 文件。媒体文件通常已经压缩，因此 ZIP 使用 Stored 模式打包，避免无意义的二次压缩。
+
+## 本地数据与隐私
+
+软件不会上传壁纸、配置或使用数据。导入媒体时会复制文件到本地壁纸库，而不是只记录原文件路径。
+
+| 数据 | 位置 |
+| --- | --- |
+| 壁纸库 | `%LOCALAPPDATA%\LiveWallpaperEngine\library` |
+| 设置 | `%LOCALAPPDATA%\LiveWallpaperEngine\settings.json` |
+| 自定义排序 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.library-order.v1` |
+| 日志 | `%LOCALAPPDATA%\LiveWallpaperEngine\logs\LiveWallpaperEngine.log` |
+
+覆盖安装和卸载程序不会主动删除当前用户的壁纸库与设置。
+
+## 技术实现
+
+- 识别 Windows 11 raised desktop 与传统 WorkerW 桌面结构，壁纸窗口不进入 Alt+Tab、不获取焦点，并把鼠标输入交还桌面。
+- Windows 11 layered desktop 使用兼容的 D3D11 BitBlt 交换链；静态图片经居中裁剪后只呈现一帧，空闲时使用事件等待而非定时轮询。
+- 单实例运行；再次启动程序会唤醒已有主窗口，不会创建第二套渲染器。
+- 当前壁纸可从底部上拉列表、壁纸库的“使用中”状态或托盘菜单逐项取消，覆盖窗口会立即隐藏并显露 Windows 原壁纸。
+- GPU 指标与任务管理器“进程”页一致，取本进程最繁忙的 GPU 引擎，而不是把不同引擎相加。
 
 ## 构建
 
-要求：
+需要：
 
-- Visual Studio 2022，包含“使用 C++ 的桌面开发”。
+- Visual Studio 2022，并安装“使用 C++ 的桌面开发”。
 - Windows 10/11 SDK 10.0.26100.0 或兼容版本。
 
 在 Developer PowerShell 中执行：
@@ -43,95 +91,66 @@
 msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 ```
 
-输出位于 `out\x64\Release\LiveWallpaperEngine.exe`。
+程序输出到 `out\x64\Release\LiveWallpaperEngine.exe`。Release 构建静态链接 MSVC C/C++ 运行库；D3D11、WIC、Media Foundation 等运行依赖由 Windows 10/11 提供，因此无需随安装包附带第三方 DLL。
 
-## 安装包与发布
+## 安装包与版本发布
 
-正式版本使用 `vMAJOR.MINOR.PATCH` 三段式 Git tag，例如 `v0.1.0`。推送合规 tag 后，GitHub Actions 会构建 x64 安装包、生成 SHA-256 校验文件，并创建同名 GitHub Release 上传资产。
-
-本地构建安装包需要 Inno Setup 6：
+本地构建安装包需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
 
 ```powershell
-.\tools\build-release.ps1 -Version 0.1.0
+.\tools\build-release.ps1 -Version 0.4.0
 ```
 
-安装包输出到 `dist\`，默认安装到当前用户的 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`，不请求管理员权限。项目当前仍处于 `0.x` 预览阶段，但每次发布的最新三段式版本会标记为 GitHub Latest Release，方便从仓库首页直接下载；`v1.0.0` 起视为稳定版本。
-
-日常开发中的当前代码应构建为名称明确的未发布安装包，避免与已经发布且不可变的版本资产混淆：
+日常开发验证使用带有明确标记的未发布安装包：
 
 ```powershell
-.\tools\build-release.ps1 -Version 0.1.0 -Unreleased
+.\tools\build-release.ps1 -Version 0.4.0 -Unreleased
 ```
 
-若检测到相同 AppId 的已安装版本，交互式安装会询问是否覆盖，选择“否”立即退出；确认覆盖后，安装器会关闭仍在运行的旧程序再替换文件。安装目录中只有主程序、许可和说明文档以及 Inno Setup 卸载文件是正常现象：Release 程序静态链接 MSVC 运行库，D3D11、WIC 和 Media Foundation 等运行依赖由 Windows 10/11 提供，不需要附带第三方 DLL。
+安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出，确认覆盖后安装器会关闭仍在运行的旧程序再替换文件。
 
-## 受控运行
+正式版本使用 `vMAJOR.MINOR.PATCH` 三段式 Git tag。推送合法 tag 后，GitHub Actions 会构建 x64 安装包、生成 SHA-256 校验文件，并创建带有版本说明的 GitHub Release。最新三段式版本会标记为 [Latest Release](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest)；`v1.0.0` 起视为稳定版本。
 
-以下命令呈现十秒测试画面后自动退出：
+## 测试
+
+程序支持受控运行，下面的命令会显示测试画面并在 10 秒后自动退出：
 
 ```powershell
 .\out\x64\Release\LiveWallpaperEngine.exe --test-seconds=10
 ```
 
-不传 `--test-seconds` 时程序持续运行。关闭状态窗口会隐藏到系统托盘；左键单击托盘图标可重新打开，右键只显示菜单，可暂停/继续动态壁纸、取消当前壁纸或退出。
-
-在“我的壁纸”中点击“导入壁纸”，先选择“导入图片 / 视频”或“导入分享包”，也可把支持的文件直接拖入窗口。分享包支持软件导出的整个 ZIP，也支持解压后的单个 `.lwewall`。双击壁纸或右键选择“应用”即可使用；点击“导出分享包”后勾选一张或多张壁纸并导出 ZIP。右键壁纸还可定位文件、单独导出或从本地壁纸库删除，按住壁纸卡片拖动可调整顺序。“显示方式”选择“跨屏扩展”时，一个画面横跨整个桌面；选择“分屏显示”时，双击或右键应用壁纸后再勾选一个或多个目标屏幕，只替换这些屏幕，其他屏幕继续使用原来的分配。重复选择其他屏幕即可分别设置不同壁纸。退出程序不会改动或重设 Windows 原壁纸。更多缩放模式仍待实现。
-
-静态覆盖层回归测试可在编译后执行：
+仓库提供以下回归脚本：
 
 ```powershell
 .\tools\test-static-overlay.ps1 -Configuration Release
-```
-
-GIF/视频回归需要传入一个 GIF 和一个系统可解码的视频：
-
-```powershell
 .\tools\test-media.ps1 -Configuration Release -GifPath .\sample.gif -VideoPath .\sample.mp4
-```
-
-双屏不同壁纸回归需要传入一张图片和一个视频，脚本会临时替换并在退出时逐字节恢复本地设置：
-
-```powershell
 .\tools\test-multi-display.ps1 -Configuration Release -ImagePath .\sample.png -VideoPath .\sample.mp4
-```
-
-快速切换、视频错误隔离和双屏选择界面可分别执行：
-
-```powershell
 .\tools\test-wallpaper-switch.ps1 -Configuration Release -ImagePath .\sample.png -VideoPath .\sample.mp4
 .\tools\test-video-failure-containment.ps1 -Configuration Release -VideoPath .\sample.mp4
 .\tools\test-display-mode-ui.ps1 -Configuration Release
 .\tools\test-library-management-ui.ps1 -Configuration Release
+.\tools\test-tray-controls.ps1 -Configuration Release
+.\tools\test-ui-playback-independence.ps1 -Configuration Release -VideoPath .\sample.mp4
 ```
 
-壁纸管理界面测试会验证导出选择状态、拖动排序持久化和导入类型选择窗口，并在结束时逐字节恢复原设置与壁纸排序文件。
+涉及本地设置和壁纸排序的脚本会在测试后逐字节恢复原文件。媒体和多屏脚本需要调用者提供可用样本及相应硬件环境。
 
 ## 常见问题（FAQ）
 
-### 导入的壁纸和程序设置存在哪里？
+### 为什么安装目录里看起来只有一个主程序，其他电脑能运行吗？
 
-导入操作会复制媒体文件到 `%LOCALAPPDATA%\LiveWallpaperEngine\library`，不是只保存原文件路径。设置位于 `%LOCALAPPDATA%\LiveWallpaperEngine\settings.json`，日志位于 `%LOCALAPPDATA%\LiveWallpaperEngine\logs`；覆盖安装程序不会删除这些当前用户数据。
+这是原生轻量化打包的预期结果。主程序已经静态包含 MSVC 运行库，其余动态依赖均为 Windows 10/11 自带的系统组件；壁纸和设置属于当前用户数据，因此不会放在安装目录。正式发布前仍需按兼容矩阵在干净的 Windows 10/11 x64 环境验证。
 
-### 多个壁纸会存进同一个 `.lwewall` 吗？
+### 使用腾讯桌面整理后，壁纸不显示或视频闪烁怎么办？
 
-不会。每张壁纸始终对应一个独立 `.lwewall`；批量导出时，软件只是在最外层创建一个 ZIP，把多个 `.lwewall` 放在其中。单张壁纸导出也使用包含一个 `.lwewall` 的 ZIP，因此分享和导入流程保持一致。
-
-### 为什么安装目录里看起来只有一个 exe，其他电脑能运行吗？
-
-这是原生轻量化打包的预期结果。主程序已经静态包含 MSVC C/C++ 运行库，其余动态依赖都是 Windows 10/11 自带的系统 DLL；壁纸和设置属于当前用户数据，因此不会放在安装目录。发布前仍需要按兼容矩阵在干净的 Windows 10/11 x64 环境验证，当前安装包也尚未代码签名。
-
-### 使用腾讯桌面整理后，壁纸不显示或视频一直闪烁怎么办？
-
-腾讯桌面整理默认可能会绘制一层系统静态壁纸，覆盖本软件的图片、GIF 或视频壁纸；视频持续呈现时，两层画面交替显示还可能表现为闪烁。
+腾讯桌面整理可能会绘制一层系统静态壁纸，覆盖本软件的图片、GIF 或视频；视频持续呈现时，两层画面交替显示还可能表现为闪烁。
 
 请打开腾讯桌面整理的“设置中心 → 桌面整理”，勾选“兼容第三方桌面壁纸”并应用，然后重新应用本软件中的壁纸。本软件不会自动修改第三方软件的设置。
 
-### 为什么软件显示的 GPU 与任务管理器“性能”页不同？
+### 为什么软件显示的 GPU 占用与任务管理器“性能”页不同？
 
-软件底部显示的是本进程占用，适合与任务管理器“进程”页中 `Live Wallpaper Engine` 这一行比较；任务管理器“性能”页显示的是整块 GPU 的系统总占用，两者不是同一统计对象。不同采样时刻仍可能出现少量波动。
+软件底部显示的是本进程占用，适合与任务管理器“进程”页中 `Live Wallpaper Engine` 这一行比较；任务管理器“性能”页显示的是整块 GPU 的系统总占用，两者不是同一统计对象。不同采样时刻也可能出现少量波动。
 
 ## 许可
 
-本项目采用 [Apache License 2.0](LICENSE) 开源。
-
-开发中的变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+本项目采用 [Apache License 2.0](LICENSE) 开源。开发中的变更记录见 [CHANGELOG.md](CHANGELOG.md)。
