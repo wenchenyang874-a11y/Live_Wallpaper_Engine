@@ -1626,20 +1626,27 @@ void ModernMainWindow::DrawWallpaperCard(
                                  RGB(76, 96, 139), Scale(parent_, 8));
             RECT badgeLabel = badge;
             if (display.primary) {
-                badgeLabel.top += Scale(parent_, 8);
+                badgeLabel.right -= Scale(parent_, 19);
             }
             DrawTextLine(draw.hDC, display.label, badgeLabel, smallFont_,
                          RGB(211, 221, 244),
                          DT_CENTER | DT_VCENTER | DT_SINGLELINE |
                              DT_END_ELLIPSIS);
             if (display.primary) {
-                RECT primary{badge.left + Scale(parent_, 35),
-                             badge.top + Scale(parent_, 1),
-                             badge.right - Scale(parent_, 4),
-                             badge.top + Scale(parent_, 13)};
-                DrawTextLine(draw.hDC, L"主屏", primary, badgeFont_,
+                const int primaryHeight = Scale(parent_, 24);
+                const int primaryTop =
+                    badge.top + (badge.bottom - badge.top - primaryHeight) / 2;
+                RECT primary{badge.right - Scale(parent_, 19), primaryTop,
+                             badge.right - Scale(parent_, 3),
+                             primaryTop + primaryHeight / 2};
+                DrawTextLine(draw.hDC, L"主", primary, badgeFont_,
                              RGB(241, 103, 115),
-                             DT_RIGHT | DT_TOP | DT_SINGLELINE);
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                primary.top = primary.bottom;
+                primary.bottom = primaryTop + primaryHeight;
+                DrawTextLine(draw.hDC, L"屏", primary, badgeFont_,
+                             RGB(241, 103, 115),
+                             DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }
             nameLeft = badge.right + badgeGap;
         }
