@@ -21,6 +21,8 @@ struct StartupOptions final {
     std::chrono::seconds testDuration = std::chrono::seconds::zero();
     std::vector<std::wstring> testWallpapers;
     std::optional<std::wstring> libraryTestSource;
+    lwe::app::updates::UpdateCheckMode updateCheckMode =
+        lwe::app::updates::UpdateCheckMode::Live;
     bool updateCheckerSelfTest = false;
 };
 
@@ -41,6 +43,11 @@ StartupOptions ParseStartupOptions() {
         const std::wstring_view argument(arguments[index]);
         if (argument == L"--test-update-check") {
             options.updateCheckerSelfTest = true;
+            continue;
+        }
+        if (argument == L"--test-update-result=rate-limit") {
+            options.updateCheckMode =
+                lwe::app::updates::UpdateCheckMode::SimulatedRateLimit;
             continue;
         }
         if (argument.starts_with(libraryTestPrefix)) {
@@ -144,7 +151,8 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE) {
         lwe::app::WallpaperApplication application(instance,
                                                    instanceCoordinator.ActivationEvent());
-        exitCode = application.Run(options.testDuration, options.testWallpapers);
+        exitCode = application.Run(options.testDuration, options.testWallpapers,
+                                   options.updateCheckMode);
     } else {
         lwe::core::LogError(L"COM initialization failed.", comResult);
     }

@@ -2,8 +2,10 @@
 param(
     [ValidateSet('Debug', 'Release')]
     [string] $Configuration = 'Release',
-    [ValidateSet('Available', 'Current')]
+    [ValidateSet('Available', 'Current', 'Error')]
     [string] $ExpectedStatus = 'Available',
+    [string] $ExpectedErrorContains = '',
+    [switch] $SimulateRateLimit,
     [string] $ScreenshotPath = (Join-Path $env:TEMP 'LWE-update-check.png'),
     [string] $ResultScreenshotPath =
         (Join-Path $env:TEMP 'LWE-update-result.png')
@@ -179,8 +181,12 @@ try {
         $settingsPath, ($testSettings | ConvertTo-Json -Depth 5),
         [Text.UTF8Encoding]::new($false))
 
+    $arguments = @('--test-seconds=45')
+    if ($SimulateRateLimit) {
+        $arguments += '--test-update-result=rate-limit'
+    }
     $process = Start-Process -FilePath $executable `
-        -ArgumentList '--test-seconds=45' -PassThru
+        -ArgumentList $arguments -PassThru
     $control = Wait-Window $process.Id 'LiveWallpaperEngine.Control'
     if ($control -eq [IntPtr]::Zero) {
         throw 'The main control window was not created.'
@@ -236,10 +242,11 @@ try {
     $availableText = -join @(
         [char]0x524D, [char]0x5F80, [char]0x4E0B, [char]0x8F7D)
     $currentText = -join @([char]0x77E5, [char]0x9053, [char]0x4E86)
-    $expectedText = if ($ExpectedStatus -eq 'Available') {
-        $availableText
-    } else {
-        $currentText
+    $releaseText = (-join @([char]0x67E5, [char]0x770B)) + ' Release'
+    $expectedText = switch ($ExpectedStatus) {
+        'Available' { $availableText }
+        'Current' { $currentText }
+        'Error' { $releaseText }
     }
     if ($primaryText -ne $expectedText) {
         throw "Unexpected update action '$primaryText'; expected '$expectedText'."
@@ -254,6 +261,20 @@ try {
     if (-not $newLog.Contains('Manual update check started.') -or
         -not $newLog.Contains('Manual update check completed:')) {
         throw 'The manual update-check lifecycle was not recorded in the log.'
+    }
+    $failed = $newLog.Contains('Manual update check failed:')
+    if ($ExpectedStatus -eq 'Error') {
+        if (-not $failed) {
+            throw 'The expected update error was not recorded in the log.'
+        }
+        if (-not [string]::IsNullOrEmpty($ExpectedErrorContains) -and
+            -not $newLog.Contains($ExpectedErrorContains)) {
+            throw "The update error did not contain '$ExpectedErrorContains'."
+        }
+    } elseif ($failed) {
+        throw "The '$ExpectedStatus' result was actually an update-check failure."
+    } elseif ($newLog -notmatch 'latest=v[0-9]+\.[0-9]+\.[0-9]+\.') {
+        throw "The '$ExpectedStatus' result did not include a valid latest version."
     }
     Write-Output "Manual update check passed: status=$ExpectedStatus screenshots=$ScreenshotPath,$ResultScreenshotPath"
 } finally {

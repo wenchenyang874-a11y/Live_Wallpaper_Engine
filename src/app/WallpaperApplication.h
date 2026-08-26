@@ -38,7 +38,9 @@ public:
     WallpaperApplication& operator=(const WallpaperApplication&) = delete;
 
     int Run(std::chrono::seconds testDuration,
-            const std::vector<std::wstring>& testWallpapers);
+            const std::vector<std::wstring>& testWallpapers,
+            updates::UpdateCheckMode updateCheckMode =
+                updates::UpdateCheckMode::Live);
 
 private:
     enum class PlaybackMode {
@@ -174,6 +176,7 @@ private:
     std::jthread updateCheckThread_;
     std::mutex updateCheckMutex_;
     std::optional<updates::UpdateCheckResult> pendingUpdateResult_;
+    updates::UpdateCheckMode updateCheckMode_ = updates::UpdateCheckMode::Live;
     std::uint32_t nextSessionToken_ = 1;
     bool spanAcrossDisplays_ = true;
     ModernMainWindow mainWindow_;

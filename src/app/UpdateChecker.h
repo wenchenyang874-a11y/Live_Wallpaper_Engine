@@ -19,18 +19,25 @@ enum class UpdateStatus {
     Error,
 };
 
+enum class UpdateCheckMode {
+    Live,
+    SimulatedRateLimit,
+};
+
 struct UpdateCheckResult final {
     UpdateStatus status = UpdateStatus::Error;
     std::wstring currentTag;
     std::wstring latestTag;
     std::wstring releaseUrl;
+    std::wstring errorSummary;
     std::wstring errorMessage;
 };
 
 [[nodiscard]] SemanticVersion CurrentVersion() noexcept;
 [[nodiscard]] std::wstring CurrentVersionTag();
 [[nodiscard]] UpdateCheckResult CheckForLatestRelease(
-    std::stop_token stopToken);
+    std::stop_token stopToken,
+    UpdateCheckMode mode = UpdateCheckMode::Live);
 [[nodiscard]] int RunUpdateCheckerSelfTest();
 
 }  // namespace lwe::app::updates

@@ -723,8 +723,10 @@ WallpaperApplication::~WallpaperApplication() {
 }
 
 int WallpaperApplication::Run(const std::chrono::seconds testDuration,
-                              const std::vector<std::wstring>& testWallpapers) {
+                              const std::vector<std::wstring>& testWallpapers,
+                              const updates::UpdateCheckMode updateCheckMode) {
     controlledTestMode_ = testDuration.count() > 0;
+    updateCheckMode_ = updateCheckMode;
     // Tencent DeskGo and other desktop organizers use this established signal
     // to stop painting an opaque copy of the Windows wallpaper above live
     // wallpaper hosts. The handle exists only for our application lifetime.
@@ -2758,7 +2760,7 @@ void WallpaperApplication::BeginUpdateCheck() {
     updateCheckThread_ = std::jthread(
         [this, resultWindow](const std::stop_token stopToken) {
             updates::UpdateCheckResult result =
-                updates::CheckForLatestRelease(stopToken);
+                updates::CheckForLatestRelease(stopToken, updateCheckMode_);
             if (stopToken.stop_requested()) {
                 return;
             }
@@ -2800,6 +2802,15 @@ void WallpaperApplication::CompleteUpdateCheck() {
         EnableWindow(updateButtonWindow_, TRUE);
         return accepted;
     };
+    const auto openReleasePage = [&](const std::wstring& releaseUrl) {
+        const HINSTANCE opened = ShellExecuteW(
+            controlWindow_, L"open", releaseUrl.c_str(), nullptr, nullptr,
+            SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+            showResult(L"无法打开浏览器", L"系统没有成功打开 GitHub Release 页面。",
+                       releaseUrl, L"知道了", false);
+        }
+    };
     if (result->status == updates::UpdateStatus::UpdateAvailable) {
         const bool openRelease = showResult(
             L"发现新版本",
@@ -2808,14 +2819,7 @@ void WallpaperApplication::CompleteUpdateCheck() {
             L"点击后将在浏览器中打开 GitHub Release 下载页。", L"前往下载",
             true);
         if (openRelease) {
-            const HINSTANCE opened = ShellExecuteW(
-                controlWindow_, L"open", result->releaseUrl.c_str(), nullptr,
-                nullptr, SW_SHOWNORMAL);
-            if (reinterpret_cast<INT_PTR>(opened) <= 32) {
-                showResult(L"无法打开浏览器",
-                           L"系统没有成功打开 GitHub Release 页面。",
-                           result->releaseUrl, L"知道了", false);
-            }
+            openReleasePage(result->releaseUrl);
         }
         return;
     }
@@ -2824,9 +2828,16 @@ void WallpaperApplication::CompleteUpdateCheck() {
                    L"当前版本 " + result->currentTag, L"知道了", false);
         return;
     }
-    core::LogWarning(L"Manual update check failed: " + result->errorMessage);
-    showResult(L"检查更新失败", L"暂时无法获取最新版本信息。",
-               result->errorMessage, L"知道了", false);
+    core::LogWarning(L"Manual update check failed: " + result->errorSummary +
+                     L" " + result->errorMessage);
+    const bool openReleaseList = showResult(
+        L"检查更新失败",
+        result->errorSummary.empty() ? L"暂时无法获取最新版本信息。"
+                                     : result->errorSummary,
+        result->errorMessage, L"查看 Release", true);
+    if (openReleaseList && !result->releaseUrl.empty()) {
+        openReleasePage(result->releaseUrl);
+    }
 }
 
 void WallpaperApplication::StopUpdateCheck() {
