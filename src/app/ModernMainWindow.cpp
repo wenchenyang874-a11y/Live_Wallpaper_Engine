@@ -994,8 +994,6 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
 
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(parent_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
-    appIcon_ = LoadIconW(instance, MAKEINTRESOURCEW(101));
-
     search_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
                               0, 0, 1, 1, parent_,
                               reinterpret_cast<HMENU>(static_cast<INT_PTR>(Search)),
@@ -1261,21 +1259,8 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
     RECT sidebar{0, 0, Scale(parent_, 216), client.bottom};
     FillRectangle(deviceContext, sidebar, kSidebar);
 
-    RECT logo{Scale(parent_, 22), Scale(parent_, 24), Scale(parent_, 62),
-              Scale(parent_, 64)};
-    if (appIcon_ != nullptr) {
-        DrawIconEx(deviceContext, logo.left, logo.top, appIcon_,
-                   logo.right - logo.left, logo.bottom - logo.top, 0, nullptr,
-                   DI_NORMAL);
-    }
-
-    RECT brand{Scale(parent_, 74), Scale(parent_, 23), Scale(parent_, 202),
-               Scale(parent_, 66)};
-    DrawTextLine(deviceContext, L"Live Wallpaper", brand, headingFont_, kTextPrimary,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    RECT navigation{Scale(parent_, 16), Scale(parent_, 92), Scale(parent_, 200),
-                    Scale(parent_, 138)};
+    RECT navigation{Scale(parent_, 16), Scale(parent_, 28), Scale(parent_, 200),
+                    Scale(parent_, 74)};
     FillRoundedRectangle(deviceContext, navigation, RGB(38, 45, 62), RGB(38, 45, 62),
                          Scale(parent_, 12));
     RECT navigationText = navigation;

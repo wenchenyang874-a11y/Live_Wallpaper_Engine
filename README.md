@@ -4,7 +4,7 @@
 
 [下载最新版本](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest) · [查看更新记录](CHANGELOG.md) · [Apache-2.0 License](LICENSE)
 
-> 项目目前处于 `0.x` 预览阶段。程序完全在本地运行，不需要账号、服务器或管理员权限；当前安装包尚未进行代码签名。
+> 当前开发版本为 `v1.0.0`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
 
 ![Live Wallpaper Engine 应用预览](assets/application-preview.png)
 
@@ -18,6 +18,7 @@
 - **导入与分享**：可批量导入图片/视频，也可导入或导出标准 ZIP 分享包；每张壁纸独立保存为带 SHA-256 校验的 `.lwewall` 文件。
 - **播放与界面解耦**：动态壁纸由独立播放线程驱动，打开菜单、下拉框或对话框不会阻塞桌面取帧与呈现。
 - **资源状态可见**：主界面实时显示本进程的 CPU、GPU、内存和显存占用。
+- **按需检查更新**：标题栏提供“检查更新”按钮，不在启动或后台自动联网；发现新版本后由用户决定是否打开 GitHub Release 下载页。
 
 ## 下载与使用
 
@@ -27,6 +28,7 @@
 2. 选择“跨屏扩展”或“分屏显示”。
 3. 双击壁纸，或右键选择“应用”。分屏显示时，可在随后出现的窗口中单选或多选目标屏幕。
 4. 关闭主窗口会隐藏到系统托盘；左键托盘图标重新打开，右键仅显示播放、声音、取消应用和退出等操作。
+5. 需要确认新版本时，点击标题栏“检查更新”；软件不会自动下载或安装更新。
 
 | 类型 | 支持内容 |
 | --- | --- |
@@ -59,7 +61,7 @@
 
 ## 本地数据与隐私
 
-软件不会上传壁纸、配置或使用数据。导入媒体时会复制文件到本地壁纸库，而不是只记录原文件路径。
+软件不会上传壁纸、配置或使用数据。导入媒体时会复制文件到本地壁纸库，而不是只记录原文件路径。除用户点击“检查更新”后向 GitHub 请求 Latest Release 信息外，程序不会为更新功能在启动或后台主动联网，也不会自动下载或执行文件。
 
 | 数据 | 位置 |
 | --- | --- |
@@ -98,13 +100,13 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 本地构建安装包需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
 
 ```powershell
-.\tools\build-release.ps1 -Version 0.4.0
+.\tools\build-release.ps1 -Version 1.0.0
 ```
 
 日常开发验证使用带有明确标记的未发布安装包：
 
 ```powershell
-.\tools\build-release.ps1 -Version 0.4.0 -Unreleased
+.\tools\build-release.ps1 -Version 1.0.0 -Unreleased
 ```
 
 安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出，确认覆盖后安装器会关闭仍在运行的旧程序再替换文件。
@@ -131,6 +133,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\test-library-management-ui.ps1 -Configuration Release
 .\tools\test-tray-controls.ps1 -Configuration Release
 .\tools\test-ui-playback-independence.ps1 -Configuration Release -VideoPath .\sample.mp4
+.\tools\test-update-check.ps1 -Configuration Release -ExpectedStatus Current
 ```
 
 涉及本地设置和壁纸排序的脚本会在测试后逐字节恢复原文件。媒体和多屏脚本需要调用者提供可用样本及相应硬件环境。

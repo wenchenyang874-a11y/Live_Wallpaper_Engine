@@ -13,10 +13,13 @@
 
 #include <mfapi.h>
 #include <mferror.h>
+#include <commctrl.h>
 #include <powrprof.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <dwmapi.h>
+#include <uxtheme.h>
 #include <wtsapi32.h>
 #include <windowsx.h>
 #include <wrl/client.h>
@@ -36,6 +39,8 @@ constexpr UINT kMediaEngineEventMessage = WM_APP + 2;
 constexpr UINT kPlaybackFailureMessage = WM_APP + 3;
 constexpr UINT kPlaybackFatalMessage = WM_APP + 4;
 constexpr UINT kRevealWallpaperMessage = WM_APP + 5;
+constexpr UINT kUpdateCheckResultMessage = WM_APP + 6;
+constexpr UINT kBeginUpdateCheckMessage = WM_APP + 7;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT_PTR kExplorerRecoveryTimer = 1;
 constexpr UINT_PTR kPlaybackPolicyTimer = 2;
@@ -56,8 +61,498 @@ constexpr int kLibraryApplyCommand = 2202;
 constexpr int kLibraryOpenLocationCommand = 2203;
 constexpr int kLibraryExportCommand = 2204;
 constexpr int kLibraryRemoveCommand = 2205;
+constexpr int kUpdateDialogPrimaryCommand = 2300;
+constexpr int kUpdateDialogSecondaryCommand = 2301;
 constexpr wchar_t kDesktopCompatibilityMutexName[] =
     L"cxWallpaperEngineGlobalMutex";
+constexpr wchar_t kUpdateDialogWindowClass[] =
+    L"LiveWallpaperEngine.UpdateResult";
+constexpr wchar_t kUpdateButtonWindowClass[] =
+    L"LiveWallpaperEngine.UpdateButton";
+
+constexpr COLORREF kUpdateBackground = RGB(17, 20, 27);
+constexpr COLORREF kUpdatePanel = RGB(28, 33, 44);
+constexpr COLORREF kUpdatePanelHover = RGB(36, 43, 57);
+constexpr COLORREF kUpdateAccent = RGB(92, 124, 250);
+constexpr COLORREF kUpdateAccentHover = RGB(112, 142, 255);
+constexpr COLORREF kUpdateText = RGB(241, 244, 250);
+constexpr COLORREF kUpdateSecondaryText = RGB(158, 168, 188);
+constexpr COLORREF kUpdateBorder = RGB(54, 63, 82);
+
+int UpdateUiScale(const HWND window, const int value) {
+    return MulDiv(value, GetDpiForWindow(window), 96);
+}
+
+void FillUpdateRectangle(const HDC context, const RECT& rectangle,
+                         const COLORREF color) {
+    const HBRUSH brush = CreateSolidBrush(color);
+    FillRect(context, &rectangle, brush);
+    DeleteObject(brush);
+}
+
+void FillUpdateRoundedRectangle(const HDC context, const RECT& rectangle,
+                                const COLORREF fill, const COLORREF outline,
+                                const int radius) {
+    const HBRUSH brush = CreateSolidBrush(fill);
+    const HPEN pen = CreatePen(PS_SOLID, 1, outline);
+    const HGDIOBJ previousBrush = SelectObject(context, brush);
+    const HGDIOBJ previousPen = SelectObject(context, pen);
+    RoundRect(context, rectangle.left, rectangle.top, rectangle.right,
+              rectangle.bottom, radius, radius);
+    SelectObject(context, previousPen);
+    SelectObject(context, previousBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+void DrawUpdateText(const HDC context, const std::wstring_view text,
+                    RECT rectangle, const HFONT font, const COLORREF color,
+                    const UINT format) {
+    const HGDIOBJ previousFont = SelectObject(context, font);
+    SetBkMode(context, TRANSPARENT);
+    SetTextColor(context, color);
+    DrawTextW(context, text.data(), static_cast<int>(text.size()), &rectangle,
+              format);
+    SelectObject(context, previousFont);
+}
+
+struct UpdateDialogState final {
+    HINSTANCE instance = nullptr;
+    HWND owner = nullptr;
+    HWND window = nullptr;
+    HWND primary = nullptr;
+    HWND secondary = nullptr;
+    HFONT headingFont = nullptr;
+    HFONT bodyFont = nullptr;
+    HFONT detailFont = nullptr;
+    std::wstring heading;
+    std::wstring message;
+    std::wstring detail;
+    std::wstring primaryLabel;
+    bool showSecondary = false;
+    bool primaryHovered = false;
+    bool secondaryHovered = false;
+    bool accepted = false;
+    bool complete = false;
+};
+
+void RecreateUpdateDialogFonts(UpdateDialogState& state) {
+    for (HFONT* font : {&state.headingFont, &state.bodyFont, &state.detailFont}) {
+        if (*font != nullptr) {
+            DeleteObject(*font);
+        }
+    }
+    const int dpi = static_cast<int>(GetDpiForWindow(state.window));
+    state.headingFont = CreateFontW(
+        -MulDiv(20, dpi, 96), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Display");
+    state.bodyFont = CreateFontW(
+        -MulDiv(14, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    state.detailFont = CreateFontW(
+        -MulDiv(12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    for (const HWND control : {state.primary, state.secondary}) {
+        if (IsWindow(control)) {
+            SendMessageW(control, WM_SETFONT,
+                         reinterpret_cast<WPARAM>(state.bodyFont), TRUE);
+        }
+    }
+}
+
+void LayoutUpdateDialog(UpdateDialogState& state) {
+    RECT client{};
+    GetClientRect(state.window, &client);
+    const int margin = UpdateUiScale(state.window, 24);
+    const int buttonHeight = UpdateUiScale(state.window, 38);
+    const int primaryWidth = UpdateUiScale(state.window, 126);
+    const int secondaryWidth = UpdateUiScale(state.window, 92);
+    const int gap = UpdateUiScale(state.window, 10);
+    const int top = client.bottom - margin - buttonHeight;
+    MoveWindow(state.primary, client.right - margin - primaryWidth, top,
+               primaryWidth, buttonHeight, TRUE);
+    if (state.showSecondary) {
+        SetWindowPos(state.secondary, HWND_TOP,
+                     client.right - margin - primaryWidth - gap - secondaryWidth,
+                     top, secondaryWidth, buttonHeight, SWP_SHOWWINDOW);
+    } else {
+        ShowWindow(state.secondary, SW_HIDE);
+    }
+}
+
+void PaintUpdateDialog(const UpdateDialogState& state, const HDC context) {
+    RECT client{};
+    GetClientRect(state.window, &client);
+    FillUpdateRectangle(context, client, kUpdateBackground);
+
+    const int margin = UpdateUiScale(state.window, 24);
+    RECT heading{margin, UpdateUiScale(state.window, 22),
+                 client.right - margin, UpdateUiScale(state.window, 54)};
+    DrawUpdateText(context, state.heading, heading, state.headingFont,
+                   kUpdateText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT message{margin, UpdateUiScale(state.window, 60), client.right - margin,
+                 UpdateUiScale(state.window, 94)};
+    DrawUpdateText(context, state.message, message, state.bodyFont,
+                   kUpdateSecondaryText, DT_LEFT | DT_VCENTER | DT_SINGLELINE |
+                                             DT_END_ELLIPSIS);
+
+    RECT detail{margin, UpdateUiScale(state.window, 104), client.right - margin,
+                UpdateUiScale(state.window, 154)};
+    FillUpdateRoundedRectangle(context, detail, kUpdatePanel, kUpdateBorder,
+                               UpdateUiScale(state.window, 10));
+    InflateRect(&detail, -UpdateUiScale(state.window, 14), 0);
+    DrawUpdateText(context, state.detail, detail, state.detailFont, kUpdateText,
+                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+}
+
+void DrawUpdateDialogButton(const UpdateDialogState& state,
+                            const DRAWITEMSTRUCT& draw) {
+    wchar_t label[64]{};
+    GetWindowTextW(draw.hwndItem, label, static_cast<int>(std::size(label)));
+    const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
+    const bool focused = (draw.itemState & ODS_FOCUS) != 0;
+    const bool primary = draw.CtlID == kUpdateDialogPrimaryCommand;
+    const bool hovered = primary ? state.primaryHovered
+                                 : state.secondaryHovered;
+    FillUpdateRectangle(draw.hDC, draw.rcItem, kUpdateBackground);
+    RECT button = draw.rcItem;
+    InflateRect(&button, -1, -1);
+    const COLORREF fill = primary
+                              ? (pressed ? RGB(72, 99, 207)
+                                         : (hovered ? kUpdateAccentHover
+                                                    : kUpdateAccent))
+                              : (pressed || hovered ? kUpdatePanelHover
+                                                    : kUpdatePanel);
+    const COLORREF outline = primary || focused ? kUpdateAccent : kUpdateBorder;
+    FillUpdateRoundedRectangle(draw.hDC, button, fill, outline,
+                               UpdateUiScale(state.window, 10));
+    DrawUpdateText(draw.hDC, label, button, state.bodyFont, kUpdateText,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+LRESULT CALLBACK UpdateDialogButtonProcedure(
+    const HWND window, const UINT message, const WPARAM wParam,
+    const LPARAM lParam, const UINT_PTR subclassId,
+    const DWORD_PTR referenceData) {
+    auto* state = reinterpret_cast<UpdateDialogState*>(referenceData);
+    if (state == nullptr) {
+        return DefSubclassProc(window, message, wParam, lParam);
+    }
+    bool* hovered = window == state->primary ? &state->primaryHovered
+                                             : &state->secondaryHovered;
+    if (message == WM_MOUSEMOVE && !*hovered) {
+        *hovered = true;
+        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+        TrackMouseEvent(&tracking);
+        InvalidateRect(window, nullptr, FALSE);
+    } else if (message == WM_MOUSELEAVE && *hovered) {
+        *hovered = false;
+        InvalidateRect(window, nullptr, FALSE);
+    } else if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(window, &UpdateDialogButtonProcedure, subclassId);
+    }
+    return DefSubclassProc(window, message, wParam, lParam);
+}
+
+LRESULT CALLBACK UpdateDialogWindowProcedure(const HWND window,
+                                             const UINT message,
+                                             const WPARAM wParam,
+                                             const LPARAM lParam) {
+    auto* state = reinterpret_cast<UpdateDialogState*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = static_cast<UpdateDialogState*>(create->lpCreateParams);
+        state->window = window;
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(state));
+    }
+    if (state == nullptr) {
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    switch (message) {
+        case WM_CREATE:
+            state->primary = CreateWindowExW(
+                0, L"BUTTON", state->primaryLabel.c_str(),
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 1, 1,
+                window, reinterpret_cast<HMENU>(
+                            static_cast<INT_PTR>(kUpdateDialogPrimaryCommand)),
+                state->instance, nullptr);
+            state->secondary = CreateWindowExW(
+                0, L"BUTTON", L"稍后",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 1, 1,
+                window, reinterpret_cast<HMENU>(
+                            static_cast<INT_PTR>(kUpdateDialogSecondaryCommand)),
+                state->instance, nullptr);
+            if (!IsWindow(state->primary) || !IsWindow(state->secondary)) {
+                return -1;
+            }
+            SetWindowSubclass(state->primary, &UpdateDialogButtonProcedure, 1,
+                              reinterpret_cast<DWORD_PTR>(state));
+            SetWindowSubclass(state->secondary, &UpdateDialogButtonProcedure, 1,
+                              reinterpret_cast<DWORD_PTR>(state));
+            RecreateUpdateDialogFonts(*state);
+            LayoutUpdateDialog(*state);
+            return 0;
+        case WM_SIZE:
+            LayoutUpdateDialog(*state);
+            return 0;
+        case WM_DPICHANGED: {
+            const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+            SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOACTIVATE | SWP_NOZORDER);
+            RecreateUpdateDialogFonts(*state);
+            LayoutUpdateDialog(*state);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        }
+        case WM_COMMAND:
+            if (HIWORD(wParam) == BN_CLICKED &&
+                LOWORD(wParam) == kUpdateDialogPrimaryCommand) {
+                state->accepted = true;
+                DestroyWindow(window);
+                return 0;
+            }
+            if (HIWORD(wParam) == BN_CLICKED &&
+                LOWORD(wParam) == kUpdateDialogSecondaryCommand) {
+                DestroyWindow(window);
+                return 0;
+            }
+            break;
+        case WM_DRAWITEM:
+            DrawUpdateDialogButton(
+                *state, *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+            return TRUE;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC context = BeginPaint(window, &paint);
+            PaintUpdateDialog(*state, context);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_CLOSE:
+            DestroyWindow(window);
+            return 0;
+        case WM_NCDESTROY:
+            state->complete = true;
+            state->window = nullptr;
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            return DefWindowProcW(window, message, wParam, lParam);
+        default:
+            break;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
+
+bool ShowUpdateDialog(const HWND owner, const HINSTANCE instance,
+                      std::wstring heading, std::wstring message,
+                      std::wstring detail, std::wstring primaryLabel,
+                      const bool showSecondary) {
+    UpdateDialogState state;
+    state.instance = instance;
+    state.owner = owner;
+    state.heading = std::move(heading);
+    state.message = std::move(message);
+    state.detail = std::move(detail);
+    state.primaryLabel = std::move(primaryLabel);
+    state.showSecondary = showSecondary;
+
+    const int clientWidth = UpdateUiScale(owner, 560);
+    const int clientHeight = UpdateUiScale(owner, 218);
+    RECT outer{0, 0, clientWidth, clientHeight};
+    constexpr DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    constexpr DWORD extendedStyle = WS_EX_DLGMODALFRAME;
+    AdjustWindowRectExForDpi(&outer, style, FALSE, extendedStyle,
+                             GetDpiForWindow(owner));
+    RECT ownerRectangle{};
+    GetWindowRect(owner, &ownerRectangle);
+    const int width = outer.right - outer.left;
+    const int height = outer.bottom - outer.top;
+    const int left = ownerRectangle.left +
+                     (ownerRectangle.right - ownerRectangle.left - width) / 2;
+    const int top = ownerRectangle.top +
+                    (ownerRectangle.bottom - ownerRectangle.top - height) / 2;
+    const HWND dialog = CreateWindowExW(
+        extendedStyle, kUpdateDialogWindowClass, L"检查更新", style, left, top,
+        width, height, owner, nullptr, instance, &state);
+    if (!IsWindow(dialog)) {
+        if (state.headingFont != nullptr) {
+            DeleteObject(state.headingFont);
+        }
+        if (state.bodyFont != nullptr) {
+            DeleteObject(state.bodyFont);
+        }
+        if (state.detailFont != nullptr) {
+            DeleteObject(state.detailFont);
+        }
+        return false;
+    }
+    const BOOL dark = TRUE;
+    DwmSetWindowAttribute(dialog, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
+                          sizeof(dark));
+    EnableWindow(owner, FALSE);
+    ShowWindow(dialog, SW_SHOW);
+    SetForegroundWindow(dialog);
+
+    bool receivedQuit = false;
+    WPARAM quitCode = 0;
+    MSG messageRecord{};
+    while (!state.complete &&
+           GetMessageW(&messageRecord, nullptr, 0, 0) > 0) {
+        if (messageRecord.message == WM_KEYDOWN &&
+            messageRecord.wParam == VK_ESCAPE) {
+            PostMessageW(dialog, WM_CLOSE, 0, 0);
+            continue;
+        }
+        if (!IsDialogMessageW(dialog, &messageRecord)) {
+            TranslateMessage(&messageRecord);
+            DispatchMessageW(&messageRecord);
+        }
+    }
+    if (messageRecord.message == WM_QUIT) {
+        receivedQuit = true;
+        quitCode = messageRecord.wParam;
+    }
+    if (IsWindow(dialog)) {
+        DestroyWindow(dialog);
+    }
+    EnableWindow(owner, TRUE);
+    SetForegroundWindow(owner);
+    if (state.headingFont != nullptr) {
+        DeleteObject(state.headingFont);
+    }
+    if (state.bodyFont != nullptr) {
+        DeleteObject(state.bodyFont);
+    }
+    if (state.detailFont != nullptr) {
+        DeleteObject(state.detailFont);
+    }
+    if (receivedQuit) {
+        PostQuitMessage(static_cast<int>(quitCode));
+    }
+    return state.accepted;
+}
+
+struct UpdateTitleButtonState final {
+    HWND owner = nullptr;
+    bool hovered = false;
+    bool pressed = false;
+};
+
+void PaintUpdateTitleButton(const HWND window,
+                            const UpdateTitleButtonState& state,
+                            const HDC context) {
+    constexpr COLORREF transparentKey = RGB(1, 2, 3);
+    RECT client{};
+    GetClientRect(window, &client);
+    FillUpdateRectangle(context, client, transparentKey);
+    RECT button = client;
+    InflateRect(&button, -1, -1);
+    wchar_t label[32]{};
+    GetWindowTextW(window, label, static_cast<int>(std::size(label)));
+    const bool checking = std::wstring_view(label).starts_with(L"检查中");
+    const COLORREF fill = state.pressed
+                              ? RGB(52, 65, 95)
+                              : (state.hovered ? RGB(40, 49, 67)
+                                               : RGB(27, 34, 45));
+    const COLORREF outline = state.hovered || checking
+                                 ? kUpdateAccent
+                                 : RGB(61, 72, 91);
+    FillUpdateRoundedRectangle(context, button, fill, outline,
+                               UpdateUiScale(window, 7));
+    const UINT dpi = GetDpiForWindow(window);
+    const HFONT font = CreateFontW(
+        -MulDiv(12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
+    DrawUpdateText(context, label, button, font, kUpdateText,
+                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DeleteObject(font);
+}
+
+LRESULT CALLBACK UpdateButtonWindowProcedure(const HWND window,
+                                             const UINT message,
+                                             const WPARAM wParam,
+                                             const LPARAM lParam) {
+    auto* state = reinterpret_cast<UpdateTitleButtonState*>(
+        GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        state = new UpdateTitleButtonState{
+            static_cast<HWND>(create->lpCreateParams)};
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(state));
+    }
+    if (state == nullptr) {
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    switch (message) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        case WM_MOUSEMOVE:
+            if (!state->hovered) {
+                state->hovered = true;
+                TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+                TrackMouseEvent(&tracking);
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return 0;
+        case WM_MOUSELEAVE:
+            state->hovered = false;
+            state->pressed = false;
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONDOWN:
+            state->pressed = true;
+            SetCapture(window);
+            InvalidateRect(window, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONUP: {
+            if (GetCapture() == window) {
+                ReleaseCapture();
+            }
+            RECT client{};
+            GetClientRect(window, &client);
+            const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            const bool clicked = state->pressed && PtInRect(&client, point);
+            state->pressed = false;
+            InvalidateRect(window, nullptr, FALSE);
+            if (clicked && IsWindow(state->owner)) {
+                PostMessageW(state->owner, kBeginUpdateCheckMessage, 0, 0);
+            }
+            return 0;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            const HDC context = BeginPaint(window, &paint);
+            PaintUpdateTitleButton(window, *state, context);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_NCDESTROY:
+            SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+            delete state;
+            return DefWindowProcW(window, message, wParam, lParam);
+        default:
+            break;
+    }
+    return DefWindowProcW(window, message, wParam, lParam);
+}
 
 bool RegisterApplicationClass(const HINSTANCE instance, const wchar_t* className,
                               const WNDPROC procedure, const HBRUSH background,
@@ -382,7 +877,11 @@ bool WallpaperApplication::RegisterWindowClasses() {
                                     icon) &&
            RegisterApplicationClass(instance_, kWallpaperWindowClass,
                                     &WallpaperApplication::WindowProcedure, nullptr,
-                                    icon);
+                                    icon) &&
+           RegisterApplicationClass(instance_, kUpdateDialogWindowClass,
+                                    &UpdateDialogWindowProcedure, nullptr, icon) &&
+           RegisterApplicationClass(instance_, kUpdateButtonWindowClass,
+                                    &UpdateButtonWindowProcedure, nullptr, icon);
 }
 
 bool WallpaperApplication::CreateControlWindow() {
@@ -406,7 +905,30 @@ bool WallpaperApplication::CreateControlWindow() {
                        HRESULT_FROM_WIN32(GetLastError()));
         return false;
     }
+    if (!CreateUpdateButtonWindow()) {
+        core::LogError(L"Unable to create the title-bar update button.",
+                       HRESULT_FROM_WIN32(GetLastError()));
+        return false;
+    }
     DragAcceptFiles(controlWindow_, TRUE);
+    return true;
+}
+
+bool WallpaperApplication::CreateUpdateButtonWindow() {
+    if (!IsWindow(controlWindow_)) {
+        return false;
+    }
+    constexpr COLORREF transparentKey = RGB(1, 2, 3);
+    updateButtonWindow_ = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        kUpdateButtonWindowClass, L"检查更新", WS_POPUP, 0, 0, 1, 1,
+        controlWindow_, nullptr, instance_, controlWindow_);
+    if (!IsWindow(updateButtonWindow_)) {
+        return false;
+    }
+    SetLayeredWindowAttributes(updateButtonWindow_, transparentKey, 0,
+                               LWA_COLORKEY);
+    PositionUpdateButtonWindow();
     return true;
 }
 
@@ -2071,6 +2593,7 @@ void WallpaperApplication::ShowControlWindow() {
         return;
     }
     ShowWindow(controlWindow_, IsIconic(controlWindow_) ? SW_RESTORE : SW_SHOW);
+    PositionUpdateButtonWindow();
     SetForegroundWindow(controlWindow_);
     FLASHWINFO flash{sizeof(flash), controlWindow_, FLASHW_TRAY, 2, 0};
     FlashWindowEx(&flash);
@@ -2133,6 +2656,191 @@ void WallpaperApplication::ShowTrayMenu() {
     }
 }
 
+RECT WallpaperApplication::UpdateButtonRectangle() const {
+    RECT empty{};
+    if (!IsWindow(controlWindow_) || IsIconic(controlWindow_)) {
+        return empty;
+    }
+
+    RECT windowRectangle{};
+    if (!GetWindowRect(controlWindow_, &windowRectangle)) {
+        return empty;
+    }
+    POINT clientOrigin{};
+    if (!ClientToScreen(controlWindow_, &clientOrigin)) {
+        return empty;
+    }
+    const UINT dpi = GetDpiForWindow(controlWindow_);
+    NONCLIENTMETRICSW metrics{sizeof(metrics)};
+    HFONT captionFont = nullptr;
+    if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics),
+                                   &metrics, 0, dpi)) {
+        captionFont = CreateFontIndirectW(&metrics.lfCaptionFont);
+    }
+
+    int titleWidth = MulDiv(116, dpi, 96);
+    const HDC context = GetWindowDC(controlWindow_);
+    if (context != nullptr && captionFont != nullptr) {
+        const HGDIOBJ previous = SelectObject(context, captionFont);
+        SIZE titleSize{};
+        if (GetTextExtentPoint32W(
+                context, kApplicationTitle,
+                static_cast<int>(std::size(kApplicationTitle)) - 1, &titleSize)) {
+            titleWidth = titleSize.cx;
+        }
+        SelectObject(context, previous);
+    }
+    if (context != nullptr) {
+        ReleaseDC(controlWindow_, context);
+    }
+    if (captionFont != nullptr) {
+        DeleteObject(captionFont);
+    }
+
+    const int clientLeft = clientOrigin.x - windowRectangle.left;
+    const int clientTop = clientOrigin.y - windowRectangle.top;
+    const int iconWidth = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+    const int left = clientLeft + MulDiv(7, dpi, 96) + iconWidth +
+                     MulDiv(7, dpi, 96) + titleWidth + MulDiv(10, dpi, 96);
+    const int top = std::max(MulDiv(3, dpi, 96), clientLeft / 2);
+    const int bottom = std::max(top + 1, clientTop - MulDiv(4, dpi, 96));
+    return RECT{left, top, left + MulDiv(84, dpi, 96), bottom};
+}
+
+void WallpaperApplication::PositionUpdateButtonWindow() const {
+    if (!IsWindow(controlWindow_) || !IsWindow(updateButtonWindow_)) {
+        return;
+    }
+    if (!IsWindowVisible(controlWindow_) || IsIconic(controlWindow_)) {
+        ShowWindow(updateButtonWindow_, SW_HIDE);
+        return;
+    }
+    RECT windowRectangle{};
+    if (!GetWindowRect(controlWindow_, &windowRectangle)) {
+        return;
+    }
+    const RECT button = UpdateButtonRectangle();
+    if (IsRectEmpty(&button)) {
+        return;
+    }
+    SetWindowPos(updateButtonWindow_, HWND_TOP,
+                 windowRectangle.left + button.left,
+                 windowRectangle.top + button.top, button.right - button.left,
+                 button.bottom - button.top,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+}
+
+void WallpaperApplication::RedrawUpdateButton() const {
+    if (IsWindow(updateButtonWindow_)) {
+        InvalidateRect(updateButtonWindow_, nullptr, FALSE);
+        UpdateWindow(updateButtonWindow_);
+    }
+}
+
+void WallpaperApplication::BeginUpdateCheck() {
+    if (updateCheckInProgress_ || shuttingDown_ || !IsWindow(controlWindow_)) {
+        return;
+    }
+    if (updateCheckThread_.joinable()) {
+        updateCheckThread_.join();
+    }
+    {
+        const std::scoped_lock lock(updateCheckMutex_);
+        pendingUpdateResult_.reset();
+    }
+    updateCheckInProgress_ = true;
+    SetWindowTextW(updateButtonWindow_, L"检查中…");
+    RedrawUpdateButton();
+    core::LogInfo(L"Manual update check started.");
+
+    const HWND resultWindow = controlWindow_;
+    updateCheckThread_ = std::jthread(
+        [this, resultWindow](const std::stop_token stopToken) {
+            updates::UpdateCheckResult result =
+                updates::CheckForLatestRelease(stopToken);
+            if (stopToken.stop_requested()) {
+                return;
+            }
+            {
+                const std::scoped_lock lock(updateCheckMutex_);
+                pendingUpdateResult_ = std::move(result);
+            }
+            PostMessageW(resultWindow, kUpdateCheckResultMessage, 0, 0);
+        });
+}
+
+void WallpaperApplication::CompleteUpdateCheck() {
+    std::optional<updates::UpdateCheckResult> result;
+    {
+        const std::scoped_lock lock(updateCheckMutex_);
+        result = std::move(pendingUpdateResult_);
+        pendingUpdateResult_.reset();
+    }
+    if (updateCheckThread_.joinable()) {
+        updateCheckThread_.join();
+    }
+    updateCheckInProgress_ = false;
+    SetWindowTextW(updateButtonWindow_, L"检查更新");
+    RedrawUpdateButton();
+    if (!result.has_value() || shuttingDown_) {
+        return;
+    }
+
+    core::LogInfo(L"Manual update check completed: current=" +
+                  result->currentTag + L", latest=" + result->latestTag + L'.');
+    const auto showResult = [&](std::wstring heading, std::wstring message,
+                                std::wstring detail,
+                                std::wstring primaryLabel,
+                                const bool showSecondary) {
+        EnableWindow(updateButtonWindow_, FALSE);
+        const bool accepted = ShowUpdateDialog(
+            controlWindow_, instance_, std::move(heading), std::move(message),
+            std::move(detail), std::move(primaryLabel), showSecondary);
+        EnableWindow(updateButtonWindow_, TRUE);
+        return accepted;
+    };
+    if (result->status == updates::UpdateStatus::UpdateAvailable) {
+        const bool openRelease = showResult(
+            L"发现新版本",
+            L"当前版本 " + result->currentTag + L"，最新版本 " +
+                result->latestTag + L"。",
+            L"点击后将在浏览器中打开 GitHub Release 下载页。", L"前往下载",
+            true);
+        if (openRelease) {
+            const HINSTANCE opened = ShellExecuteW(
+                controlWindow_, L"open", result->releaseUrl.c_str(), nullptr,
+                nullptr, SW_SHOWNORMAL);
+            if (reinterpret_cast<INT_PTR>(opened) <= 32) {
+                showResult(L"无法打开浏览器",
+                           L"系统没有成功打开 GitHub Release 页面。",
+                           result->releaseUrl, L"知道了", false);
+            }
+        }
+        return;
+    }
+    if (result->status == updates::UpdateStatus::UpToDate) {
+        showResult(L"已是最新版本", L"当前没有需要安装的新版本。",
+                   L"当前版本 " + result->currentTag, L"知道了", false);
+        return;
+    }
+    core::LogWarning(L"Manual update check failed: " + result->errorMessage);
+    showResult(L"检查更新失败", L"暂时无法获取最新版本信息。",
+               result->errorMessage, L"知道了", false);
+}
+
+void WallpaperApplication::StopUpdateCheck() {
+    if (updateCheckThread_.joinable()) {
+        updateCheckThread_.request_stop();
+        updateCheckThread_.join();
+    }
+    const std::scoped_lock lock(updateCheckMutex_);
+    pendingUpdateResult_.reset();
+    updateCheckInProgress_ = false;
+    if (IsWindow(updateButtonWindow_)) {
+        SetWindowTextW(updateButtonWindow_, L"检查更新");
+    }
+}
+
 void WallpaperApplication::ResizeRendererToWindow() {
     const std::scoped_lock playbackLock(playbackMutex_);
     if (wallpaperWindow_ == nullptr) {
@@ -2175,6 +2883,7 @@ void WallpaperApplication::Shutdown() {
     }
     shuttingDown_ = true;
     running_ = false;
+    StopUpdateCheck();
     if (controlWindow_ != nullptr) {
         KillTimer(controlWindow_, kPlaybackPolicyTimer);
         KillTimer(controlWindow_, kExplorerRecoveryTimer);
@@ -2211,6 +2920,10 @@ void WallpaperApplication::Shutdown() {
     }
     if (controlWindow_ != nullptr && IsWindow(controlWindow_)) {
         DragAcceptFiles(controlWindow_, FALSE);
+        if (IsWindow(updateButtonWindow_)) {
+            DestroyWindow(updateButtonWindow_);
+        }
+        updateButtonWindow_ = nullptr;
         DestroyWindow(controlWindow_);
     }
     controlWindow_ = nullptr;
@@ -2432,7 +3145,13 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
 
             case WM_SIZE:
                 mainWindow_.Layout();
+                PositionUpdateButtonWindow();
                 return 0;
+
+            case WM_MOVE:
+            case WM_WINDOWPOSCHANGED:
+                PositionUpdateButtonWindow();
+                break;
 
             case WM_GETMINMAXINFO: {
                 auto* minimum = reinterpret_cast<MINMAXINFO*>(lParam);
@@ -2449,6 +3168,7 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                              suggested->bottom - suggested->top,
                              SWP_NOACTIVATE | SWP_NOZORDER);
                 mainWindow_.DpiChanged();
+                PositionUpdateButtonWindow();
                 return 0;
             }
 
@@ -2555,6 +3275,14 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 if (IsWindow(wallpaperWindow_)) {
                     ShowWindow(wallpaperWindow_, SW_SHOWNOACTIVATE);
                 }
+                return 0;
+
+            case kUpdateCheckResultMessage:
+                CompleteUpdateCheck();
+                return 0;
+
+            case kBeginUpdateCheckMessage:
+                BeginUpdateCheck();
                 return 0;
 
             case kTrayCallbackMessage:

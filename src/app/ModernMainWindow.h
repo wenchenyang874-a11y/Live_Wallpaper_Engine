@@ -205,7 +205,6 @@ private:
     HFONT badgeFont_ = nullptr;
     HBRUSH editBrush_ = nullptr;
     HBRUSH panelBrush_ = nullptr;
-    HICON appIcon_ = nullptr;
     std::vector<core::WallpaperItem> items_;
     std::vector<std::size_t> visibleIndices_;
     std::vector<std::size_t> activeVisibleIndices_;

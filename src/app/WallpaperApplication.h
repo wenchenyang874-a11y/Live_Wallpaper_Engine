@@ -16,6 +16,7 @@
 #include <windows.h>
 
 #include "app/ModernMainWindow.h"
+#include "app/UpdateChecker.h"
 #include "core/SettingsStore.h"
 #include "core/WallpaperLibrary.h"
 #include "media/MediaTypes.h"
@@ -61,6 +62,7 @@ private:
 
     bool RegisterWindowClasses();
     bool CreateControlWindow();
+    bool CreateUpdateButtonWindow();
     bool CreateWallpaperWindow();
     bool EnsureRenderer();
     bool ReattachToDesktop();
@@ -124,6 +126,12 @@ private:
 
     void ShowControlWindow();
     void ShowTrayMenu();
+    [[nodiscard]] RECT UpdateButtonRectangle() const;
+    void PositionUpdateButtonWindow() const;
+    void RedrawUpdateButton() const;
+    void BeginUpdateCheck();
+    void CompleteUpdateCheck();
+    void StopUpdateCheck();
     void ResizeRendererToWindow();
     void RequestExit();
     void Shutdown();
@@ -133,11 +141,13 @@ private:
     HANDLE desktopCompatibilityMutex_ = nullptr;
     bool desktopCompatibilityMutexOwned_ = false;
     HWND controlWindow_ = nullptr;
+    HWND updateButtonWindow_ = nullptr;
     HWND wallpaperWindow_ = nullptr;
     UINT taskbarCreatedMessage_ = 0;
     bool running_ = false;
     bool shuttingDown_ = false;
     bool trayIconAdded_ = false;
+    bool updateCheckInProgress_ = false;
     bool mediaFoundationStarted_ = false;
     bool controlledTestMode_ = false;
     bool sessionLocked_ = false;
@@ -161,6 +171,9 @@ private:
     mutable std::recursive_mutex playbackMutex_;
     std::condition_variable_any playbackWake_;
     std::jthread playbackRenderThread_;
+    std::jthread updateCheckThread_;
+    std::mutex updateCheckMutex_;
+    std::optional<updates::UpdateCheckResult> pendingUpdateResult_;
     std::uint32_t nextSessionToken_ = 1;
     bool spanAcrossDisplays_ = true;
     ModernMainWindow mainWindow_;

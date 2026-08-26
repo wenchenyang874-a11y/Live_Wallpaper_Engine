@@ -10,6 +10,7 @@
 #include <shellapi.h>
 
 #include "app/WallpaperApplication.h"
+#include "app/UpdateChecker.h"
 #include "core/InstanceCoordinator.h"
 #include "core/Logger.h"
 #include "core/WallpaperLibrarySelfTest.h"
@@ -20,6 +21,7 @@ struct StartupOptions final {
     std::chrono::seconds testDuration = std::chrono::seconds::zero();
     std::vector<std::wstring> testWallpapers;
     std::optional<std::wstring> libraryTestSource;
+    bool updateCheckerSelfTest = false;
 };
 
 StartupOptions ParseStartupOptions() {
@@ -37,6 +39,10 @@ StartupOptions ParseStartupOptions() {
 
     for (int index = 1; index < argumentCount; ++index) {
         const std::wstring_view argument(arguments[index]);
+        if (argument == L"--test-update-check") {
+            options.updateCheckerSelfTest = true;
+            continue;
+        }
         if (argument.starts_with(libraryTestPrefix)) {
             const std::wstring_view path = argument.substr(libraryTestPrefix.size());
             if (!path.empty()) {
@@ -82,6 +88,18 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
     lwe::core::LogInfo(L"Live Wallpaper Engine technical spike starting.");
 
     const StartupOptions options = ParseStartupOptions();
+    if (options.updateCheckerSelfTest) {
+        const int exitCode = lwe::app::updates::RunUpdateCheckerSelfTest();
+        if (exitCode == 0) {
+            lwe::core::LogInfo(L"Update checker self-test passed.");
+        } else {
+            lwe::core::LogError(
+                L"Update checker self-test failed with code " +
+                std::to_wstring(exitCode) + L'.');
+        }
+        lwe::core::ShutdownLogging();
+        return exitCode;
+    }
     if (options.libraryTestSource.has_value()) {
         const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         int exitCode = 1;

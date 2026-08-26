@@ -13,6 +13,7 @@
   <ItemGroup>
     <ClCompile Include="src\app\main.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\ModernMainWindow.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\app\UpdateChecker.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\WallpaperApplication.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\core\InstanceCoordinator.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\Logger.cpp"><Filter>core</Filter></ClCompile>
@@ -31,6 +32,7 @@
   <ItemGroup>
     <ClInclude Include="src\app\WallpaperApplication.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\app\ModernMainWindow.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="src\app\UpdateChecker.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\core\InstanceCoordinator.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\Logger.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\ShareArchive.h"><Filter>core</Filter></ClInclude>
