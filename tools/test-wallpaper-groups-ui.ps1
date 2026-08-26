@@ -33,6 +33,7 @@ public static class LweGroupUiProbe
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr w, out RECT r);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr w, out RECT r);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr w);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr w, IntPtr dc, uint flags);
 
     public static IntPtr Find(uint processId, string targetClass)
@@ -68,6 +69,7 @@ public static class LweGroupUiProbe
     {
         return (IntPtr)((y << 16) | (x & 0xffff));
     }
+
 }
 '@
 
@@ -90,6 +92,34 @@ function Restore-FileSnapshot([string] $Path, [AllowNull()][object] $Snapshot) {
     [IO.File]::SetAttributes($Path, [IO.FileAttributes]$Snapshot.Attributes)
 }
 
+function Write-GroupFixture([string] $Path, [object[]] $Groups) {
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $Path)) | Out-Null
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        [IO.File]::SetAttributes($Path, [IO.FileAttributes]::Normal)
+    }
+    $stream = [IO.File]::Open(
+        $Path, [IO.FileMode]::Create, [IO.FileAccess]::Write,
+        [IO.FileShare]::Read)
+    $writer = [IO.BinaryWriter]::new(
+        $stream, [Text.UTF8Encoding]::new($false), $false)
+    try {
+        $writer.Write([byte[]](0x4C, 0x57, 0x45, 0x47, 0x52, 0x50, 0x31, 0x00))
+        $writer.Write([uint32]1)
+        $writer.Write([uint32]0)
+        $writer.Write([uint32]$Groups.Count)
+        foreach ($group in $Groups) {
+            foreach ($text in @([string]$group.Id, [string]$group.Name)) {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($text)
+                $writer.Write([uint32]$bytes.Length)
+                $writer.Write($bytes)
+            }
+            $writer.Write([uint32]0)
+        }
+    } finally {
+        $writer.Dispose()
+    }
+}
+
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $executable = [IO.Path]::GetFullPath(
     (Join-Path $repositoryRoot "out\x64\$Configuration\LiveWallpaperEngine.exe"))
@@ -109,6 +139,7 @@ $settingsSnapshot = Get-FileSnapshot $settingsPath
 $legacySettingsSnapshot = Get-FileSnapshot $legacySettingsPath
 $groupsSnapshot = Get-FileSnapshot $groupsPath
 $process = $null
+$control = [IntPtr]::Zero
 
 try {
     [IO.Directory]::CreateDirectory($settingsDirectory) | Out-Null
@@ -122,10 +153,24 @@ try {
             assignments = @()
         } | ConvertTo-Json -Depth 5),
         [Text.UTF8Encoding]::new($false))
+    $tooltipGroupLabel = -join [char[]](
+        0x81EA, 0x52A8, 0x5316, 0x7EC4, 0x5B8C, 0x6574, 0x540D,
+        0x79F0, 0x60AC, 0x505C, 0x63D0, 0x793A)
+    $secondFixtureLabel = -join [char[]](
+        0x81EA, 0x52A8, 0x5316, 0x57FA, 0x51C6, 0x5206, 0x7EC4)
+    Write-GroupFixture $groupsPath @(
+        [pscustomobject]@{
+            Id = '{00000000-0000-0000-0000-000000000101}'
+            Name = $tooltipGroupLabel
+        },
+        [pscustomobject]@{
+            Id = '{00000000-0000-0000-0000-000000000102}'
+            Name = $secondFixtureLabel
+        }
+    )
 
     $process = Start-Process -FilePath $executable `
         -ArgumentList '--test-seconds=45' -PassThru
-    $control = [IntPtr]::Zero
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
         Start-Sleep -Milliseconds 100
         $control = [LweGroupUiProbe]::Find(
@@ -134,6 +179,8 @@ try {
     }
     if ($control -eq [IntPtr]::Zero) { throw 'The main window was not created.' }
     [void][LweGroupUiProbe]::ShowWindow($control, 5)
+    [void][LweGroupUiProbe]::SetForegroundWindow($control)
+    Start-Sleep -Milliseconds 100
 
     $all = [LweGroupUiProbe]::GetDlgItem($control, 1120)
     $favorites = [LweGroupUiProbe]::GetDlgItem($control, 1121)
@@ -164,10 +211,21 @@ try {
     if (-not [LweGroupUiProbe]::IsWindowVisible($groupRename)) {
         throw 'A new group did not enter inline rename mode.'
     }
-    $automationGroupLabel = -join [char[]](0x81EA, 0x52A8, 0x5316, 0x5206, 0x7EC4)
+    $automationGroupLabel = -join [char[]](
+        0x81EA, 0x52A8, 0x5316, 0x65B0, 0x589E, 0x5206, 0x7EC4, 0x4E00)
     [void][LweGroupUiProbe]::SetWindowText($groupRename, $automationGroupLabel)
+    if ([LweGroupUiProbe]::Text($groupRename) -ne $automationGroupLabel) {
+        throw 'The first group rename editor did not accept the long name.'
+    }
     [void][LweGroupUiProbe]::SendMessage(
         $control, 0x0111, [LweGroupUiProbe]::Command(1126, 0), $groupRename)
+    for ($attempt = 0; $attempt -lt 20 -and
+         [LweGroupUiProbe]::IsWindowVisible($groupRename); $attempt++) {
+        Start-Sleep -Milliseconds 50
+    }
+    if ([LweGroupUiProbe]::IsWindowVisible($groupRename)) {
+        throw 'The first group rename did not commit.'
+    }
     $nextGroupCount = [int][LweGroupUiProbe]::SendMessage(
         $groups, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
     if ($nextGroupCount -ne $initialGroupCount + 1) {
@@ -177,6 +235,104 @@ try {
         $library, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
     if ($emptyGroupCount -ne 0) {
         throw 'A new empty group did not scope the wallpaper library.'
+    }
+
+    [void][LweGroupUiProbe]::SendMessage(
+        $control, 0x0111, [LweGroupUiProbe]::Command(1123, 0), $create)
+    if (-not [LweGroupUiProbe]::IsWindowVisible($groupRename)) {
+        throw 'The second group did not enter inline rename mode.'
+    }
+    $secondGroupLabel = -join [char[]](
+        0x81EA, 0x52A8, 0x5316, 0x5206, 0x7EC4, 0x4E8C)
+    [void][LweGroupUiProbe]::SetWindowText($groupRename, $secondGroupLabel)
+    if ([LweGroupUiProbe]::Text($groupRename) -ne $secondGroupLabel) {
+        throw 'The second group rename editor did not accept its name.'
+    }
+    [void][LweGroupUiProbe]::SendMessage(
+        $control, 0x0111, [LweGroupUiProbe]::Command(1126, 0), $groupRename)
+    for ($attempt = 0; $attempt -lt 20 -and
+         [LweGroupUiProbe]::IsWindowVisible($groupRename); $attempt++) {
+        Start-Sleep -Milliseconds 50
+    }
+    if ([LweGroupUiProbe]::IsWindowVisible($groupRename)) {
+        throw 'The second group rename did not commit.'
+    }
+    $nextGroupCount = [int][LweGroupUiProbe]::SendMessage(
+        $groups, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($nextGroupCount -ne $initialGroupCount + 2) {
+        throw 'Creating a second custom group did not append it to the sidebar.'
+    }
+
+    # A real mouse down/up sequence must switch to the clicked group. The
+    # group rows are custom-drawn, so this guards against consuming the native
+    # selection notification while preparing a possible drag.
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0197, [IntPtr]$initialGroupCount, [IntPtr]::Zero)
+    $firstGroupRow = New-Object LweGroupUiProbe+RECT
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0198, [IntPtr]$initialGroupCount, [ref]$firstGroupRow)
+    $groupX = ($firstGroupRow.Left + $firstGroupRow.Right) / 2
+    $groupY = ($firstGroupRow.Top + $firstGroupRow.Bottom) / 2
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0201, [IntPtr]1, [LweGroupUiProbe]::Point($groupX, $groupY))
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0202, [IntPtr]::Zero, [LweGroupUiProbe]::Point($groupX, $groupY))
+    if ([int][LweGroupUiProbe]::SendMessage(
+            $groups, 0x0188, [IntPtr]::Zero, [IntPtr]::Zero) -ne
+        $initialGroupCount -or
+        [int][LweGroupUiProbe]::SendMessage(
+            $library, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero) -ne 0) {
+        throw 'Clicking a custom group did not switch the scoped library.'
+    }
+
+    # Long names are ellipsized in the row but must be available in full from
+    # the application's hover popup.
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0197, [IntPtr]::Zero, [IntPtr]::Zero)
+    $tooltipRow = New-Object LweGroupUiProbe+RECT
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0198, [IntPtr]::Zero, [ref]$tooltipRow)
+    $tooltipX = ($tooltipRow.Left + $tooltipRow.Right) / 2
+    $tooltipY = ($tooltipRow.Top + $tooltipRow.Bottom) / 2
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x02A3, [IntPtr]::Zero, [IntPtr]::Zero)
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0200, [IntPtr]::Zero,
+        [LweGroupUiProbe]::Point($tooltipX, $tooltipY))
+    $tooltip = [LweGroupUiProbe]::Find([uint32]$process.Id, 'Static')
+    if ($tooltip -eq [IntPtr]::Zero) {
+        throw 'The custom group tooltip window was not created.'
+    }
+    Start-Sleep -Milliseconds 100
+    $tooltipText = [LweGroupUiProbe]::Text($tooltip)
+    if ($tooltipText -ne $tooltipGroupLabel -or
+        -not [LweGroupUiProbe]::IsWindowVisible($tooltip)) {
+        throw "The custom group tooltip did not expose the full group name: '$tooltipText'; visible=$([LweGroupUiProbe]::IsWindowVisible($tooltip))"
+    }
+
+    # Drag the second temporary group before the first. A changed metadata hash
+    # proves that the reordered IDs reached the persistent group store.
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0197, [IntPtr]$initialGroupCount, [IntPtr]::Zero)
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0198, [IntPtr]$initialGroupCount, [ref]$firstGroupRow)
+    $beforeDragHash = (Get-FileHash -LiteralPath $groupsPath -Algorithm SHA256).Hash
+    $secondGroupRow = New-Object LweGroupUiProbe+RECT
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0198, [IntPtr]($initialGroupCount + 1), [ref]$secondGroupRow)
+    $sourceX = ($secondGroupRow.Left + $secondGroupRow.Right) / 2
+    $sourceY = ($secondGroupRow.Top + $secondGroupRow.Bottom) / 2
+    $targetY = $firstGroupRow.Top + 3
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0201, [IntPtr]1, [LweGroupUiProbe]::Point($sourceX, $sourceY))
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0200, [IntPtr]1, [LweGroupUiProbe]::Point($groupX, $targetY))
+    [void][LweGroupUiProbe]::SendMessage(
+        $groups, 0x0202, [IntPtr]::Zero, [LweGroupUiProbe]::Point($groupX, $targetY))
+    Start-Sleep -Milliseconds 250
+    $afterDragHash = (Get-FileHash -LiteralPath $groupsPath -Algorithm SHA256).Hash
+    if ($afterDragHash -eq $beforeDragHash) {
+        throw 'Dragging a custom group did not persist a reordered group list.'
     }
 
     [void][LweGroupUiProbe]::SendMessage(
@@ -224,6 +380,9 @@ try {
     Write-Output 'WALLPAPER_GROUP_FIXED_ENTRIES=True'
     Write-Output 'WALLPAPER_GROUP_CREATE_RENAME=True'
     Write-Output 'WALLPAPER_GROUP_SCOPED_LIBRARY=True'
+    Write-Output 'WALLPAPER_GROUP_MOUSE_CLICK=True'
+    Write-Output 'WALLPAPER_GROUP_FULL_NAME_TOOLTIP=True'
+    Write-Output 'WALLPAPER_GROUP_DRAG_REORDER=True'
     Write-Output 'WALLPAPER_GROUP_GENERIC_MULTISELECT=True'
     Write-Output "WALLPAPER_GROUP_SCREENSHOT=$ScreenshotPath"
 }

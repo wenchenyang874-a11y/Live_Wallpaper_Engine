@@ -188,6 +188,7 @@ private:
     void SelectGroup(std::wstring_view groupId);
     bool ItemBelongsToCurrentGroup(const core::WallpaperItem& item) const;
     void RefreshGroupItems();
+    void UpdateGroupTooltip(int groupIndex);
     void BeginGroupDrag(POINT clientPoint);
     void UpdateGroupDrag(POINT clientPoint);
     void UpdateGroupDragTarget(POINT clientPoint);
@@ -214,6 +215,9 @@ private:
     static LRESULT CALLBACK InteractiveControlProcedure(
         HWND window, UINT message, WPARAM wParam, LPARAM lParam,
         UINT_PTR subclassId, DWORD_PTR referenceData);
+    static LRESULT CALLBACK GroupTooltipProcedure(
+        HWND window, UINT message, WPARAM wParam, LPARAM lParam,
+        UINT_PTR subclassId, DWORD_PTR referenceData);
 
     HWND parent_ = nullptr;
     HWND search_ = nullptr;
@@ -234,6 +238,7 @@ private:
     HWND groupAll_ = nullptr;
     HWND groupFavorites_ = nullptr;
     HWND groupList_ = nullptr;
+    HWND groupTooltip_ = nullptr;
     HWND groupCreate_ = nullptr;
     HWND groupRenameEdit_ = nullptr;
     std::vector<DisplayOption> displayOptions_;
@@ -271,6 +276,7 @@ private:
     int activeHoverIndex_ = -1;
     int dropdownHoverIndex_ = -1;
     int groupHoverIndex_ = -1;
+    int groupTooltipIndex_ = -1;
     int libraryBadgeHoverIndex_ = -1;
     int activeCancelHoverIndex_ = -1;
     float libraryHoverProgress_ = 0.0F;
