@@ -169,13 +169,23 @@ try {
         throw 'The controlled tray menu did not expose all expected commands.'
     }
 
+    $shutdownTimer = [Diagnostics.Stopwatch]::StartNew()
     [void][LweTrayProbe]::PostMessage(
-        $control, 0x0111, [LweTrayProbe]::Command(2199), [IntPtr]::Zero)
-    if (-not $process.WaitForExit(15000)) {
-        throw 'The tray test process did not exit within 15 seconds.'
+        $control, 0x8008, [IntPtr]::Zero, [IntPtr]::Zero)
+    if (-not $process.WaitForExit(3000)) {
+        throw 'The installer shutdown message did not exit the process within 3 seconds.'
     }
+    $shutdownTimer.Stop()
     if ($process.ExitCode -ne 0) {
         throw "The tray test process exited with code $($process.ExitCode)."
+    }
+    $shutdownLogBytes = Read-SharedBytes $logPath
+    $shutdownLogSegment = [Text.Encoding]::UTF8.GetString(
+        $shutdownLogBytes, [int]$baselineLogBytes,
+        $shutdownLogBytes.Length - [int]$baselineLogBytes)
+    if (-not $shutdownLogSegment.Contains(
+            'Installer requested application shutdown.')) {
+        throw 'The installer shutdown request was not recorded in the log.'
     }
     $process = $null
 
@@ -186,6 +196,7 @@ try {
     'TRAY_PAUSE_RESUME=True'
     'RIGHT_CLICK_KEPT_WINDOW_HIDDEN=True'
     'LEFT_CLICK_OPENED_WINDOW=True'
+    "INSTALLER_SHUTDOWN_ELAPSED_MS=$($shutdownTimer.ElapsedMilliseconds)"
 } finally {
     if ($null -ne $process -and -not $process.HasExited) {
         Stop-Process -Id $process.Id -ErrorAction SilentlyContinue

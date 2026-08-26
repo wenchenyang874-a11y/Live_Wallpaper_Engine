@@ -75,6 +75,28 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 const
   UninstallRegistryKey =
     'Software\Microsoft\Windows\CurrentVersion\Uninstall\{A5FD237F-05F8-4DA8-A3C3-61DA448AD7BB}_is1';
+  ApplicationWindowClass = 'LiveWallpaperEngine.Control';
+  ApplicationWindowTitle = 'Live Wallpaper Engine';
+  InstallerShutdownMessage = $8008;
+  ProcessTerminate = $0001;
+  Synchronize = $00100000;
+  WaitObject0 = $00000000;
+
+function FindWindow(lpClassName, lpWindowName: String): HWND;
+  external 'FindWindowW@user32.dll stdcall';
+function GetWindowThreadProcessId(hWnd: HWND; var ProcessId: LongWord): LongWord;
+  external 'GetWindowThreadProcessId@user32.dll stdcall';
+function PostMessage(hWnd: HWND; Msg: LongWord; wParam, lParam: Longint): Boolean;
+  external 'PostMessageW@user32.dll stdcall';
+function OpenProcess(DesiredAccess: LongWord; InheritHandle: Boolean;
+  ProcessId: LongWord): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForSingleObject(Handle: THandle; Milliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function TerminateProcess(ProcessHandle: THandle; ExitCode: LongWord): Boolean;
+  external 'TerminateProcess@kernel32.dll stdcall';
+function CloseHandle(Handle: THandle): Boolean;
+  external 'CloseHandle@kernel32.dll stdcall';
 
 function ExistingInstallationFound(): Boolean;
 begin
@@ -111,4 +133,63 @@ begin
     'Live Wallpaper Engine is already installed. Overwrite it?' + #13#10 +
     'Select No to exit Setup.',
     mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
+end;
+
+function ShutdownApplicationForUpgrade(): String;
+var
+  ApplicationWindow: HWND;
+  ProcessId: LongWord;
+  ProcessHandle: THandle;
+begin
+  Result := '';
+  ApplicationWindow := FindWindow(
+    ApplicationWindowClass, ApplicationWindowTitle);
+  if ApplicationWindow = 0 then
+    Exit;
+
+  ProcessId := 0;
+  if GetWindowThreadProcessId(ApplicationWindow, ProcessId) = 0 then
+  begin
+    Result := '无法识别正在运行的 Live Wallpaper Engine 进程，请手动退出后重试。';
+    Exit;
+  end;
+
+  ProcessHandle := OpenProcess(
+    ProcessTerminate or Synchronize, False, ProcessId);
+  if ProcessHandle = 0 then
+  begin
+    Result := '无法关闭正在运行的 Live Wallpaper Engine，请手动退出后重试。';
+    Exit;
+  end;
+
+  try
+    Log('Requesting Live Wallpaper Engine PID ' + IntToStr(ProcessId) +
+      ' to exit for upgrade.');
+    PostMessage(ApplicationWindow, InstallerShutdownMessage, 0, 0);
+    if WaitForSingleObject(ProcessHandle, 750) = WaitObject0 then
+    begin
+      Log('Live Wallpaper Engine exited gracefully for upgrade.');
+      Exit;
+    end;
+
+    { Versions before 1.0.0 do not understand InstallerShutdownMessage. End
+      only the process owning our stable control-window class, instead of
+      leaving Restart Manager to wait on WM_CLOSE (which hides to tray). }
+    Log('Live Wallpaper Engine PID ' + IntToStr(ProcessId) +
+      ' did not exit; terminating legacy version.');
+    if not TerminateProcess(ProcessHandle, 0) then
+    begin
+      Result := '无法结束旧版 Live Wallpaper Engine，请手动退出后重试。';
+      Exit;
+    end;
+    if WaitForSingleObject(ProcessHandle, 1250) <> WaitObject0 then
+      Result := '等待旧版 Live Wallpaper Engine 退出超时，请手动退出后重试。';
+  finally
+    CloseHandle(ProcessHandle);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := ShutdownApplicationForUpgrade();
 end;

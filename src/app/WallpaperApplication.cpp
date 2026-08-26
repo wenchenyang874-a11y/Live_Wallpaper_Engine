@@ -41,6 +41,7 @@ constexpr UINT kPlaybackFatalMessage = WM_APP + 4;
 constexpr UINT kRevealWallpaperMessage = WM_APP + 5;
 constexpr UINT kUpdateCheckResultMessage = WM_APP + 6;
 constexpr UINT kBeginUpdateCheckMessage = WM_APP + 7;
+constexpr UINT kInstallerShutdownMessage = WM_APP + 8;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT_PTR kExplorerRecoveryTimer = 1;
 constexpr UINT_PTR kPlaybackPolicyTimer = 2;
@@ -3283,6 +3284,11 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
 
             case kBeginUpdateCheckMessage:
                 BeginUpdateCheck();
+                return 0;
+
+            case kInstallerShutdownMessage:
+                core::LogInfo(L"Installer requested application shutdown.");
+                RequestExit();
                 return 0;
 
             case kTrayCallbackMessage:

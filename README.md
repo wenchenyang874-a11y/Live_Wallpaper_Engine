@@ -109,7 +109,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\build-release.ps1 -Version 1.0.0 -Unreleased
 ```
 
-安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出，确认覆盖后安装器会关闭仍在运行的旧程序再替换文件。
+安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出。确认覆盖后，安装器会先发送专用退出请求，让当前版本快速、完整地释放壁纸窗口和媒体资源；升级不支持该请求的旧版本时，安装器只会短暂等待，再结束经固定窗口类确认的目标进程，避免长时间停在“正在关闭应用程序”。
 
 正式版本使用 `vMAJOR.MINOR.PATCH` 三段式 Git tag。推送合法 tag 后，GitHub Actions 会构建 x64 安装包、生成 SHA-256 校验文件，并创建带有版本说明的 GitHub Release。最新三段式版本会标记为 [Latest Release](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest)；`v1.0.0` 起视为稳定版本。
 
