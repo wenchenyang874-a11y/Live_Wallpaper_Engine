@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cwctype>
 #include <filesystem>
 #include <iomanip>
 #include <iterator>
@@ -62,6 +63,18 @@ constexpr int kLibraryApplyCommand = 2202;
 constexpr int kLibraryOpenLocationCommand = 2203;
 constexpr int kLibraryExportCommand = 2204;
 constexpr int kLibraryRemoveCommand = 2205;
+constexpr int kLibraryAddFavoriteCommand = 2206;
+constexpr int kLibraryRemoveFavoriteCommand = 2207;
+constexpr int kLibraryRemoveFromGroupCommand = 2208;
+constexpr int kLibraryMultiSelectCommand = 2209;
+constexpr int kGroupRenameCommand = 2210;
+constexpr int kGroupDeleteCommand = 2211;
+constexpr int kBatchExportCommand = 2212;
+constexpr int kBatchRemoveFromGroupCommand = 2213;
+constexpr int kBatchAddFavoriteCommand = 2214;
+constexpr int kBatchRemoveFavoriteCommand = 2215;
+constexpr int kBatchDeleteCommand = 2216;
+constexpr int kAddToGroupCommandBase = 2400;
 constexpr int kUpdateDialogPrimaryCommand = 2300;
 constexpr int kUpdateDialogSecondaryCommand = 2301;
 constexpr wchar_t kDesktopCompatibilityMutexName[] =
@@ -79,6 +92,21 @@ constexpr COLORREF kUpdateAccentHover = RGB(112, 142, 255);
 constexpr COLORREF kUpdateText = RGB(241, 244, 250);
 constexpr COLORREF kUpdateSecondaryText = RGB(158, 168, 188);
 constexpr COLORREF kUpdateBorder = RGB(54, 63, 82);
+
+std::wstring TrimWhitespace(std::wstring value) {
+    const auto first = std::ranges::find_if_not(value, [](const wchar_t character) {
+        return std::iswspace(character) != 0;
+    });
+    const auto last = std::find_if_not(value.rbegin(), value.rend(),
+                                       [](const wchar_t character) {
+                                           return std::iswspace(character) != 0;
+                                       })
+                          .base();
+    if (first >= last) {
+        return {};
+    }
+    return std::wstring(first, last);
+}
 
 int UpdateUiScale(const HWND window, const int value) {
     return MulDiv(value, GetDpiForWindow(window), 96);
@@ -753,6 +781,13 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
         core::LogError(L"The local wallpaper library could not be initialized.",
                        libraryResult);
     }
+    const HRESULT groupsResult =
+        SUCCEEDED(libraryResult)
+            ? groupStore_.InitializeAt(wallpaperLibrary_.RootDirectory())
+            : groupStore_.Initialize();
+    if (FAILED(groupsResult)) {
+        core::LogError(L"Wallpaper groups could not be initialized.", groupsResult);
+    }
 
     taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
     if (!RegisterWindowClasses() || !CreateControlWindow() ||
@@ -1072,6 +1107,16 @@ bool WallpaperApplication::RestoreSavedWallpaperSelection() {
 
 void WallpaperApplication::RefreshLibrary() {
     std::vector<core::WallpaperItem> items = wallpaperLibrary_.Scan();
+    std::vector<std::wstring> validFileNames;
+    validFileNames.reserve(items.size());
+    for (const core::WallpaperItem& item : items) {
+        validFileNames.push_back(item.path.filename().native());
+    }
+    const HRESULT pruneResult = groupStore_.Prune(validFileNames);
+    if (FAILED(pruneResult)) {
+        core::LogError(L"Stale wallpaper group entries could not be pruned.",
+                       pruneResult);
+    }
     for (const std::wstring& activePath : ActiveWallpaperPaths()) {
         const bool alreadyListed = std::ranges::any_of(items, [&](const auto& item) {
             return SamePath(item.path.native(), activePath);
@@ -1099,9 +1144,200 @@ void WallpaperApplication::RefreshLibrary() {
             }
         }
     }
+    RefreshGroups();
     mainWindow_.SetItems(std::move(items));
     mainWindow_.SetActiveWallpapers(ActiveWallpapers());
     mainWindow_.SetSoundEnabled(soundEnabled_);
+}
+
+void WallpaperApplication::RefreshGroups(const std::wstring_view selectedGroupId) {
+    mainWindow_.SetGroups(groupStore_.Groups(), groupStore_.Favorites(),
+                          selectedGroupId);
+}
+
+void WallpaperApplication::CreateWallpaperGroup() {
+    std::wstring base = L"新分组";
+    std::wstring name = base;
+    for (std::size_t suffix = 2; std::ranges::any_of(
+             groupStore_.Groups(), [&](const core::WallpaperGroup& group) {
+                 return _wcsicmp(group.name.c_str(), name.c_str()) == 0;
+             }); ++suffix) {
+        name = base + L" " + std::to_wstring(suffix);
+    }
+    std::wstring id;
+    const HRESULT result = groupStore_.CreateGroup(name, id);
+    if (FAILED(result)) {
+        MessageBoxW(controlWindow_, L"无法新建壁纸分组。", kApplicationTitle,
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    RefreshGroups(id);
+    mainWindow_.BeginRenameSelectedGroup();
+    mainWindow_.SetStatus(L"已新建分组 · 输入名称后按 Enter 保存");
+}
+
+void WallpaperApplication::RenameWallpaperGroup() {
+    const auto rename = mainWindow_.FinishGroupRename();
+    if (!rename.has_value()) {
+        return;
+    }
+    const std::wstring name = TrimWhitespace(rename->second);
+    const HRESULT result = groupStore_.RenameGroup(rename->first, name);
+    if (FAILED(result)) {
+        MessageBoxW(controlWindow_,
+                    L"分组名称不能为空、不能重复，且最多 64 个字符。",
+                    kApplicationTitle, MB_OK | MB_ICONWARNING);
+        RefreshGroups(rename->first);
+        return;
+    }
+    RefreshGroups(rename->first);
+    mainWindow_.SetStatus(L"分组已重命名 · " + name);
+}
+
+void WallpaperApplication::DeleteWallpaperGroup() {
+    const auto group = mainWindow_.SelectedCustomGroup();
+    if (!group.has_value()) {
+        return;
+    }
+    const std::wstring question = L"确定删除分组“" + group->name +
+                                  L"”吗？\r\n\r\n壁纸文件不会被删除。";
+    if (MessageBoxW(controlWindow_, question.c_str(), kApplicationTitle,
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+    const HRESULT result = groupStore_.DeleteGroup(group->id);
+    if (FAILED(result)) {
+        MessageBoxW(controlWindow_, L"无法删除该分组。", kApplicationTitle,
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    RefreshGroups(ModernMainWindow::AllGroupId);
+    mainWindow_.SetStatus(L"已删除分组 · 壁纸文件保持不变");
+}
+
+void WallpaperApplication::CommitGroupOrder() {
+    const auto order = mainWindow_.TakePendingGroupOrder();
+    if (!order.has_value()) {
+        return;
+    }
+    const std::wstring selected = mainWindow_.CurrentGroupId();
+    const HRESULT result = groupStore_.ReorderGroups(*order);
+    if (FAILED(result)) {
+        MessageBoxW(controlWindow_, L"分组顺序保存失败。", kApplicationTitle,
+                    MB_OK | MB_ICONERROR);
+    }
+    RefreshGroups(selected);
+    if (SUCCEEDED(result)) {
+        mainWindow_.SetStatus(L"分组顺序已保存");
+    }
+}
+
+void WallpaperApplication::AddWallpapersToGroup(
+    const std::span<const core::WallpaperItem> items,
+    const std::wstring_view groupId) {
+    std::vector<std::wstring> fileNames;
+    for (const core::WallpaperItem& item : items) {
+        if (!item.external) {
+            fileNames.push_back(item.path.filename().native());
+        }
+    }
+    if (fileNames.empty()) {
+        return;
+    }
+    const HRESULT result = groupStore_.AddToGroup(groupId, fileNames);
+    if (FAILED(result)) {
+        MessageBoxW(controlWindow_, L"无法把所选壁纸添加到分组。",
+                    kApplicationTitle, MB_OK | MB_ICONERROR);
+        return;
+    }
+    RefreshGroups(mainWindow_.CurrentGroupId());
+    mainWindow_.SetStatus(L"已将 " + std::to_wstring(fileNames.size()) +
+                          L" 张壁纸添加到分组");
+}
+
+void WallpaperApplication::RemoveWallpapersFromCurrentGroup(
+    const std::span<const core::WallpaperItem> items) {
+    if (mainWindow_.CurrentGroupIsAll()) {
+        return;
+    }
+    std::vector<std::wstring> fileNames;
+    for (const auto& item : items) {
+        if (!item.external) {
+            fileNames.push_back(item.path.filename().native());
+        }
+    }
+    HRESULT result = S_OK;
+    if (mainWindow_.CurrentGroupIsFavorites()) {
+        result = groupStore_.SetFavorites(fileNames, false);
+    } else {
+        result = groupStore_.RemoveFromGroup(mainWindow_.CurrentGroupId(),
+                                             fileNames);
+    }
+    if (FAILED(result)) {
+        MessageBoxW(controlWindow_, L"无法从当前分组移除所选壁纸。",
+                    kApplicationTitle, MB_OK | MB_ICONERROR);
+        return;
+    }
+    RefreshGroups(mainWindow_.CurrentGroupId());
+    mainWindow_.EndExportSelection();
+    mainWindow_.SetStatus(L"已从当前分组移除 " +
+                          std::to_wstring(fileNames.size()) + L" 张壁纸");
+}
+
+void WallpaperApplication::SetWallpapersFavorite(
+    const std::span<const core::WallpaperItem> items, const bool favorite) {
+    std::vector<std::wstring> fileNames;
+    for (const auto& item : items) {
+        if (!item.external) {
+            fileNames.push_back(item.path.filename().native());
+        }
+    }
+    const HRESULT result = groupStore_.SetFavorites(fileNames, favorite);
+    if (FAILED(result)) {
+        MessageBoxW(controlWindow_, L"最爱壁纸保存失败。", kApplicationTitle,
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    RefreshGroups(mainWindow_.CurrentGroupId());
+    mainWindow_.SetStatus(
+        std::wstring(favorite ? L"已添加到最爱 · " : L"已从最爱移除 · ") +
+        std::to_wstring(fileNames.size()) + L" 张壁纸");
+}
+
+void WallpaperApplication::DeleteWallpapers(
+    const std::span<const core::WallpaperItem> items) {
+    std::vector<core::WallpaperItem> localItems;
+    for (const auto& item : items) {
+        if (!item.external) {
+            localItems.push_back(item);
+        }
+    }
+    if (localItems.empty()) {
+        return;
+    }
+    const std::wstring question = L"确定从“全部壁纸”中删除选中的 " +
+                                  std::to_wstring(localItems.size()) +
+                                  L" 张壁纸吗？\r\n\r\n只删除软件本地库中的副本，源文件不受影响。";
+    if (MessageBoxW(controlWindow_, question.c_str(), kApplicationTitle,
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+    std::size_t removed = 0;
+    for (const auto& item : localItems) {
+        if (std::ranges::any_of(assignments_, [&](const auto& assignment) {
+                return SamePath(assignment.wallpaperPath, item.path.native());
+            })) {
+            CancelWallpaper(item, true);
+        }
+        if (SUCCEEDED(wallpaperLibrary_.Remove(item))) {
+            groupStore_.RemoveWallpaperKey(item.path.filename().native());
+            ++removed;
+        }
+    }
+    mainWindow_.EndExportSelection();
+    RefreshLibrary();
+    mainWindow_.SetStatus(L"已从本地壁纸库删除 " + std::to_wstring(removed) +
+                          L" 张壁纸");
 }
 
 void WallpaperApplication::ChooseImport() {
@@ -1233,12 +1469,12 @@ void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths) {
 
 void WallpaperApplication::ChooseExport() {
     if (wallpaperLibrary_.Scan().empty()) {
-        MessageBoxW(controlWindow_, L"“我的壁纸”中还没有可导出的壁纸。",
-                    kApplicationTitle, MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(controlWindow_, L"“全部壁纸”中还没有可导出的壁纸。",
+                     kApplicationTitle, MB_OK | MB_ICONINFORMATION);
         return;
     }
     mainWindow_.BeginExportSelection();
-    mainWindow_.SetStatus(L"请选择要导出的壁纸，可全选或取消全选");
+    mainWindow_.SetStatus(L"已进入多选 · 可批量分组、收藏、导出或删除");
 }
 
 void WallpaperApplication::ExportWallpapers(
@@ -1364,7 +1600,7 @@ void WallpaperApplication::RemoveWallpaperFromLibrary(
         assignments_, [&](const core::WallpaperAssignmentSetting& assignment) {
             return SamePath(assignment.wallpaperPath, item.path.native());
         });
-    std::wstring question = L"确定从“我的壁纸”中删除“" + item.displayName +
+    std::wstring question = L"确定从“全部壁纸”中删除“" + item.displayName +
                             L"”吗？\r\n\r\n";
     if (active) {
         question += L"该壁纸正在使用，删除前会先取消应用。\r\n";
@@ -1379,15 +1615,21 @@ void WallpaperApplication::RemoveWallpaperFromLibrary(
     }
     const HRESULT result = wallpaperLibrary_.Remove(item);
     if (FAILED(result)) {
-        std::wstring message = L"无法从“我的壁纸”中删除该壁纸。\r\n\r\n";
+        std::wstring message = L"无法从“全部壁纸”中删除该壁纸。\r\n\r\n";
         message += core::HResultMessage(result);
         MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
                     MB_OK | MB_ICONERROR);
         RefreshLibrary();
         return;
     }
+    const HRESULT groupResult =
+        groupStore_.RemoveWallpaperKey(item.path.filename().native());
+    if (FAILED(groupResult)) {
+        core::LogError(L"Removed wallpaper group metadata could not be updated.",
+                       groupResult);
+    }
     RefreshLibrary();
-    mainWindow_.SetStatus(L"已从“我的壁纸”中删除 · " + item.displayName);
+    mainWindow_.SetStatus(L"已从“全部壁纸”中删除 · " + item.displayName);
 }
 
 void WallpaperApplication::CommitLibraryOrder() {
@@ -1432,6 +1674,12 @@ void WallpaperApplication::CommitWallpaperRename() {
         MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
                     MB_OK | MB_ICONERROR);
         return;
+    }
+    const HRESULT groupResult = groupStore_.ReplaceWallpaperKey(
+        source.path.filename().native(), renamed.path.filename().native());
+    if (FAILED(groupResult)) {
+        core::LogError(L"Renamed wallpaper group metadata could not be updated.",
+                       groupResult);
     }
     if (wasActive) {
         for (auto& assignment : assignments_) {
@@ -1479,11 +1727,47 @@ void WallpaperApplication::ShowLibraryContextMenu(POINT screenPoint) {
     AppendMenuW(menu, MF_STRING, kLibraryOpenLocationCommand,
                 L"打开文件所在位置");
     AppendMenuW(menu, MF_STRING, kLibraryExportCommand, L"导出分享包");
+    AppendMenuW(menu, MF_STRING, kLibraryMultiSelectCommand, L"多选");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kLibraryApplyCommand, L"应用到所选屏幕");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    HMENU addToGroup = CreatePopupMenu();
+    if (addToGroup != nullptr) {
+        if (groupStore_.Groups().empty()) {
+            AppendMenuW(addToGroup, MF_STRING | MF_GRAYED, 0, L"暂无自定义分组");
+        } else {
+            for (std::size_t index = 0; index < groupStore_.Groups().size(); ++index) {
+                const bool alreadyMember = !selected->external &&
+                    groupStore_.IsInGroup(
+                        groupStore_.Groups()[index].id,
+                        selected->path.filename().native());
+                AppendMenuW(addToGroup,
+                            MF_STRING | (alreadyMember ? MF_CHECKED : 0),
+                            kAddToGroupCommandBase + static_cast<UINT>(index),
+                            groupStore_.Groups()[index].name.c_str());
+            }
+        }
+        AppendMenuW(menu, MF_POPUP | (selected->external ? MF_GRAYED : 0),
+                    reinterpret_cast<UINT_PTR>(addToGroup), L"添加到分组");
+    }
+    const bool favorite = !selected->external && groupStore_.IsFavorite(
+        selected->path.filename().native());
+    if (!mainWindow_.CurrentGroupIsFavorites()) {
+        AppendMenuW(menu, MF_STRING | (selected->external ? MF_GRAYED : 0),
+                    favorite ? kLibraryRemoveFavoriteCommand
+                             : kLibraryAddFavoriteCommand,
+                    favorite ? L"从最爱壁纸中移除" : L"添加到最爱");
+    }
+    if (!mainWindow_.CurrentGroupIsAll()) {
+        AppendMenuW(menu, MF_STRING | (selected->external ? MF_GRAYED : 0),
+                    kLibraryRemoveFromGroupCommand,
+                    mainWindow_.CurrentGroupIsFavorites()
+                        ? L"从最爱壁纸中移除"
+                        : L"从该分组中移除");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (selected->external ? MF_GRAYED : 0),
-                kLibraryRemoveCommand, L"从我的壁纸中删除");
+                kLibraryRemoveCommand, L"从全部壁纸中删除");
     const UINT command = TrackPopupMenu(
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, screenPoint.x,
         screenPoint.y, 0, controlWindow_, nullptr);
@@ -1496,10 +1780,132 @@ void WallpaperApplication::ShowLibraryContextMenu(POINT screenPoint) {
         OpenWallpaperLocation(*selected);
     } else if (command == kLibraryExportCommand) {
         ExportWallpapers({*selected});
+    } else if (command == kLibraryMultiSelectCommand) {
+        mainWindow_.BeginExportSelection(selected->path.native());
+        mainWindow_.SetStatus(L"已进入多选 · 可批量分组、收藏、导出或删除");
     } else if (command == kLibraryApplyCommand) {
         ApplySelectedWallpaper();
+    } else if (command == kLibraryAddFavoriteCommand) {
+        SetWallpapersFavorite(std::span<const core::WallpaperItem>(&*selected, 1), true);
+    } else if (command == kLibraryRemoveFavoriteCommand) {
+        SetWallpapersFavorite(std::span<const core::WallpaperItem>(&*selected, 1), false);
+    } else if (command == kLibraryRemoveFromGroupCommand) {
+        RemoveWallpapersFromCurrentGroup(
+            std::span<const core::WallpaperItem>(&*selected, 1));
     } else if (command == kLibraryRemoveCommand) {
         RemoveWallpaperFromLibrary(*selected);
+    } else if (command >= kAddToGroupCommandBase &&
+               command < kAddToGroupCommandBase + groupStore_.Groups().size()) {
+        const auto& group =
+            groupStore_.Groups()[command - kAddToGroupCommandBase];
+        AddWallpapersToGroup(std::span<const core::WallpaperItem>(&*selected, 1),
+                             group.id);
+    }
+}
+
+void WallpaperApplication::ShowGroupContextMenu(POINT screenPoint) {
+    if (screenPoint.x == -1 && screenPoint.y == -1) {
+        const auto group = mainWindow_.SelectedCustomGroup();
+        if (!group.has_value()) {
+            return;
+        }
+        const LRESULT selection = SendMessageW(mainWindow_.GroupListControl(),
+                                               LB_GETCURSEL, 0, 0);
+        RECT item{};
+        if (selection < 0 ||
+            SendMessageW(mainWindow_.GroupListControl(), LB_GETITEMRECT, selection,
+                         reinterpret_cast<LPARAM>(&item)) == LB_ERR) {
+            return;
+        }
+        screenPoint = POINT{item.left + 20, item.bottom};
+        ClientToScreen(mainWindow_.GroupListControl(), &screenPoint);
+    } else if (!mainWindow_.SelectCustomGroupAtScreenPoint(screenPoint)) {
+        return;
+    }
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING, kGroupRenameCommand, L"重命名分组");
+    AppendMenuW(menu, MF_STRING, kGroupDeleteCommand, L"删除分组");
+    const UINT command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, screenPoint.x,
+        screenPoint.y, 0, controlWindow_, nullptr);
+    DestroyMenu(menu);
+    if (command == kGroupRenameCommand) {
+        mainWindow_.BeginRenameSelectedGroup();
+    } else if (command == kGroupDeleteCommand) {
+        DeleteWallpaperGroup();
+    }
+}
+
+void WallpaperApplication::ShowBatchActionsMenu() {
+    const std::vector<core::WallpaperItem> selected =
+        mainWindow_.SelectedExportItems();
+    if (selected.empty()) {
+        return;
+    }
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    HMENU addToGroup = CreatePopupMenu();
+    if (addToGroup != nullptr) {
+        if (groupStore_.Groups().empty()) {
+            AppendMenuW(addToGroup, MF_STRING | MF_GRAYED, 0, L"暂无自定义分组");
+        } else {
+            for (std::size_t index = 0; index < groupStore_.Groups().size(); ++index) {
+                AppendMenuW(addToGroup, MF_STRING,
+                            kAddToGroupCommandBase + static_cast<UINT>(index),
+                            groupStore_.Groups()[index].name.c_str());
+            }
+        }
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(addToGroup),
+                    L"批量添加到分组");
+    }
+    if (!mainWindow_.CurrentGroupIsFavorites()) {
+        AppendMenuW(menu, MF_STRING, kBatchAddFavoriteCommand, L"添加到最爱");
+        AppendMenuW(menu, MF_STRING, kBatchRemoveFavoriteCommand,
+                    L"从最爱中移除");
+    }
+    if (!mainWindow_.CurrentGroupIsAll()) {
+        AppendMenuW(menu, MF_STRING, kBatchRemoveFromGroupCommand,
+                    mainWindow_.CurrentGroupIsFavorites()
+                        ? L"从最爱壁纸中移除"
+                        : L"从当前分组移除");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kBatchExportCommand, L"导出分享包");
+    if (mainWindow_.CurrentGroupIsAll()) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kBatchDeleteCommand, L"从本地库删除");
+    }
+
+    RECT anchor{};
+    GetWindowRect(mainWindow_.BatchActionsControl(), &anchor);
+    const UINT command = TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_RIGHTALIGN,
+        anchor.right, anchor.bottom + 4, 0, controlWindow_, nullptr);
+    DestroyMenu(menu);
+    if (command == kBatchExportCommand) {
+        ExportWallpapers(selected);
+    } else if (command == kBatchAddFavoriteCommand) {
+        SetWallpapersFavorite(selected, true);
+        mainWindow_.EndExportSelection();
+    } else if (command == kBatchRemoveFavoriteCommand) {
+        SetWallpapersFavorite(selected, false);
+        mainWindow_.EndExportSelection();
+    } else if (command == kBatchRemoveFromGroupCommand) {
+        RemoveWallpapersFromCurrentGroup(selected);
+    } else if (command == kBatchDeleteCommand) {
+        DeleteWallpapers(selected);
+    } else if (command >= kAddToGroupCommandBase &&
+               command < kAddToGroupCommandBase + groupStore_.Groups().size()) {
+        AddWallpapersToGroup(selected,
+                             groupStore_.Groups()[command -
+                                                  kAddToGroupCommandBase]
+                                 .id);
+        mainWindow_.EndExportSelection();
     }
 }
 
@@ -2611,7 +3017,7 @@ void WallpaperApplication::ShowTrayMenu() {
     if (menu == nullptr) {
         return;
     }
-    AppendMenuW(menu, MF_STRING | MF_DEFAULT, kTrayShowCommand, L"打开我的壁纸");
+    AppendMenuW(menu, MF_STRING | MF_DEFAULT, kTrayShowCommand, L"打开全部壁纸");
     AppendMenuW(menu, MF_STRING, kTrayImportCommand, L"导入壁纸...");
     AppendMenuW(menu, MF_STRING | (soundEnabled_ ? MF_CHECKED : 0),
                 kTraySoundCommand, L"视频声音");
@@ -3047,18 +3453,33 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 }
                 if (identifier == ModernMainWindow::ExportConfirm &&
                     notification == BN_CLICKED) {
-                    ExportWallpapers(mainWindow_.SelectedExportItems());
+                    ShowBatchActionsMenu();
                     return 0;
                 }
                 if (identifier == ModernMainWindow::ExportCancel &&
                     notification == BN_CLICKED) {
                     mainWindow_.EndExportSelection();
-                    mainWindow_.SetStatus(L"已退出导出选择");
+                    mainWindow_.SetStatus(L"已退出多选");
                     return 0;
                 }
                 if (identifier == ModernMainWindow::LibraryReordered &&
                     notification == BN_CLICKED) {
                     CommitLibraryOrder();
+                    return 0;
+                }
+                if (identifier == ModernMainWindow::GroupReordered &&
+                    notification == BN_CLICKED) {
+                    CommitGroupOrder();
+                    return 0;
+                }
+                if (identifier == ModernMainWindow::GroupCreate &&
+                    notification == BN_CLICKED) {
+                    CreateWallpaperGroup();
+                    return 0;
+                }
+                if (identifier == ModernMainWindow::GroupRenameCommit &&
+                    (notification == BN_CLICKED || notification == EN_KILLFOCUS)) {
+                    RenameWallpaperGroup();
                     return 0;
                 }
                 mainWindow_.CloseTransientUi();
@@ -3093,6 +3514,12 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 if (reinterpret_cast<HWND>(wParam) ==
                     mainWindow_.ActiveLibraryControl()) {
                     ShowActiveWallpaperContextMenu(
+                        POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+                    return 0;
+                }
+                if (reinterpret_cast<HWND>(wParam) ==
+                    mainWindow_.GroupListControl()) {
+                    ShowGroupContextMenu(
                         POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
                     return 0;
                 }

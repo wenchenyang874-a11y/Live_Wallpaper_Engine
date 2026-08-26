@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include "core/Logger.h"
+#include "core/WallpaperGroupStore.h"
 #include "core/WallpaperLibrary.h"
 
 namespace lwe::core {
@@ -242,6 +243,78 @@ int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
         return 1;
     }
     LogInfo(L"SELF_TEST_LIBRARY_REORDER_PERSISTED=True");
+
+    WallpaperGroupStore groups;
+    std::wstring firstGroupId;
+    std::wstring secondGroupId;
+    result = groups.InitializeAt(sourceLibrary.RootDirectory());
+    if (SUCCEEDED(result)) {
+        result = groups.CreateGroup(L"工作", firstGroupId);
+    }
+    if (SUCCEEDED(result)) {
+        result = groups.CreateGroup(L"休闲", secondGroupId);
+    }
+    if (SUCCEEDED(result) &&
+        SUCCEEDED(groups.CreateGroup(L"工作", secondGroupId))) {
+        result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
+    const std::array<std::wstring, 2> memberNames{
+        persistedOrder[0].path.filename().native(),
+        persistedOrder[1].path.filename().native()};
+    if (SUCCEEDED(result)) {
+        result = groups.AddToGroup(firstGroupId, memberNames);
+    }
+    const std::array<std::wstring, 1> sharedMember{memberNames.front()};
+    if (SUCCEEDED(result)) {
+        result = groups.AddToGroup(secondGroupId, sharedMember);
+    }
+    if (SUCCEEDED(result)) {
+        result = groups.SetFavorite(memberNames.front(), true);
+    }
+    const std::array<std::wstring, 2> groupOrder{secondGroupId, firstGroupId};
+    if (SUCCEEDED(result)) {
+        result = groups.ReorderGroups(groupOrder);
+    }
+    WallpaperGroupStore reloadedGroups;
+    if (SUCCEEDED(result)) {
+        result = reloadedGroups.InitializeAt(sourceLibrary.RootDirectory());
+    }
+    if (FAILED(result) || reloadedGroups.Groups().size() != 2 ||
+        _wcsicmp(reloadedGroups.Groups().front().id.c_str(),
+                 secondGroupId.c_str()) != 0 ||
+        !reloadedGroups.IsFavorite(memberNames.front()) ||
+        !reloadedGroups.IsInGroup(firstGroupId, memberNames.front()) ||
+        !reloadedGroups.IsInGroup(secondGroupId, memberNames.front()) ||
+        !reloadedGroups.IsInGroup(firstGroupId, memberNames.back())) {
+        LogError(L"Wallpaper group persistence self-test failed.",
+                 FAILED(result) ? result : HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+        cleanup();
+        return 1;
+    }
+    result = reloadedGroups.RemoveFromGroup(firstGroupId, sharedMember);
+    if (FAILED(result) ||
+        reloadedGroups.IsInGroup(firstGroupId, memberNames.front()) ||
+        !reloadedGroups.IsInGroup(secondGroupId, memberNames.front())) {
+        LogError(L"Wallpaper multi-group membership self-test failed.",
+                 FAILED(result) ? result : HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+        cleanup();
+        return 1;
+    }
+    LogInfo(L"SELF_TEST_WALLPAPER_MULTI_GROUP=True");
+    result = reloadedGroups.RemoveWallpaperKey(memberNames.front());
+    const std::array<std::wstring, 1> validNames{memberNames.back()};
+    if (SUCCEEDED(result)) {
+        result = reloadedGroups.Prune(validNames);
+    }
+    if (FAILED(result) || reloadedGroups.IsFavorite(memberNames.front()) ||
+        reloadedGroups.IsInGroup(firstGroupId, memberNames.front()) ||
+        reloadedGroups.IsInGroup(secondGroupId, memberNames.front())) {
+        LogError(L"Wallpaper group cleanup self-test failed.",
+                 FAILED(result) ? result : HRESULT_FROM_WIN32(ERROR_INVALID_DATA));
+        cleanup();
+        return 1;
+    }
+    LogInfo(L"SELF_TEST_WALLPAPER_GROUPS=True");
 
     result = sourceLibrary.ExportArchive(persistedOrder, archive.native());
     std::vector<WallpaperItem> archiveItems;

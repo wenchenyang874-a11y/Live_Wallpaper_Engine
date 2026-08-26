@@ -19,6 +19,7 @@
     <ClCompile Include="src\core\Logger.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\ShareArchive.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\SettingsStore.cpp"><Filter>core</Filter></ClCompile>
+    <ClCompile Include="src\core\WallpaperGroupStore.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\WallpaperLibrary.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\core\WallpaperLibrarySelfTest.cpp"><Filter>core</Filter></ClCompile>
     <ClCompile Include="src\media\MediaProbe.cpp"><Filter>media</Filter></ClCompile>
@@ -37,6 +38,7 @@
     <ClInclude Include="src\core\Logger.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\ShareArchive.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\SettingsStore.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\core\WallpaperGroupStore.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\WallpaperLibrary.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\core\WallpaperLibrarySelfTest.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\media\MediaProbe.h"><Filter>media</Filter></ClInclude>

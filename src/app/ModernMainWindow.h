@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "core/WallpaperLibrary.h"
+#include "core/WallpaperGroupStore.h"
 
 namespace lwe::app {
 
@@ -63,11 +64,21 @@ public:
         ExportConfirm = 1117,
         ExportCancel = 1118,
         LibraryReordered = 1119,
+        GroupAll = 1120,
+        GroupFavorites = 1121,
+        GroupList = 1122,
+        GroupCreate = 1123,
+        GroupChanged = 1124,
+        GroupReordered = 1125,
+        GroupRenameCommit = 1126,
         DisplayMode = 1199,
     };
 
     static constexpr UINT_PTR AnimationTimerId = 50;
     static constexpr UINT_PTR DragScrollTimerId = 51;
+    static constexpr UINT_PTR GroupDragScrollTimerId = 52;
+    static constexpr std::wstring_view AllGroupId = L"all";
+    static constexpr std::wstring_view FavoritesGroupId = L"favorites";
 
     ModernMainWindow() = default;
     ~ModernMainWindow();
@@ -88,6 +99,9 @@ public:
     std::optional<ImportChoice> ChooseImportSource();
 
     void SetItems(std::vector<core::WallpaperItem> items);
+    void SetGroups(std::vector<core::WallpaperGroup> groups,
+                   std::vector<std::wstring> favorites,
+                   std::wstring_view selectedGroupId = {});
     void SetActiveWallpapers(std::vector<ActiveWallpaperInfo> wallpapers);
     void SetStatus(std::wstring status);
     void SetSoundEnabled(bool enabled);
@@ -96,12 +110,20 @@ public:
     [[nodiscard]] bool SpanAcrossDisplays() const noexcept;
     std::optional<core::WallpaperItem> SelectedItem() const;
     std::optional<core::WallpaperItem> SelectedActiveItem() const;
-    void BeginExportSelection();
+    void BeginExportSelection(std::wstring_view initiallySelectedPath = {});
     void EndExportSelection();
     void SelectAllVisibleForExport();
     void ClearExportSelection();
     [[nodiscard]] bool ExportSelectionActive() const noexcept;
     [[nodiscard]] std::vector<core::WallpaperItem> SelectedExportItems() const;
+    [[nodiscard]] std::wstring CurrentGroupId() const;
+    [[nodiscard]] bool CurrentGroupIsAll() const noexcept;
+    [[nodiscard]] bool CurrentGroupIsFavorites() const noexcept;
+    [[nodiscard]] std::optional<core::WallpaperGroup> SelectedCustomGroup() const;
+    std::optional<std::vector<std::wstring>> TakePendingGroupOrder();
+    bool SelectCustomGroupAtScreenPoint(POINT screenPoint);
+    void BeginRenameSelectedGroup();
+    std::optional<std::pair<std::wstring, std::wstring>> FinishGroupRename();
     std::optional<std::vector<core::WallpaperItem>> TakePendingLibraryOrder();
     bool SelectItemAtScreenPoint(POINT screenPoint);
     bool SelectActiveItemAtScreenPoint(POINT screenPoint);
@@ -111,6 +133,8 @@ public:
     HWND SearchControl() const noexcept;
     HWND LibraryControl() const noexcept;
     HWND ActiveLibraryControl() const noexcept;
+    HWND GroupListControl() const noexcept;
+    HWND BatchActionsControl() const noexcept;
     [[nodiscard]] std::uint64_t LibraryDrawCount() const noexcept;
 
 private:
@@ -144,6 +168,7 @@ private:
     void DrawLibraryItem(const DRAWITEMSTRUCT& draw) const;
     void DrawActiveItem(const DRAWITEMSTRUCT& draw) const;
     void DrawDropdownItem(const DRAWITEMSTRUCT& draw) const;
+    void DrawGroupItem(const DRAWITEMSTRUCT& draw) const;
     void DrawWallpaperCard(const DRAWITEMSTRUCT& draw,
                             const core::WallpaperItem& item, bool active,
                             std::wstring_view displayLabel,
@@ -160,6 +185,15 @@ private:
     bool HitActiveCancelButton(POINT clientPoint, UINT& itemIndex) const;
     void ToggleExportSelectionAt(UINT visibleIndex);
     void UpdateExportSelectionControls();
+    void SelectGroup(std::wstring_view groupId);
+    bool ItemBelongsToCurrentGroup(const core::WallpaperItem& item) const;
+    void RefreshGroupItems();
+    void BeginGroupDrag(POINT clientPoint);
+    void UpdateGroupDrag(POINT clientPoint);
+    void UpdateGroupDragTarget(POINT clientPoint);
+    void FinishGroupDrag(POINT clientPoint);
+    void CancelGroupDrag();
+    void ScrollGroupsDuringDrag();
     void BeginLibraryDrag(POINT clientPoint);
     void UpdateLibraryDrag(POINT clientPoint);
     void FinishLibraryDrag(POINT clientPoint);
@@ -197,6 +231,11 @@ private:
     HWND exportClearAll_ = nullptr;
     HWND exportConfirm_ = nullptr;
     HWND exportCancel_ = nullptr;
+    HWND groupAll_ = nullptr;
+    HWND groupFavorites_ = nullptr;
+    HWND groupList_ = nullptr;
+    HWND groupCreate_ = nullptr;
+    HWND groupRenameEdit_ = nullptr;
     std::vector<DisplayOption> displayOptions_;
     HFONT titleFont_ = nullptr;
     HFONT headingFont_ = nullptr;
@@ -205,13 +244,18 @@ private:
     HFONT badgeFont_ = nullptr;
     HBRUSH editBrush_ = nullptr;
     HBRUSH panelBrush_ = nullptr;
+    HBRUSH sidebarBrush_ = nullptr;
     std::vector<core::WallpaperItem> items_;
+    std::vector<core::WallpaperGroup> groups_;
+    std::vector<std::wstring> favorites_;
     std::vector<std::size_t> visibleIndices_;
     std::vector<std::size_t> activeVisibleIndices_;
     std::vector<ActiveWallpaperInfo> activeWallpapers_;
     std::wstring status_ = L"准备就绪";
     std::wstring resourceUsage_ = L"CPU --\tGPU --\n内存 --\t显存 --";
     std::wstring renamingPath_;
+    std::wstring currentGroupId_ = std::wstring(AllGroupId);
+    std::wstring renamingGroupId_;
     std::unordered_map<std::wstring, HBITMAP> thumbnails_;
     FilterKind filterKind_ = FilterKind::All;
     bool soundEnabled_ = false;
@@ -226,14 +270,17 @@ private:
     int libraryHoverIndex_ = -1;
     int activeHoverIndex_ = -1;
     int dropdownHoverIndex_ = -1;
+    int groupHoverIndex_ = -1;
     int libraryBadgeHoverIndex_ = -1;
     int activeCancelHoverIndex_ = -1;
     float libraryHoverProgress_ = 0.0F;
     float activeHoverProgress_ = 0.0F;
     float dropdownHoverProgress_ = 0.0F;
+    float groupHoverProgress_ = 0.0F;
     bool libraryHoverTarget_ = false;
     bool activeHoverTarget_ = false;
     bool dropdownHoverTarget_ = false;
+    bool groupHoverTarget_ = false;
     std::unordered_set<std::wstring> exportSelectedPaths_;
     POINT libraryDragStart_{};
     int libraryDragSourceVisibleIndex_ = -1;
@@ -242,6 +289,13 @@ private:
     bool libraryDragActive_ = false;
     bool libraryDragInsertAfter_ = false;
     std::optional<std::vector<core::WallpaperItem>> pendingLibraryOrder_;
+    POINT groupDragStart_{};
+    int groupDragSourceIndex_ = -1;
+    int groupDragTargetIndex_ = -1;
+    int groupDragScrollDirection_ = 0;
+    bool groupDragActive_ = false;
+    bool groupDragInsertAfter_ = false;
+    std::optional<std::vector<std::wstring>> pendingGroupOrder_;
     mutable std::uint64_t libraryDrawCount_ = 0;
 
     void UpdateFilterSelectorText();

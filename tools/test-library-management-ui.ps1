@@ -117,9 +117,11 @@ $libraryDirectory = Join-Path $settingsDirectory 'library'
 $settingsPath = Join-Path $settingsDirectory 'settings.json'
 $legacySettingsPath = Join-Path $settingsDirectory 'settings.v1.json'
 $orderPath = Join-Path $libraryDirectory '.library-order.v1'
+$groupsPath = Join-Path $libraryDirectory '.wallpaper-groups.v1'
 $settingsSnapshot = Get-FileSnapshot $settingsPath
 $legacySettingsSnapshot = Get-FileSnapshot $legacySettingsPath
 $orderSnapshot = Get-FileSnapshot $orderPath
+$groupsSnapshot = Get-FileSnapshot $groupsPath
 $baselineWallpaper =
     (Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\Desktop' -Name WallPaper).WallPaper
 $process = $null
@@ -179,7 +181,7 @@ try {
     Assert-Visible $cancel $true 'cancel export button'
 
     $exportPrefix = -join @(
-        [char]0x5BFC, [char]0x51FA, [char]0x9009, [char]0x4E2D,
+        [char]0x6279, [char]0x91CF, [char]0x64CD, [char]0x4F5C,
         [char]0xFF08)
     $exportSuffix = [char]0xFF09
     $first = New-Object LweLibraryManagementProbe+RECT
@@ -327,6 +329,7 @@ finally {
     Restore-FileSnapshot $settingsPath $settingsSnapshot
     Restore-FileSnapshot $legacySettingsPath $legacySettingsSnapshot
     Restore-FileSnapshot $orderPath $orderSnapshot
+    Restore-FileSnapshot $groupsPath $groupsSnapshot
     $wallpaperAfter =
         (Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\Desktop' -Name WallPaper).WallPaper
     if ($wallpaperAfter -ne $baselineWallpaper) {

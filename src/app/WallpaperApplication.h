@@ -18,6 +18,7 @@
 #include "app/ModernMainWindow.h"
 #include "app/UpdateChecker.h"
 #include "core/SettingsStore.h"
+#include "core/WallpaperGroupStore.h"
 #include "core/WallpaperLibrary.h"
 #include "media/MediaTypes.h"
 #include "media/image/GifPlayer.h"
@@ -74,6 +75,20 @@ private:
 
     bool RestoreSavedWallpaperSelection();
     void RefreshLibrary();
+    void RefreshGroups(std::wstring_view selectedGroupId = {});
+    void CreateWallpaperGroup();
+    void RenameWallpaperGroup();
+    void DeleteWallpaperGroup();
+    void CommitGroupOrder();
+    void ShowGroupContextMenu(POINT screenPoint);
+    void ShowBatchActionsMenu();
+    void AddWallpapersToGroup(std::span<const core::WallpaperItem> items,
+                              std::wstring_view groupId);
+    void RemoveWallpapersFromCurrentGroup(
+        std::span<const core::WallpaperItem> items);
+    void SetWallpapersFavorite(std::span<const core::WallpaperItem> items,
+                               bool favorite);
+    void DeleteWallpapers(std::span<const core::WallpaperItem> items);
     void ChooseImport();
     void ImportPaths(const std::vector<std::wstring>& paths);
     void ChooseExport();
@@ -181,6 +196,7 @@ private:
     bool spanAcrossDisplays_ = true;
     ModernMainWindow mainWindow_;
     core::SettingsStore settingsStore_;
+    core::WallpaperGroupStore groupStore_;
     core::WallpaperLibrary wallpaperLibrary_;
     media::image::WicImageLoader imageLoader_;
     render::D3DRenderer renderer_;

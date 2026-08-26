@@ -962,10 +962,14 @@ ModernMainWindow::~ModernMainWindow() {
     if (renameEdit_ != nullptr) {
         RemoveWindowSubclass(renameEdit_, &ModernMainWindow::RenameEditProcedure, 1);
     }
+    if (groupRenameEdit_ != nullptr) {
+        RemoveWindowSubclass(groupRenameEdit_, &ModernMainWindow::RenameEditProcedure, 1);
+    }
     for (const HWND control : {filter_, library_, import_, export_, sound_,
                                displayMode_, dropdownList_, activeStatus_,
                                activeList_, exportSelectAll_, exportClearAll_,
-                               exportConfirm_, exportCancel_}) {
+                               exportConfirm_, exportCancel_, groupAll_,
+                               groupFavorites_, groupList_, groupCreate_}) {
         if (control != nullptr) {
             RemoveWindowSubclass(control,
                                  &ModernMainWindow::InteractiveControlProcedure, 2);
@@ -983,6 +987,9 @@ ModernMainWindow::~ModernMainWindow() {
     }
     if (panelBrush_ != nullptr) {
         DeleteObject(panelBrush_);
+    }
+    if (sidebarBrush_ != nullptr) {
+        DeleteObject(sidebarBrush_);
     }
 }
 
@@ -1011,6 +1018,13 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
         0, 0, 1, 1, parent_,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(DropdownList)), instance,
         nullptr);
+    groupList_ = CreateWindowExW(
+        0, L"LISTBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL | LBS_NOTIFY |
+            LBS_OWNERDRAWFIXED | LBS_NOINTEGRALHEIGHT,
+        0, 0, 1, 1, parent_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(GroupList)), instance,
+        nullptr);
     activeList_ = CreateWindowExW(
         0, L"LISTBOX", L"",
         WS_CHILD | WS_CLIPSIBLINGS | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED |
@@ -1032,9 +1046,12 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     sound_ = createButton(Sound, L"声音：关闭");
     displayMode_ = createButton(DisplayMode, L"显示方式：跨屏扩展");
     activeStatus_ = createButton(ActiveStatus, L"");
+    groupAll_ = createButton(GroupAll, L"全部壁纸");
+    groupFavorites_ = createButton(GroupFavorites, L"最爱壁纸");
+    groupCreate_ = createButton(GroupCreate, L"＋  新建分组");
     exportSelectAll_ = createButton(ExportSelectAll, L"全选");
     exportClearAll_ = createButton(ExportClearAll, L"取消全选");
-    exportConfirm_ = createButton(ExportConfirm, L"导出选中（0）");
+    exportConfirm_ = createButton(ExportConfirm, L"批量操作（0）");
     exportCancel_ = createButton(ExportCancel, L"退出选择");
     for (const HWND control : {exportSelectAll_, exportClearAll_, exportConfirm_,
                                exportCancel_}) {
@@ -1044,6 +1061,10 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
         WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 1, 1,
         parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(RenameCommit)),
         instance, nullptr);
+    groupRenameEdit_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 1, 1,
+        parent_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(GroupRenameCommit)),
+        instance, nullptr);
 
     if (search_ == nullptr || filter_ == nullptr || library_ == nullptr ||
         import_ == nullptr || export_ == nullptr || sound_ == nullptr ||
@@ -1051,7 +1072,9 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
         dropdownList_ == nullptr || activeStatus_ == nullptr ||
         activeList_ == nullptr || exportSelectAll_ == nullptr ||
         exportClearAll_ == nullptr || exportConfirm_ == nullptr ||
-        exportCancel_ == nullptr) {
+        exportCancel_ == nullptr || groupAll_ == nullptr ||
+        groupFavorites_ == nullptr || groupList_ == nullptr ||
+        groupCreate_ == nullptr || groupRenameEdit_ == nullptr) {
         return false;
     }
 
@@ -1059,13 +1082,18 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     SetWindowTheme(library_, L"DarkMode_Explorer", nullptr);
     SetWindowTheme(dropdownList_, L"DarkMode_Explorer", nullptr);
     SetWindowTheme(activeList_, L"DarkMode_Explorer", nullptr);
+    SetWindowTheme(groupList_, L"DarkMode_Explorer", nullptr);
     SetWindowTheme(renameEdit_, L"DarkMode_Explorer", nullptr);
+    SetWindowTheme(groupRenameEdit_, L"DarkMode_Explorer", nullptr);
     SetWindowSubclass(renameEdit_, &ModernMainWindow::RenameEditProcedure, 1,
+                      reinterpret_cast<DWORD_PTR>(this));
+    SetWindowSubclass(groupRenameEdit_, &ModernMainWindow::RenameEditProcedure, 1,
                       reinterpret_cast<DWORD_PTR>(this));
     for (const HWND control : {filter_, library_, import_, export_, sound_,
                                displayMode_, dropdownList_, activeStatus_,
                                activeList_, exportSelectAll_, exportClearAll_,
-                               exportConfirm_, exportCancel_}) {
+                               exportConfirm_, exportCancel_, groupAll_,
+                               groupFavorites_, groupList_, groupCreate_}) {
         SetWindowSubclass(control, &ModernMainWindow::InteractiveControlProcedure, 2,
                           reinterpret_cast<DWORD_PTR>(this));
         hoverProgress_.emplace(control, 0.0F);
@@ -1076,6 +1104,7 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
 
     editBrush_ = CreateSolidBrush(kPanel);
     panelBrush_ = CreateSolidBrush(kPanel);
+    sidebarBrush_ = CreateSolidBrush(kSidebar);
     RecreateFonts();
     Layout();
     return true;
@@ -1114,11 +1143,14 @@ void ModernMainWindow::RecreateFonts() {
     for (const HWND control : {search_, filter_, library_, import_, export_, sound_,
                                displayMode_, renameEdit_, dropdownList_, activeStatus_,
                                activeList_, exportSelectAll_, exportClearAll_,
-                               exportConfirm_, exportCancel_}) {
+                               exportConfirm_, exportCancel_, groupAll_,
+                               groupFavorites_, groupList_, groupCreate_,
+                               groupRenameEdit_}) {
         SetControlFont(control, bodyFont_);
     }
     SendMessageW(library_, LB_SETITEMHEIGHT, 0, Scale(parent_, 78));
     SendMessageW(activeList_, LB_SETITEMHEIGHT, 0, Scale(parent_, 78));
+    SendMessageW(groupList_, LB_SETITEMHEIGHT, 0, Scale(parent_, 42));
 }
 
 void ModernMainWindow::Layout() {
@@ -1201,8 +1233,18 @@ void ModernMainWindow::Layout() {
     const int sidebarButtonHeight = Scale(parent_, 40);
     const int resourceBottom = height - Scale(parent_, 16);
     const int resourceTop = resourceBottom - Scale(parent_, 62);
-    MoveWindow(sound_, sidebarButtonLeft,
-               resourceTop - Scale(parent_, 12) - sidebarButtonHeight,
+    const int soundTop = resourceTop - Scale(parent_, 12) - sidebarButtonHeight;
+    const int createGroupTop = soundTop - Scale(parent_, 12) - sidebarButtonHeight;
+    MoveWindow(groupAll_, sidebarButtonLeft, Scale(parent_, 28),
+               sidebarButtonWidth, sidebarButtonHeight, TRUE);
+    MoveWindow(groupFavorites_, sidebarButtonLeft, Scale(parent_, 76),
+               sidebarButtonWidth, sidebarButtonHeight, TRUE);
+    MoveWindow(groupList_, sidebarButtonLeft, Scale(parent_, 158),
+               sidebarButtonWidth,
+               std::max(1, createGroupTop - Scale(parent_, 170)), TRUE);
+    MoveWindow(groupCreate_, sidebarButtonLeft, createGroupTop,
+               sidebarButtonWidth, sidebarButtonHeight, TRUE);
+    MoveWindow(sound_, sidebarButtonLeft, soundTop,
                sidebarButtonWidth, sidebarButtonHeight, TRUE);
 
     const int statusTop = height - Scale(parent_, 82);
@@ -1259,13 +1301,18 @@ void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
     RECT sidebar{0, 0, Scale(parent_, 216), client.bottom};
     FillRectangle(deviceContext, sidebar, kSidebar);
 
-    RECT navigation{Scale(parent_, 16), Scale(parent_, 28), Scale(parent_, 200),
-                    Scale(parent_, 74)};
-    FillRoundedRectangle(deviceContext, navigation, RGB(38, 45, 62), RGB(38, 45, 62),
-                         Scale(parent_, 12));
-    RECT navigationText = navigation;
-    navigationText.left += Scale(parent_, 18);
-    DrawTextLine(deviceContext, L"我的壁纸", navigationText, bodyFont_, kTextPrimary,
+    const HPEN groupDivider = CreatePen(
+        PS_SOLID, std::max(1, Scale(parent_, 1)),
+        BlendColor(kSidebar, kBorder, 0.78F));
+    const HGDIOBJ previousGroupPen = SelectObject(deviceContext, groupDivider);
+    MoveToEx(deviceContext, Scale(parent_, 28), Scale(parent_, 128), nullptr);
+    LineTo(deviceContext, Scale(parent_, 188), Scale(parent_, 128));
+    SelectObject(deviceContext, previousGroupPen);
+    DeleteObject(groupDivider);
+    RECT groupHeading{Scale(parent_, 26), Scale(parent_, 132),
+                      Scale(parent_, 190), Scale(parent_, 154)};
+    DrawTextLine(deviceContext, L"自定义分组", groupHeading, smallFont_,
+                 kTextSecondary,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     const RECT searchPanel = SearchPanelRectangle(parent_);
@@ -1337,6 +1384,10 @@ bool ModernMainWindow::DrawItem(const DRAWITEMSTRUCT& draw) const {
             DrawDropdownItem(target);
             return true;
         }
+        if (target.CtlID == GroupList) {
+            DrawGroupItem(target);
+            return true;
+        }
         if (target.CtlType == ODT_BUTTON) {
             DrawButton(target);
             return true;
@@ -1385,17 +1436,26 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
     COLORREF fill = kPanel;
     COLORREF outline = kBorder;
     COLORREF foreground = disabled ? RGB(90, 98, 114) : kTextPrimary;
+    const bool fixedGroupSelected =
+        (draw.CtlID == GroupAll && CurrentGroupIsAll()) ||
+        (draw.CtlID == GroupFavorites && CurrentGroupIsFavorites());
     if (draw.CtlID == Import || draw.CtlID == ExportConfirm) {
         fill = pressed ? RGB(72, 99, 207)
                        : BlendColor(kAccent, kAccentHover, hover);
+        outline = fill;
+    } else if (fixedGroupSelected) {
+        fill = BlendColor(RGB(38, 45, 62), kAccent, 0.12F);
         outline = fill;
     } else if (pressed) {
         fill = kPanelHover;
     } else {
         fill = BlendColor(kPanel, kPanelHover, hover);
     }
+    const bool sidebarControl = draw.CtlID == Sound || draw.CtlID == GroupAll ||
+                                draw.CtlID == GroupFavorites ||
+                                draw.CtlID == GroupCreate;
     FillRectangle(draw.hDC, draw.rcItem,
-                  draw.CtlID == Sound ? kSidebar : kBackground);
+                  sidebarControl ? kSidebar : kBackground);
     RECT button = draw.rcItem;
     InflateRect(&button, -1, -1);
     FillRoundedRectangle(draw.hDC, button, fill, outline, Scale(parent_, 10));
@@ -1421,6 +1481,58 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
                 centerY + (activeDrawerVisible_ ? -halfHeight : halfHeight));
         SelectObject(draw.hDC, previous);
         DeleteObject(pen);
+        return;
+    }
+    if (draw.CtlID == GroupAll || draw.CtlID == GroupFavorites) {
+        RECT icon{button.left + Scale(parent_, 13),
+                  button.top + (button.bottom - button.top - Scale(parent_, 24)) / 2,
+                  button.left + Scale(parent_, 37),
+                  button.top + (button.bottom - button.top + Scale(parent_, 24)) / 2};
+        FillRoundedRectangle(draw.hDC, icon,
+                             fixedGroupSelected
+                                 ? BlendColor(kAccent, kPanel, 0.74F)
+                                 : kPanel,
+                             fixedGroupSelected ? kAccent : kBorder,
+                             Scale(parent_, 7));
+        if (draw.CtlID == GroupFavorites) {
+            RECT heart = icon;
+            heart.top += Scale(parent_, 1);
+            DrawTextLine(draw.hDC, L"♥", heart, smallFont_,
+                         fixedGroupSelected ? kAccentHover : kTextSecondary,
+                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            const int dot = Scale(parent_, 2);
+            const int centerX = (icon.left + icon.right) / 2;
+            const int centerY = (icon.top + icon.bottom) / 2;
+            for (const POINT offset : {POINT{-4, -4}, POINT{4, -4},
+                                       POINT{-4, 4}, POINT{4, 4}}) {
+                RECT mark{centerX + Scale(parent_, offset.x) - dot,
+                          centerY + Scale(parent_, offset.y) - dot,
+                          centerX + Scale(parent_, offset.x) + dot,
+                          centerY + Scale(parent_, offset.y) + dot};
+                FillRoundedRectangle(
+                    draw.hDC, mark,
+                    fixedGroupSelected ? kAccentHover : kTextSecondary,
+                    fixedGroupSelected ? kAccentHover : kTextSecondary,
+                    Scale(parent_, 2));
+            }
+        }
+        RECT label = button;
+        label.left = icon.right + Scale(parent_, 10);
+        label.right -= Scale(parent_, 42);
+        DrawTextLine(draw.hDC, text, label, bodyFont_, foreground,
+                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        const std::wstring countText = std::to_wstring(
+            draw.CtlID == GroupAll ? items_.size() : favorites_.size());
+        RECT count{button.right - Scale(parent_, 34),
+                   button.top + (button.bottom - button.top - Scale(parent_, 22)) / 2,
+                   button.right - Scale(parent_, 10),
+                   button.top + (button.bottom - button.top + Scale(parent_, 22)) / 2};
+        FillRoundedRectangle(draw.hDC, count, kPanel,
+                             fixedGroupSelected ? kAccent : kBorder,
+                             Scale(parent_, 11));
+        DrawTextLine(draw.hDC, countText, count, badgeFont_, kTextSecondary,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
     const bool dropdown = draw.CtlID == Filter || draw.CtlID == DisplayMode;
@@ -1450,6 +1562,85 @@ void ModernMainWindow::DrawButton(const DRAWITEMSTRUCT& draw) const {
                centerY + (open ? halfHeight : -halfHeight));
         SelectObject(draw.hDC, previous);
         DeleteObject(pen);
+    }
+}
+
+void ModernMainWindow::DrawGroupItem(const DRAWITEMSTRUCT& draw) const {
+    FillRectangle(draw.hDC, draw.rcItem, kSidebar);
+    if (draw.itemID == static_cast<UINT>(-1) || draw.itemID >= groups_.size()) {
+        return;
+    }
+    RECT row = draw.rcItem;
+    row.left += Scale(parent_, 1);
+    row.right -= Scale(parent_, 1);
+    InflateRect(&row, 0, -2);
+    const bool selected = _wcsicmp(groups_[draw.itemID].id.c_str(),
+                                   currentGroupId_.c_str()) == 0;
+    const float hover = static_cast<int>(draw.itemID) == groupHoverIndex_
+                            ? groupHoverProgress_
+                            : 0.0F;
+    const COLORREF fill = selected
+                              ? BlendColor(RGB(38, 45, 62), kAccent, 0.10F)
+                              : BlendColor(kSidebar, kPanelHover, hover);
+    FillRoundedRectangle(draw.hDC, row, fill, fill, Scale(parent_, 10));
+    if (selected) {
+        RECT accent{row.left + Scale(parent_, 2), row.top + Scale(parent_, 8),
+                    row.left + Scale(parent_, 5), row.bottom - Scale(parent_, 8)};
+        FillRoundedRectangle(draw.hDC, accent, kAccent, kAccent,
+                             Scale(parent_, 3));
+    }
+    RECT icon{row.left + Scale(parent_, 13),
+              row.top + (row.bottom - row.top - Scale(parent_, 24)) / 2,
+              row.left + Scale(parent_, 37),
+              row.top + (row.bottom - row.top + Scale(parent_, 24)) / 2};
+    const COLORREF iconFill = selected
+                                  ? BlendColor(kAccent, kPanel, 0.74F)
+                                  : BlendColor(kPanel, kAccent, hover * 0.10F);
+    FillRoundedRectangle(draw.hDC, icon, iconFill,
+                         selected ? kAccent : kBorder, Scale(parent_, 7));
+    const int dot = Scale(parent_, 2);
+    const int centerX = (icon.left + icon.right) / 2;
+    const int centerY = (icon.top + icon.bottom) / 2;
+    for (const POINT offset : {POINT{-4, -4}, POINT{4, -4},
+                               POINT{-4, 4}, POINT{4, 4}}) {
+        RECT mark{centerX + Scale(parent_, offset.x) - dot,
+                  centerY + Scale(parent_, offset.y) - dot,
+                  centerX + Scale(parent_, offset.x) + dot,
+                  centerY + Scale(parent_, offset.y) + dot};
+        FillRoundedRectangle(draw.hDC, mark,
+                             selected ? kAccentHover : kTextSecondary,
+                             selected ? kAccentHover : kTextSecondary,
+                             Scale(parent_, 2));
+    }
+    RECT label = row;
+    label.left = icon.right + Scale(parent_, 10);
+    label.right -= Scale(parent_, 42);
+    DrawTextLine(draw.hDC, groups_[draw.itemID].name, label, bodyFont_,
+                 kTextPrimary,
+                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    const std::wstring countText =
+        std::to_wstring(groups_[draw.itemID].fileNames.size());
+    RECT count{row.right - Scale(parent_, 34),
+               row.top + (row.bottom - row.top - Scale(parent_, 22)) / 2,
+               row.right - Scale(parent_, 10),
+               row.top + (row.bottom - row.top + Scale(parent_, 22)) / 2};
+    FillRoundedRectangle(draw.hDC, count,
+                         selected ? BlendColor(kAccent, kPanel, 0.80F) : kPanel,
+                         selected ? BlendColor(kAccent, kBorder, 0.35F) : kBorder,
+                         Scale(parent_, 11));
+    DrawTextLine(draw.hDC, countText, count, badgeFont_,
+                 selected ? kTextPrimary : kTextSecondary,
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (groupDragActive_ &&
+        static_cast<int>(draw.itemID) == groupDragTargetIndex_) {
+        const int y = groupDragInsertAfter_ ? draw.rcItem.bottom - Scale(parent_, 2)
+                                            : draw.rcItem.top + Scale(parent_, 2);
+        const HPEN marker = CreatePen(PS_SOLID, Scale(parent_, 2), kAccent);
+        const HGDIOBJ previous = SelectObject(draw.hDC, marker);
+        MoveToEx(draw.hDC, draw.rcItem.left + Scale(parent_, 8), y, nullptr);
+        LineTo(draw.hDC, draw.rcItem.right - Scale(parent_, 8), y);
+        SelectObject(draw.hDC, previous);
+        DeleteObject(marker);
     }
 }
 
@@ -1754,10 +1945,16 @@ void ModernMainWindow::DrawDropdownItem(const DRAWITEMSTRUCT& draw) const {
 
 HBRUSH ModernMainWindow::ColorControl(const HDC deviceContext, const HWND control) const {
     SetBkMode(deviceContext, TRANSPARENT);
-    if (control == search_ || control == renameEdit_) {
+    if (control == search_ || control == renameEdit_ ||
+        control == groupRenameEdit_) {
         SetTextColor(deviceContext, kTextPrimary);
         SetBkColor(deviceContext, kPanel);
         return editBrush_;
+    }
+    if (control == groupList_) {
+        SetTextColor(deviceContext, kTextPrimary);
+        SetBkColor(deviceContext, kSidebar);
+        return sidebarBrush_;
     }
     SetTextColor(deviceContext, kTextPrimary);
     SetBkColor(deviceContext, kPanel);
@@ -1785,6 +1982,23 @@ bool ModernMainWindow::HandleFilterCommand(const WORD controlId,
     if (controlId == ActiveStatus) {
         if (notificationCode == BN_CLICKED || notificationCode == BN_DBLCLK) {
             ToggleActiveDrawer();
+        }
+        return true;
+    }
+    if (controlId == GroupAll &&
+        (notificationCode == BN_CLICKED || notificationCode == BN_DBLCLK)) {
+        SelectGroup(AllGroupId);
+        return true;
+    }
+    if (controlId == GroupFavorites &&
+        (notificationCode == BN_CLICKED || notificationCode == BN_DBLCLK)) {
+        SelectGroup(FavoritesGroupId);
+        return true;
+    }
+    if (controlId == GroupList && notificationCode == LBN_SELCHANGE) {
+        const LRESULT selection = SendMessageW(groupList_, LB_GETCURSEL, 0, 0);
+        if (selection >= 0 && static_cast<std::size_t>(selection) < groups_.size()) {
+            SelectGroup(groups_[static_cast<std::size_t>(selection)].id);
         }
         return true;
     }
@@ -1950,6 +2164,28 @@ void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
     RefreshVisibleItems();
     RefreshActiveItems();
     UpdateExportSelectionControls();
+    InvalidateRect(groupAll_, nullptr, FALSE);
+}
+
+void ModernMainWindow::SetGroups(std::vector<core::WallpaperGroup> groups,
+                                 std::vector<std::wstring> favorites,
+                                 const std::wstring_view selectedGroupId) {
+    groups_ = std::move(groups);
+    favorites_ = std::move(favorites);
+    if (!selectedGroupId.empty()) {
+        currentGroupId_ = selectedGroupId;
+    }
+    const bool currentExists = CurrentGroupIsAll() || CurrentGroupIsFavorites() ||
+        std::ranges::any_of(groups_, [&](const core::WallpaperGroup& group) {
+            return _wcsicmp(group.id.c_str(), currentGroupId_.c_str()) == 0;
+        });
+    if (!currentExists) {
+        currentGroupId_ = AllGroupId;
+    }
+    RefreshGroupItems();
+    RefreshVisibleItems();
+    InvalidateRect(groupAll_, nullptr, FALSE);
+    InvalidateRect(groupFavorites_, nullptr, FALSE);
 }
 
 void ModernMainWindow::SetActiveWallpapers(
@@ -2063,7 +2299,8 @@ std::optional<core::WallpaperItem> ModernMainWindow::SelectedActiveItem() const 
     return items_[activeVisibleIndices_[static_cast<std::size_t>(selection)]];
 }
 
-void ModernMainWindow::BeginExportSelection() {
+void ModernMainWindow::BeginExportSelection(
+    const std::wstring_view initiallySelectedPath) {
     if (exportSelectionMode_) {
         return;
     }
@@ -2072,6 +2309,9 @@ void ModernMainWindow::BeginExportSelection() {
     CancelRename();
     exportSelectionMode_ = true;
     exportSelectedPaths_.clear();
+    if (!initiallySelectedPath.empty()) {
+        exportSelectedPaths_.emplace(initiallySelectedPath);
+    }
     UpdateExportSelectionControls();
     Layout();
     InvalidateRect(library_, nullptr, FALSE);
@@ -2133,9 +2373,9 @@ void ModernMainWindow::UpdateExportSelectionControls() {
     if (exportConfirm_ == nullptr) {
         return;
     }
-    const std::wstring label = L"导出选中（" +
-                               std::to_wstring(exportSelectedPaths_.size()) +
-                               L"）";
+    const std::wstring label = L"批量操作（" +
+                                std::to_wstring(exportSelectedPaths_.size()) +
+                                L"）";
     SetWindowTextW(exportConfirm_, label.c_str());
     EnableWindow(exportConfirm_, !exportSelectedPaths_.empty());
     EnableWindow(exportClearAll_, !exportSelectedPaths_.empty());
@@ -2143,6 +2383,93 @@ void ModernMainWindow::UpdateExportSelectionControls() {
     InvalidateRect(exportConfirm_, nullptr, FALSE);
     InvalidateRect(exportClearAll_, nullptr, FALSE);
     InvalidateRect(exportSelectAll_, nullptr, FALSE);
+}
+
+std::wstring ModernMainWindow::CurrentGroupId() const {
+    return currentGroupId_;
+}
+
+bool ModernMainWindow::CurrentGroupIsAll() const noexcept {
+    return _wcsicmp(currentGroupId_.c_str(), L"all") == 0;
+}
+
+bool ModernMainWindow::CurrentGroupIsFavorites() const noexcept {
+    return _wcsicmp(currentGroupId_.c_str(), L"favorites") == 0;
+}
+
+std::optional<core::WallpaperGroup> ModernMainWindow::SelectedCustomGroup() const {
+    const auto found = std::ranges::find_if(
+        groups_, [&](const core::WallpaperGroup& group) {
+            return _wcsicmp(group.id.c_str(), currentGroupId_.c_str()) == 0;
+        });
+    return found == groups_.end() ? std::nullopt
+                                  : std::optional<core::WallpaperGroup>(*found);
+}
+
+std::optional<std::vector<std::wstring>>
+ModernMainWindow::TakePendingGroupOrder() {
+    std::optional order = std::move(pendingGroupOrder_);
+    pendingGroupOrder_.reset();
+    return order;
+}
+
+bool ModernMainWindow::SelectCustomGroupAtScreenPoint(POINT screenPoint) {
+    if (!ScreenToClient(groupList_, &screenPoint)) {
+        return false;
+    }
+    const LRESULT hit = SendMessageW(groupList_, LB_ITEMFROMPOINT, 0,
+                                     MAKELPARAM(screenPoint.x, screenPoint.y));
+    const UINT index = LOWORD(hit);
+    if (HIWORD(hit) != 0 || index >= groups_.size()) {
+        return false;
+    }
+    SendMessageW(groupList_, LB_SETCURSEL, index, 0);
+    SelectGroup(groups_[index].id);
+    return true;
+}
+
+void ModernMainWindow::BeginRenameSelectedGroup() {
+    const auto selected = SelectedCustomGroup();
+    if (!selected.has_value()) {
+        return;
+    }
+    const auto found = std::ranges::find_if(groups_, [&](const auto& group) {
+        return _wcsicmp(group.id.c_str(), selected->id.c_str()) == 0;
+    });
+    if (found == groups_.end()) {
+        return;
+    }
+    const LRESULT index = std::distance(groups_.begin(), found);
+    RECT item{};
+    if (SendMessageW(groupList_, LB_GETITEMRECT, index,
+                     reinterpret_cast<LPARAM>(&item)) == LB_ERR) {
+        return;
+    }
+    MapWindowPoints(groupList_, parent_, reinterpret_cast<POINT*>(&item), 2);
+    renamingGroupId_ = selected->id;
+    SetWindowTextW(groupRenameEdit_, selected->name.c_str());
+    SetWindowPos(groupRenameEdit_, HWND_TOP, item.left + Scale(parent_, 8),
+                 item.top + Scale(parent_, 5),
+                 std::max(1, static_cast<int>(item.right - item.left) -
+                                 Scale(parent_, 16)),
+                 Scale(parent_, 32), SWP_SHOWWINDOW);
+    SetFocus(groupRenameEdit_);
+    SendMessageW(groupRenameEdit_, EM_SETSEL, 0, -1);
+}
+
+std::optional<std::pair<std::wstring, std::wstring>>
+ModernMainWindow::FinishGroupRename() {
+    if (renamingGroupId_.empty() || !IsWindowVisible(groupRenameEdit_)) {
+        return std::nullopt;
+    }
+    wchar_t name[128]{};
+    GetWindowTextW(groupRenameEdit_, name, static_cast<int>(std::size(name)));
+    ShowWindow(groupRenameEdit_, SW_HIDE);
+    const std::wstring id = std::exchange(renamingGroupId_, {});
+    if (name[0] == L'\0') {
+        return std::nullopt;
+    }
+    return std::pair{id, std::wstring(name)};
 }
 
 bool ModernMainWindow::SelectItemAtScreenPoint(const POINT screenPoint) {
@@ -2250,6 +2577,14 @@ HWND ModernMainWindow::LibraryControl() const noexcept {
 
 HWND ModernMainWindow::ActiveLibraryControl() const noexcept {
     return activeList_;
+}
+
+HWND ModernMainWindow::GroupListControl() const noexcept {
+    return groupList_;
+}
+
+HWND ModernMainWindow::BatchActionsControl() const noexcept {
+    return exportConfirm_;
 }
 
 std::uint64_t ModernMainWindow::LibraryDrawCount() const noexcept {
@@ -2483,6 +2818,156 @@ void ModernMainWindow::CancelLibraryDrag() {
     }
 }
 
+void ModernMainWindow::BeginGroupDrag(const POINT clientPoint) {
+    const LRESULT hit = SendMessageW(groupList_, LB_ITEMFROMPOINT, 0,
+                                     MAKELPARAM(clientPoint.x, clientPoint.y));
+    const UINT index = LOWORD(hit);
+    if (HIWORD(hit) != 0 || index >= groups_.size()) {
+        groupDragSourceIndex_ = -1;
+        return;
+    }
+    groupDragStart_ = clientPoint;
+    groupDragSourceIndex_ = static_cast<int>(index);
+    groupDragTargetIndex_ = static_cast<int>(index);
+    groupDragScrollDirection_ = 0;
+    groupDragActive_ = false;
+    groupDragInsertAfter_ = false;
+}
+
+void ModernMainWindow::UpdateGroupDrag(const POINT clientPoint) {
+    if (groupDragSourceIndex_ < 0) {
+        return;
+    }
+    if (!groupDragActive_) {
+        if (std::abs(clientPoint.x - groupDragStart_.x) <
+                std::max(4, GetSystemMetrics(SM_CXDRAG)) &&
+            std::abs(clientPoint.y - groupDragStart_.y) <
+                std::max(4, GetSystemMetrics(SM_CYDRAG))) {
+            return;
+        }
+        SetCapture(groupList_);
+        groupDragActive_ = true;
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+    }
+    RECT client{};
+    GetClientRect(groupList_, &client);
+    const int edge = Scale(parent_, 28);
+    const int nextDirection = clientPoint.y < client.top + edge
+                                  ? -1
+                                  : (clientPoint.y > client.bottom - edge ? 1 : 0);
+    if (nextDirection != groupDragScrollDirection_) {
+        groupDragScrollDirection_ = nextDirection;
+        if (nextDirection == 0) {
+            KillTimer(groupList_, GroupDragScrollTimerId);
+        } else {
+            SetTimer(groupList_, GroupDragScrollTimerId, 60, nullptr);
+        }
+    }
+    UpdateGroupDragTarget(clientPoint);
+}
+
+void ModernMainWindow::UpdateGroupDragTarget(POINT clientPoint) {
+    if (!groupDragActive_ || groups_.empty()) {
+        return;
+    }
+    RECT client{};
+    GetClientRect(groupList_, &client);
+    clientPoint.x = std::clamp(clientPoint.x, client.left,
+                               std::max(client.left, client.right - 1));
+    clientPoint.y = std::clamp(clientPoint.y, client.top,
+                               std::max(client.top, client.bottom - 1));
+    const LRESULT hit = SendMessageW(groupList_, LB_ITEMFROMPOINT, 0,
+                                     MAKELPARAM(clientPoint.x, clientPoint.y));
+    const UINT index = LOWORD(hit);
+    if (index >= groups_.size()) {
+        return;
+    }
+    RECT item{};
+    if (SendMessageW(groupList_, LB_GETITEMRECT, index,
+                     reinterpret_cast<LPARAM>(&item)) == LB_ERR) {
+        return;
+    }
+    const bool insertAfter = clientPoint.y >= (item.top + item.bottom) / 2;
+    if (groupDragTargetIndex_ == static_cast<int>(index) &&
+        groupDragInsertAfter_ == insertAfter) {
+        return;
+    }
+    groupDragTargetIndex_ = static_cast<int>(index);
+    groupDragInsertAfter_ = insertAfter;
+    InvalidateRect(groupList_, nullptr, FALSE);
+}
+
+void ModernMainWindow::FinishGroupDrag(const POINT clientPoint) {
+    UpdateGroupDragTarget(clientPoint);
+    if (!groupDragActive_ || groupDragSourceIndex_ < 0 ||
+        groupDragTargetIndex_ < 0 ||
+        static_cast<std::size_t>(groupDragSourceIndex_) >= groups_.size() ||
+        static_cast<std::size_t>(groupDragTargetIndex_) >= groups_.size()) {
+        CancelGroupDrag();
+        return;
+    }
+    std::vector<std::wstring> order;
+    order.reserve(groups_.size());
+    for (const auto& group : groups_) {
+        order.push_back(group.id);
+    }
+    std::wstring moving = order[static_cast<std::size_t>(groupDragSourceIndex_)];
+    order.erase(order.begin() + groupDragSourceIndex_);
+    std::size_t insertion = static_cast<std::size_t>(groupDragTargetIndex_) +
+                            (groupDragInsertAfter_ ? 1U : 0U);
+    if (static_cast<std::size_t>(groupDragSourceIndex_) < insertion) {
+        --insertion;
+    }
+    insertion = std::min(insertion, order.size());
+    const bool changed = insertion != static_cast<std::size_t>(groupDragSourceIndex_);
+    order.insert(order.begin() + static_cast<std::ptrdiff_t>(insertion),
+                 std::move(moving));
+    CancelGroupDrag();
+    if (changed) {
+        pendingGroupOrder_ = std::move(order);
+        PostMessageW(parent_, WM_COMMAND,
+                     MAKEWPARAM(GroupReordered, BN_CLICKED),
+                     reinterpret_cast<LPARAM>(groupList_));
+    }
+}
+
+void ModernMainWindow::CancelGroupDrag() {
+    groupDragSourceIndex_ = -1;
+    groupDragTargetIndex_ = -1;
+    groupDragScrollDirection_ = 0;
+    groupDragActive_ = false;
+    groupDragInsertAfter_ = false;
+    KillTimer(groupList_, GroupDragScrollTimerId);
+    if (GetCapture() == groupList_) {
+        ReleaseCapture();
+    }
+    InvalidateRect(groupList_, nullptr, FALSE);
+}
+
+void ModernMainWindow::ScrollGroupsDuringDrag() {
+    if (!groupDragActive_ || groupDragScrollDirection_ == 0) {
+        return;
+    }
+    const int count = static_cast<int>(groups_.size());
+    const int top = static_cast<int>(SendMessageW(groupList_, LB_GETTOPINDEX, 0, 0));
+    RECT client{};
+    GetClientRect(groupList_, &client);
+    const int rowHeight = std::max(
+        1, static_cast<int>(SendMessageW(groupList_, LB_GETITEMHEIGHT, 0, 0)));
+    const int visibleRows = std::max(
+        1, (static_cast<int>(client.bottom) + rowHeight - 1) / rowHeight);
+    const int next = std::clamp(top + groupDragScrollDirection_, 0,
+                                std::max(0, count - visibleRows));
+    if (next != top) {
+        SendMessageW(groupList_, LB_SETTOPINDEX, next, 0);
+        InvalidateRect(groupList_, nullptr, FALSE);
+    }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    ScreenToClient(groupList_, &cursor);
+    UpdateGroupDragTarget(cursor);
+}
+
 LRESULT CALLBACK ModernMainWindow::RenameEditProcedure(
     const HWND window, const UINT message, const WPARAM wParam, const LPARAM lParam,
     const UINT_PTR, const DWORD_PTR referenceData) {
@@ -2490,12 +2975,21 @@ LRESULT CALLBACK ModernMainWindow::RenameEditProcedure(
     if (self != nullptr && message == WM_KEYDOWN) {
         if (wParam == VK_RETURN) {
             PostMessageW(self->parent_, WM_COMMAND,
-                         MAKEWPARAM(RenameCommit, BN_CLICKED),
+                         MAKEWPARAM(window == self->groupRenameEdit_
+                                        ? GroupRenameCommit
+                                        : RenameCommit,
+                                    BN_CLICKED),
                          reinterpret_cast<LPARAM>(window));
             return 0;
         }
         if (wParam == VK_ESCAPE) {
-            self->CancelRename();
+            if (window == self->groupRenameEdit_) {
+                ShowWindow(self->groupRenameEdit_, SW_HIDE);
+                self->renamingGroupId_.clear();
+                SetFocus(self->groupList_);
+            } else {
+                self->CancelRename();
+            }
             return 0;
         }
     }
@@ -2516,9 +3010,15 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
     if (message == WM_LBUTTONDOWN && window == self->library_) {
         self->BeginLibraryDrag(
             POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+    } else if (message == WM_LBUTTONDOWN && window == self->groupList_) {
+        self->BeginGroupDrag(
+            POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
     } else if (message == WM_MOUSEMOVE) {
-        TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
-        TrackMouseEvent(&tracking);
+        POINT cursor{};
+        if (GetCursorPos(&cursor) && WindowFromPoint(cursor) == window) {
+            TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
+            TrackMouseEvent(&tracking);
+        }
         const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         if (window == self->library_ && (wParam & MK_LBUTTON) != 0 &&
             self->libraryDragSourceVisibleIndex_ >= 0) {
@@ -2527,8 +3027,15 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
                 return 0;
             }
         }
+        if (window == self->groupList_ && (wParam & MK_LBUTTON) != 0 &&
+            self->groupDragSourceIndex_ >= 0) {
+            self->UpdateGroupDrag(point);
+            if (self->groupDragActive_) {
+                return 0;
+            }
+        }
         if (window == self->library_ || window == self->activeList_ ||
-            window == self->dropdownList_) {
+            window == self->dropdownList_ || window == self->groupList_) {
             self->SetListHovered(window, point, true);
             // The stock list box repaints owner-draw rows while processing
             // ordinary mouse movement even though selection did not change.
@@ -2542,7 +3049,7 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         }
     } else if (message == WM_MOUSELEAVE) {
         if (window == self->library_ || window == self->activeList_ ||
-            window == self->dropdownList_) {
+            window == self->dropdownList_ || window == self->groupList_) {
             self->SetListHovered(window, POINT{}, false);
         } else {
             self->SetControlHovered(window, false);
@@ -2555,10 +3062,15 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         }
         self->CancelLibraryDrag();
         UINT index = 0;
-        if (self->HitLibraryExportCheckbox(point, index)) {
-            SendMessageW(window, LB_SETCURSEL, index, 0);
-            self->ToggleExportSelectionAt(index);
-            return 0;
+        if (self->exportSelectionMode_) {
+            const LRESULT hit = SendMessageW(
+                window, LB_ITEMFROMPOINT, 0, MAKELPARAM(point.x, point.y));
+            index = LOWORD(hit);
+            if (HIWORD(hit) == 0 && index < self->visibleIndices_.size()) {
+                SendMessageW(window, LB_SETCURSEL, index, 0);
+                self->ToggleExportSelectionAt(index);
+                return 0;
+            }
         }
         if (self->HitLibraryActiveBadge(point, index)) {
             SendMessageW(window, LB_SETCURSEL, index, 0);
@@ -2568,6 +3080,13 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
                          reinterpret_cast<LPARAM>(window));
             return 0;
         }
+    } else if (message == WM_LBUTTONUP && window == self->groupList_) {
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (self->groupDragActive_) {
+            self->FinishGroupDrag(point);
+            return 0;
+        }
+        self->CancelGroupDrag();
     } else if (message == WM_LBUTTONUP && window == self->activeList_) {
         UINT index = 0;
         if (self->HitActiveCancelButton(
@@ -2639,10 +3158,20 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
                wParam == DragScrollTimerId) {
         self->ScrollLibraryDuringDrag();
         return 0;
+    } else if (message == WM_TIMER && window == self->groupList_ &&
+               wParam == GroupDragScrollTimerId) {
+        self->ScrollGroupsDuringDrag();
+        return 0;
     } else if (message == WM_CAPTURECHANGED && window == self->library_) {
         self->CancelLibraryDrag();
+    } else if (message == WM_CAPTURECHANGED && window == self->groupList_) {
+        self->CancelGroupDrag();
     } else if (message == WM_SETCURSOR && window == self->library_ &&
                self->libraryDragActive_) {
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+        return TRUE;
+    } else if (message == WM_SETCURSOR && window == self->groupList_ &&
+               self->groupDragActive_) {
         SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
         return TRUE;
     } else if (message == WM_KEYDOWN && wParam == VK_ESCAPE) {
@@ -2705,6 +3234,10 @@ void ModernMainWindow::SetListHovered(const HWND list, const POINT clientPoint,
         hoveredIndex = &dropdownHoverIndex_;
         progress = &dropdownHoverProgress_;
         target = &dropdownHoverTarget_;
+    } else if (list == groupList_) {
+        hoveredIndex = &groupHoverIndex_;
+        progress = &groupHoverProgress_;
+        target = &groupHoverTarget_;
     }
 
     if (hoveredIndex == nullptr) {
@@ -2794,7 +3327,10 @@ void ModernMainWindow::HandleAnimationTimer() {
                             activeHoverIndex_) ||
                 animating;
     animating = animateList(dropdownList_, dropdownHoverProgress_,
-                            dropdownHoverTarget_, dropdownHoverIndex_) ||
+                             dropdownHoverTarget_, dropdownHoverIndex_) ||
+                 animating;
+    animating = animateList(groupList_, groupHoverProgress_, groupHoverTarget_,
+                            groupHoverIndex_) ||
                 animating;
     if (!animating && IsWindow(parent_)) {
         KillTimer(parent_, AnimationTimerId);
@@ -2910,7 +3446,8 @@ void ModernMainWindow::RefreshVisibleItems() {
     SendMessageW(library_, WM_SETREDRAW, FALSE, 0);
     SendMessageW(library_, LB_RESETCONTENT, 0, 0);
     for (std::size_t index = 0; index < items_.size(); ++index) {
-        if (!MatchesFilter(items_[index], search)) {
+        if (!ItemBelongsToCurrentGroup(items_[index]) ||
+            !MatchesFilter(items_[index], search)) {
             continue;
         }
         const LRESULT itemIndex = SendMessageW(library_, LB_ADDSTRING, 0,
@@ -2923,6 +3460,71 @@ void ModernMainWindow::RefreshVisibleItems() {
     InvalidateRect(library_, nullptr, TRUE);
     InvalidateRect(parent_, nullptr, FALSE);
     UpdateExportSelectionControls();
+}
+
+void ModernMainWindow::SelectGroup(const std::wstring_view groupId) {
+    if (_wcsicmp(currentGroupId_.c_str(), std::wstring(groupId).c_str()) == 0) {
+        return;
+    }
+    if (exportSelectionMode_) {
+        EndExportSelection();
+    }
+    currentGroupId_ = groupId;
+    if (CurrentGroupIsAll() || CurrentGroupIsFavorites()) {
+        SendMessageW(groupList_, LB_SETCURSEL, static_cast<WPARAM>(-1), 0);
+    } else {
+        const auto found = std::ranges::find_if(groups_, [&](const auto& group) {
+            return _wcsicmp(group.id.c_str(), currentGroupId_.c_str()) == 0;
+        });
+        if (found != groups_.end()) {
+            SendMessageW(groupList_, LB_SETCURSEL,
+                         std::distance(groups_.begin(), found), 0);
+        }
+    }
+    RefreshVisibleItems();
+    InvalidateRect(groupAll_, nullptr, FALSE);
+    InvalidateRect(groupFavorites_, nullptr, FALSE);
+    InvalidateRect(groupList_, nullptr, FALSE);
+    PostMessageW(parent_, WM_COMMAND, MAKEWPARAM(GroupChanged, BN_CLICKED), 0);
+}
+
+bool ModernMainWindow::ItemBelongsToCurrentGroup(
+    const core::WallpaperItem& item) const {
+    if (CurrentGroupIsAll()) {
+        return true;
+    }
+    if (item.external) {
+        return false;
+    }
+    const std::wstring fileName = item.path.filename().native();
+    const auto containsName = [&](const std::vector<std::wstring>& values) {
+        return std::ranges::any_of(values, [&](const std::wstring& value) {
+            return _wcsicmp(value.c_str(), fileName.c_str()) == 0;
+        });
+    };
+    if (CurrentGroupIsFavorites()) {
+        return containsName(favorites_);
+    }
+    const auto group = std::ranges::find_if(groups_, [&](const auto& value) {
+        return _wcsicmp(value.id.c_str(), currentGroupId_.c_str()) == 0;
+    });
+    return group != groups_.end() && containsName(group->fileNames);
+}
+
+void ModernMainWindow::RefreshGroupItems() {
+    SendMessageW(groupList_, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(groupList_, LB_RESETCONTENT, 0, 0);
+    int selection = -1;
+    for (std::size_t index = 0; index < groups_.size(); ++index) {
+        SendMessageW(groupList_, LB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(L""));
+        if (_wcsicmp(groups_[index].id.c_str(), currentGroupId_.c_str()) == 0) {
+            selection = static_cast<int>(index);
+        }
+    }
+    SendMessageW(groupList_, LB_SETCURSEL, selection, 0);
+    SendMessageW(groupList_, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(groupList_, nullptr, TRUE);
 }
 
 void ModernMainWindow::RefreshActiveItems() {

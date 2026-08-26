@@ -102,6 +102,7 @@
     <ClCompile Include="src\core\Logger.cpp" />
     <ClCompile Include="src\core\ShareArchive.cpp" />
     <ClCompile Include="src\core\SettingsStore.cpp" />
+    <ClCompile Include="src\core\WallpaperGroupStore.cpp" />
     <ClCompile Include="src\core\WallpaperLibrary.cpp" />
     <ClCompile Include="src\core\WallpaperLibrarySelfTest.cpp" />
     <ClCompile Include="src\media\MediaProbe.cpp" />
@@ -120,6 +121,7 @@
     <ClInclude Include="src\core\Logger.h" />
     <ClInclude Include="src\core\ShareArchive.h" />
     <ClInclude Include="src\core\SettingsStore.h" />
+    <ClInclude Include="src\core\WallpaperGroupStore.h" />
     <ClInclude Include="src\core\WallpaperLibrary.h" />
     <ClInclude Include="src\core\WallpaperLibrarySelfTest.h" />
     <ClInclude Include="src\media\MediaProbe.h" />

@@ -4,7 +4,7 @@
 
 [下载最新版本](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest) · [查看更新记录](CHANGELOG.md) · [Apache-2.0 License](LICENSE)
 
-> 当前开发版本为 `v1.0.0`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
+> 当前开发版本为 `v1.1.0-unreleased`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
 
 ![Live Wallpaper Engine 应用预览](assets/application-preview.png)
 
@@ -14,7 +14,8 @@
 - **常见壁纸格式**：支持 JPG/JPEG、PNG、BMP、GIF，以及系统 Media Foundation 能够解码的常见视频格式。
 - **多屏自由分配**：支持跨屏扩展和分屏显示；分屏模式下，同一壁纸可应用到多个屏幕，不同屏幕也可使用不同壁纸。
 - **动态壁纸播放**：GIF 和视频循环播放，视频默认静音，可在主界面或托盘菜单中开关声音、暂停或继续播放。
-- **本地壁纸库**：提供搜索、分类筛选、缩略图、预览、重命名、定位文件、删除和拖动排序；拖到列表边缘时会自动滚动。
+- **本地壁纸库与分组**：提供全部壁纸、最爱壁纸和可排序的自定义分组；同一壁纸可加入多个分组，搜索只作用于当前分组。
+- **通用批量操作**：壁纸支持泛用多选、全选和取消全选，可批量添加到分组、收藏、导出；在全部壁纸中还可确认后批量删除。
 - **导入与分享**：可批量导入图片/视频，也可导入或导出标准 ZIP 分享包；每张壁纸独立保存为带 SHA-256 校验的 `.lwewall` 文件。
 - **播放与界面解耦**：动态壁纸由独立播放线程驱动，打开菜单、下拉框或对话框不会阻塞桌面取帧与呈现。
 - **资源状态可见**：主界面实时显示本进程的 CPU、GPU、内存和显存占用。
@@ -46,6 +47,12 @@
 
 分屏模式支持把同一壁纸分配给多个显示器，也支持逐次为不同显示器设置不同壁纸。同一壁纸用于多个屏幕时会复用解码会话，避免不必要的重复解码。
 
+## 壁纸分组
+
+“全部壁纸”和“最爱壁纸”固定显示在左侧顶部，自定义分组位于分割线下方。自定义分组可以新建、重命名、删除和拖动排序；删除分组只删除分类关系，不会删除壁纸文件。
+
+分组关系是多对多：同一张壁纸可以同时加入多个自定义分组，也可以同时加入最爱。从当前分组移除只影响该分组。右键壁纸可进入通用多选状态，随后批量添加分组、移出当前分组、收藏、导出；批量删除仅在“全部壁纸”中提供，并会再次确认。
+
 ## 壁纸分享包
 
 无论导出一张还是多张壁纸，软件都会生成一个标准 ZIP 压缩包。每张壁纸在压缩包中保持独立，多个壁纸不会被合并进同一个 `.lwewall`：
@@ -68,6 +75,7 @@
 | 壁纸库 | `%LOCALAPPDATA%\LiveWallpaperEngine\library` |
 | 设置 | `%LOCALAPPDATA%\LiveWallpaperEngine\settings.json` |
 | 自定义排序 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.library-order.v1` |
+| 最爱与壁纸分组 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.wallpaper-groups.v1` |
 | 日志 | `%LOCALAPPDATA%\LiveWallpaperEngine\logs\LiveWallpaperEngine.log` |
 
 覆盖安装和卸载程序不会主动删除当前用户的壁纸库与设置。
@@ -100,13 +108,13 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 本地构建安装包需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.0.0
+.\tools\build-release.ps1 -Version 1.1.0
 ```
 
 日常开发验证使用带有明确标记的未发布安装包：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.0.0 -Unreleased
+.\tools\build-release.ps1 -Version 1.1.0 -Unreleased
 ```
 
 安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出。确认覆盖后，安装器会先发送专用退出请求，让当前版本快速、完整地释放壁纸窗口和媒体资源；升级不支持该请求的旧版本时，安装器只会短暂等待，再结束经固定窗口类确认的目标进程，避免长时间停在“正在关闭应用程序”。
@@ -131,6 +139,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\test-video-failure-containment.ps1 -Configuration Release -VideoPath .\sample.mp4
 .\tools\test-display-mode-ui.ps1 -Configuration Release
 .\tools\test-library-management-ui.ps1 -Configuration Release
+.\tools\test-wallpaper-groups-ui.ps1 -Configuration Release
 .\tools\test-tray-controls.ps1 -Configuration Release
 .\tools\test-ui-playback-independence.ps1 -Configuration Release -VideoPath .\sample.mp4
 .\tools\test-update-check.ps1 -Configuration Release -ExpectedStatus Current
