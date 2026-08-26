@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-26
+
 ### Added
 
 - 在主窗口标题栏增加“检查更新”入口；仅在用户点击后异步查询 GitHub Latest Release，有新版本时可选择在浏览器中打开对应 Release 下载页。
