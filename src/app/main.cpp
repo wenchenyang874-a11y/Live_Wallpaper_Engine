@@ -1,5 +1,6 @@
 #include <chrono>
 #include <cwchar>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 
 #include "app/WallpaperApplication.h"
 #include "app/UpdateChecker.h"
+#include "core/CrashDiagnostics.h"
 #include "core/InstanceCoordinator.h"
 #include "core/Logger.h"
 #include "core/WallpaperLibrarySelfTest.h"
@@ -23,6 +25,8 @@ struct StartupOptions final {
     std::optional<std::wstring> libraryTestSource;
     lwe::app::updates::UpdateCheckMode updateCheckMode =
         lwe::app::updates::UpdateCheckMode::Live;
+    std::wstring crashDiagnosticsTestMode;
+    std::filesystem::path crashDiagnosticsTestDirectory;
     bool updateCheckerSelfTest = false;
 };
 
@@ -38,6 +42,10 @@ StartupOptions ParseStartupOptions() {
     constexpr std::wstring_view wallpaperPrefix = L"--test-wallpaper=";
     constexpr std::wstring_view legacyImagePrefix = L"--test-static-image=";
     constexpr std::wstring_view libraryTestPrefix = L"--test-library-package=";
+    constexpr std::wstring_view crashDiagnosticsPrefix =
+        L"--test-crash-diagnostics=";
+    constexpr std::wstring_view crashDirectoryPrefix =
+        L"--test-crash-directory=";
 
     for (int index = 1; index < argumentCount; ++index) {
         const std::wstring_view argument(arguments[index]);
@@ -48,6 +56,16 @@ StartupOptions ParseStartupOptions() {
         if (argument == L"--test-update-result=rate-limit") {
             options.updateCheckMode =
                 lwe::app::updates::UpdateCheckMode::SimulatedRateLimit;
+            continue;
+        }
+        if (argument.starts_with(crashDiagnosticsPrefix)) {
+            options.crashDiagnosticsTestMode =
+                argument.substr(crashDiagnosticsPrefix.size());
+            continue;
+        }
+        if (argument.starts_with(crashDirectoryPrefix)) {
+            options.crashDiagnosticsTestDirectory =
+                std::wstring(argument.substr(crashDirectoryPrefix.size()));
             continue;
         }
         if (argument.starts_with(libraryTestPrefix)) {
@@ -87,6 +105,53 @@ StartupOptions ParseStartupOptions() {
     return options;
 }
 
+int RunCrashDiagnosticsSelfTest(const StartupOptions& options) {
+    if (options.crashDiagnosticsTestDirectory.empty()) {
+        lwe::core::LogError(
+            L"Crash diagnostics self-test requires an isolated directory.");
+        return 2;
+    }
+
+    lwe::core::CrashDiagnostics diagnostics;
+    if (!diagnostics.InitializeForTesting(
+            options.crashDiagnosticsTestDirectory)) {
+        lwe::core::LogError(L"Crash diagnostics self-test initialization failed.");
+        return 3;
+    }
+    lwe::core::LogPreviousSession(diagnostics.PreviousSession());
+
+    if (options.crashDiagnosticsTestMode == L"crash") {
+        constexpr DWORD kTestExceptionCode = 0xE0424C57UL;
+        RaiseException(kTestExceptionCode, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+        TerminateProcess(GetCurrentProcess(), kTestExceptionCode);
+    }
+    if (options.crashDiagnosticsTestMode == L"leave-unclean") {
+        ExitProcess(77);
+    }
+
+    int exitCode = 0;
+    const lwe::core::PreviousExitStatus previousStatus =
+        diagnostics.PreviousSession().status;
+    if (options.crashDiagnosticsTestMode == L"verify-clean" &&
+        previousStatus != lwe::core::PreviousExitStatus::Clean) {
+        exitCode = 4;
+    } else if (options.crashDiagnosticsTestMode == L"verify-crash" &&
+               previousStatus != lwe::core::PreviousExitStatus::Crashed) {
+        exitCode = 5;
+    } else if (options.crashDiagnosticsTestMode == L"verify-unclean" &&
+               previousStatus != lwe::core::PreviousExitStatus::Unclean) {
+        exitCode = 6;
+    } else if (options.crashDiagnosticsTestMode != L"clean" &&
+               options.crashDiagnosticsTestMode != L"verify-clean" &&
+               options.crashDiagnosticsTestMode != L"verify-crash" &&
+               options.crashDiagnosticsTestMode != L"verify-unclean") {
+        exitCode = 7;
+    }
+
+    diagnostics.MarkCleanExit(exitCode);
+    return exitCode;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
@@ -95,6 +160,11 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
     lwe::core::LogInfo(L"Live Wallpaper Engine technical spike starting.");
 
     const StartupOptions options = ParseStartupOptions();
+    if (!options.crashDiagnosticsTestMode.empty()) {
+        const int exitCode = RunCrashDiagnosticsSelfTest(options);
+        lwe::core::ShutdownLogging();
+        return exitCode;
+    }
     if (options.updateCheckerSelfTest) {
         const int exitCode = lwe::app::updates::RunUpdateCheckerSelfTest();
         if (exitCode == 0) {
@@ -145,6 +215,14 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return 1;
     }
 
+    lwe::core::CrashDiagnostics crashDiagnostics;
+    if (crashDiagnostics.Initialize()) {
+        lwe::core::LogPreviousSession(crashDiagnostics.PreviousSession());
+    } else {
+        lwe::core::LogWarning(
+            L"Local crash diagnostics could not be initialized.");
+    }
+
     const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     int exitCode = 1;
@@ -163,5 +241,6 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (SUCCEEDED(comResult)) {
         CoUninitialize();
     }
+    crashDiagnostics.MarkCleanExit(exitCode);
     return exitCode;
 }

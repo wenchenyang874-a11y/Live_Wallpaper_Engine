@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- 增加本地崩溃诊断：未处理异常会在 `%LOCALAPPDATA%\LiveWallpaperEngine\crashes` 生成带程序版本、UTC 时间和进程 ID 的 MiniDump，自动保留最近 10 份且不会上传。
+- 增加会话退出记录：启动时写入活动会话标记，正常退出、崩溃和未正常结束会分别记录为 `clean`、`crashed`、`unclean`，下次启动时同步写入日志。
+
 ### Changed
 
 - 将“主屏”标识移到缩略图与屏幕徽标之间，继续以“主/屏”竖排且不带边框；所有“屏幕 x”徽标保持相同尺寸和文字居中对齐。

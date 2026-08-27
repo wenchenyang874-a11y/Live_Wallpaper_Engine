@@ -77,8 +77,10 @@
 | 自定义排序 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.library-order.v1` |
 | 最爱与壁纸分组 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.wallpaper-groups.v1` |
 | 日志 | `%LOCALAPPDATA%\LiveWallpaperEngine\logs\LiveWallpaperEngine.log` |
+| 上次会话状态 | `%LOCALAPPDATA%\LiveWallpaperEngine\diagnostics\last-session.v1.json` |
+| 崩溃转储 | `%LOCALAPPDATA%\LiveWallpaperEngine\crashes` |
 
-覆盖安装和卸载程序不会主动删除当前用户的壁纸库与设置。
+崩溃转储文件名包含程序版本、UTC 时间和进程 ID，最多保留最近 10 份。上述诊断数据只保存在本机，不会自动上传。覆盖安装和卸载程序不会主动删除当前用户的壁纸库与设置。
 
 ## 技术实现
 
@@ -143,11 +145,16 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\test-tray-controls.ps1 -Configuration Release
 .\tools\test-ui-playback-independence.ps1 -Configuration Release -VideoPath .\sample.mp4
 .\tools\test-update-check.ps1 -Configuration Release -ExpectedStatus Current
+.\tools\test-crash-diagnostics.ps1 -Configuration Release
 ```
 
 涉及本地设置和壁纸排序的脚本会在测试后逐字节恢复原文件。媒体和多屏脚本需要调用者提供可用样本及相应硬件环境。
 
 ## 常见问题（FAQ）
+
+### 程序意外退出后，在哪里查找诊断信息？
+
+先查看 `%LOCALAPPDATA%\LiveWallpaperEngine\diagnostics\last-session.v1.json`：`clean` 表示正常退出，`crashed` 表示捕获到未处理异常，`unclean` 表示上次运行没有留下正常退出记录，可能被强制结束、断电或遭到系统终止。捕获到异常时，对应的 `.dmp` 文件位于 `%LOCALAPPDATA%\LiveWallpaperEngine\crashes`，可连同日志一起用于定位问题；这些文件不会自动上传。
 
 ### 为什么安装目录里看起来只有一个主程序，其他电脑能运行吗？
 
