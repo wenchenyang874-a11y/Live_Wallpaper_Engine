@@ -1737,8 +1737,9 @@ void ModernMainWindow::DrawWallpaperCard(
         }
     }
 
-    int nameLeft = icon.right + Scale(parent_, 14);
+    int nameLeft = icon.right + Scale(parent_, 2);
     if (!displayBadges.empty()) {
+        const int primarySlotWidth = Scale(parent_, 12);
         const int badgeWidth = Scale(parent_, 66);
         const int badgeGap = Scale(parent_, 6);
         const int nameMinimumWidth = Scale(parent_, 130);
@@ -1747,22 +1748,19 @@ void ModernMainWindow::DrawWallpaperCard(
             nameLeft,
             nameRight - nameMinimumWidth);
         for (std::size_t index = 0; index < displayBadges.size(); ++index) {
-            if (nameLeft + badgeWidth > badgeLimit) {
+            if (nameLeft + primarySlotWidth + badgeWidth > badgeLimit) {
                 break;
             }
             const DisplayBadge& display = displayBadges[index];
             const int badgeHeight = Scale(parent_, 34);
             const int badgeTop =
                 card.top + (card.bottom - card.top - badgeHeight) / 2;
-            RECT badge{nameLeft, badgeTop, nameLeft + badgeWidth,
-                       badgeTop + badgeHeight};
+            RECT badge{nameLeft + primarySlotWidth, badgeTop,
+                        nameLeft + primarySlotWidth + badgeWidth,
+                        badgeTop + badgeHeight};
             FillRoundedRectangle(draw.hDC, badge, RGB(36, 45, 64),
                                  RGB(76, 96, 139), Scale(parent_, 8));
-            RECT badgeLabel = badge;
-            if (display.primary) {
-                badgeLabel.right -= Scale(parent_, 19);
-            }
-            DrawTextLine(draw.hDC, display.label, badgeLabel, smallFont_,
+            DrawTextLine(draw.hDC, display.label, badge, smallFont_,
                          RGB(211, 221, 244),
                          DT_CENTER | DT_VCENTER | DT_SINGLELINE |
                              DT_END_ELLIPSIS);
@@ -1770,8 +1768,8 @@ void ModernMainWindow::DrawWallpaperCard(
                 const int primaryHeight = Scale(parent_, 24);
                 const int primaryTop =
                     badge.top + (badge.bottom - badge.top - primaryHeight) / 2;
-                RECT primary{badge.right - Scale(parent_, 19), primaryTop,
-                             badge.right - Scale(parent_, 3),
+                RECT primary{nameLeft, primaryTop,
+                             nameLeft + primarySlotWidth,
                              primaryTop + primaryHeight / 2};
                 DrawTextLine(draw.hDC, L"主", primary, badgeFont_,
                              RGB(241, 103, 115),
