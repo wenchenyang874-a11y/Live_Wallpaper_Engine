@@ -24,7 +24,7 @@ struct WallpaperAssignmentSetting final {
 };
 
 struct AppSettings final {
-    static constexpr std::uint32_t kCurrentSchemaVersion = 4;
+    static constexpr std::uint32_t kCurrentSchemaVersion = 5;
 
     std::uint32_t schemaVersion = kCurrentSchemaVersion;
     std::vector<WallpaperAssignmentSetting> assignments;
@@ -33,6 +33,7 @@ struct AppSettings final {
     std::wstring displayTargets;
     bool soundEnabled = false;
     bool spanAcrossDisplays = true;
+    bool releaseVideoResourcesOnPause = true;
 };
 
 class SettingsStore final {

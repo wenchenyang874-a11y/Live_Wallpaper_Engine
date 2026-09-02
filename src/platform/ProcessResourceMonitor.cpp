@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cwctype>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -28,6 +29,11 @@ std::wstring Lowercase(std::wstring value) {
     return value;
 }
 
+bool CounterValueIsValid(const DWORD status) {
+    return status == PDH_CSTATUS_VALID_DATA ||
+           status == PDH_CSTATUS_NEW_DATA;
+}
+
 }  // namespace
 
 ProcessResourceMonitor::~ProcessResourceMonitor() {
@@ -50,17 +56,31 @@ bool ProcessResourceMonitor::Initialize() {
         previousTickMilliseconds_ = GetTickCount64();
     }
 
-    PDH_STATUS status = PdhOpenQueryW(nullptr, 0, &gpuQuery_);
-    if (status == ERROR_SUCCESS) {
+    const PDH_STATUS openStatus = PdhOpenQueryW(nullptr, 0, &gpuQuery_);
+    if (openStatus == ERROR_SUCCESS) {
         // GPU Engine is an English performance-counter object on supported
         // Windows 10/11 builds. PdhAddEnglishCounter keeps this independent of
         // the display language while the instance filter limits values to this
         // process instead of reporting whole-system GPU utilization.
-        status = PdhAddEnglishCounterW(
+        if (PdhAddEnglishCounterW(
             gpuQuery_, L"\\GPU Engine(*)\\Utilization Percentage", 0,
-            &gpuCounter_);
+            &gpuCounter_) != ERROR_SUCCESS) {
+            gpuCounter_ = nullptr;
+        }
+        if (PdhAddEnglishCounterW(
+                gpuQuery_, L"\\GPU Process Memory(*)\\Dedicated Usage", 0,
+                &dedicatedGpuMemoryCounter_) != ERROR_SUCCESS) {
+            dedicatedGpuMemoryCounter_ = nullptr;
+        }
+        if (PdhAddEnglishCounterW(
+                gpuQuery_, L"\\GPU Process Memory(*)\\Shared Usage", 0,
+                &sharedGpuMemoryCounter_) != ERROR_SUCCESS) {
+            sharedGpuMemoryCounter_ = nullptr;
+        }
     }
-    if (status == ERROR_SUCCESS) {
+    if (gpuQuery_ != nullptr &&
+        (gpuCounter_ != nullptr || dedicatedGpuMemoryCounter_ != nullptr ||
+         sharedGpuMemoryCounter_ != nullptr)) {
         PdhCollectQueryData(gpuQuery_);
     } else {
         if (gpuQuery_ != nullptr) {
@@ -74,11 +94,9 @@ bool ProcessResourceMonitor::Initialize() {
     return true;
 }
 
-ProcessResourceUsage ProcessResourceMonitor::Sample(
-    const std::optional<std::uint64_t> videoMemoryBytes) {
+ProcessResourceUsage ProcessResourceMonitor::Sample() {
     ProcessResourceUsage usage;
     usage.cpuPercent = SampleCpu();
-    usage.videoMemoryBytes = videoMemoryBytes;
 
     PROCESS_MEMORY_COUNTERS_EX memory{};
     memory.cb = sizeof(memory);
@@ -88,10 +106,20 @@ ProcessResourceUsage ProcessResourceMonitor::Sample(
         usage.workingSetBytes = memory.WorkingSetSize;
     }
 
+    if (gpuQuery_ != nullptr) {
+        PdhCollectQueryData(gpuQuery_);
+    }
     const std::optional<double> gpu = SampleGpu();
     if (gpu.has_value()) {
         usage.gpuPercent = *gpu;
         usage.gpuAvailable = true;
+    }
+    const auto dedicated = SampleGpuMemory(dedicatedGpuMemoryCounter_);
+    const auto shared = SampleGpuMemory(sharedGpuMemoryCounter_);
+    if (dedicated.has_value() && shared.has_value()) {
+        usage.dedicatedGpuMemoryBytes = *dedicated;
+        usage.sharedGpuMemoryBytes = *shared;
+        usage.gpuMemoryAvailable = true;
     }
     return usage;
 }
@@ -102,6 +130,8 @@ void ProcessResourceMonitor::Shutdown() {
     }
     gpuQuery_ = nullptr;
     gpuCounter_ = nullptr;
+    dedicatedGpuMemoryCounter_ = nullptr;
+    sharedGpuMemoryCounter_ = nullptr;
 }
 
 double ProcessResourceMonitor::SampleCpu() {
@@ -129,8 +159,7 @@ double ProcessResourceMonitor::SampleCpu() {
 }
 
 std::optional<double> ProcessResourceMonitor::SampleGpu() {
-    if (gpuQuery_ == nullptr || gpuCounter_ == nullptr ||
-        PdhCollectQueryData(gpuQuery_) != ERROR_SUCCESS) {
+    if (gpuQuery_ == nullptr || gpuCounter_ == nullptr) {
         return std::nullopt;
     }
 
@@ -156,7 +185,7 @@ std::optional<double> ProcessResourceMonitor::SampleGpu() {
     double busiestEngine = 0.0;
     for (DWORD index = 0; index < itemCount; ++index) {
         if (items[index].szName == nullptr ||
-            items[index].FmtValue.CStatus != PDH_CSTATUS_VALID_DATA) {
+            !CounterValueIsValid(items[index].FmtValue.CStatus)) {
             continue;
         }
         if (Lowercase(items[index].szName).find(processMarker) !=
@@ -170,6 +199,46 @@ std::optional<double> ProcessResourceMonitor::SampleGpu() {
         }
     }
     return std::clamp(busiestEngine, 0.0, 100.0);
+}
+
+std::optional<std::uint64_t> ProcessResourceMonitor::SampleGpuMemory(
+    const PDH_HCOUNTER counter) const {
+    if (gpuQuery_ == nullptr || counter == nullptr) {
+        return std::nullopt;
+    }
+    DWORD bufferBytes = 0;
+    DWORD itemCount = 0;
+    PDH_STATUS status = PdhGetFormattedCounterArrayW(
+        counter, PDH_FMT_LARGE, &bufferBytes, &itemCount, nullptr);
+    if (status != PDH_MORE_DATA || bufferBytes == 0) {
+        return std::nullopt;
+    }
+    std::vector<std::byte> buffer(bufferBytes);
+    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+    status = PdhGetFormattedCounterArrayW(
+        counter, PDH_FMT_LARGE, &bufferBytes, &itemCount, items);
+    if (status != ERROR_SUCCESS) {
+        return std::nullopt;
+    }
+
+    const std::wstring processMarker =
+        L"pid_" + std::to_wstring(processId_) + L"_";
+    std::uint64_t total = 0;
+    for (DWORD index = 0; index < itemCount; ++index) {
+        if (items[index].szName == nullptr ||
+            !CounterValueIsValid(items[index].FmtValue.CStatus) ||
+            Lowercase(items[index].szName).find(processMarker) ==
+                std::wstring::npos ||
+            items[index].FmtValue.largeValue < 0) {
+            continue;
+        }
+        const auto value =
+            static_cast<std::uint64_t>(items[index].FmtValue.largeValue);
+        total = value > std::numeric_limits<std::uint64_t>::max() - total
+                    ? std::numeric_limits<std::uint64_t>::max()
+                    : total + value;
+    }
+    return total;
 }
 
 }  // namespace lwe::platform

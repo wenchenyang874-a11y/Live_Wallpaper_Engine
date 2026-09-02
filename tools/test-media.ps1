@@ -141,11 +141,20 @@ try {
     [void][LweMediaProbe]::PostMessage($control, 0x0111, [IntPtr]1106, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 500
     [void][LweMediaProbe]::PostMessage($control, 0x0111, [IntPtr]1106, [IntPtr]::Zero)
+    [void][LweMediaProbe]::PostMessage($control, 0x0111, [IntPtr]2193, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 250
+    [void][LweMediaProbe]::PostMessage($control, 0x0111, [IntPtr]2193, [IntPtr]::Zero)
     # Simulate the documented WTS lock/unlock notifications without locking
     # the interactive test machine. This exercises the same message handler.
     [void][LweMediaProbe]::PostMessage($control, 0x02B1, [IntPtr]7, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 500
     [void][LweMediaProbe]::PostMessage($control, 0x02B1, [IntPtr]8, [IntPtr]::Zero)
+    # Controlled command 2194 advances the lock pause beyond the one-minute
+    # deep-pause threshold without making the test sleep for a full minute.
+    [void][LweMediaProbe]::PostMessage($control, 0x0111, [IntPtr]2194, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 500
+    [void][LweMediaProbe]::PostMessage($control, 0x02B1, [IntPtr]8, [IntPtr]::Zero)
+    Start-Sleep -Seconds 1
     $activeProcess.Refresh(); $cpuStart = $activeProcess.TotalProcessorTime
     Start-Sleep -Seconds 3
     $activeProcess.Refresh(); $videoCpuMs = ($activeProcess.TotalProcessorTime - $cpuStart).TotalMilliseconds
@@ -161,7 +170,12 @@ try {
         'Video playback statistics: rendered=',
         'Video frame-server transfers presented=',
         'Video audio enabled.', 'Video audio muted.', 'Dynamic wallpaper paused:',
-        'Dynamic wallpaper resumed after pause policy cleared.')) {
+        'Deep-pause resource release setting disabled.',
+        'Deep-pause resource release setting enabled.',
+        'Dynamic wallpaper resumed after pause policy cleared.',
+        'CONTROLLED_DEEP_PAUSE_RELEASE=True',
+        'Released paused video decoders and transfer surfaces',
+        'Restored video decoders after deep pause.')) {
         if (-not $logSegment.Contains($required)) { throw "Expected runtime evidence was not logged: $required" }
     }
     $transferMatch = [regex]::Match($logSegment, 'Video frame-server transfers presented=(\d+)\.')
@@ -193,6 +207,7 @@ try {
     }
     'GIF_PLAYBACK=True'; 'VIDEO_PLAYBACK=True'; 'VIDEO_DEFAULT_MUTED=True'
     'VIDEO_SOUND_TOGGLE=True'; 'SESSION_PAUSE_RESUME=True'
+    'DEEP_PAUSE_RELEASE_RESTORE=True'
     'SETTINGS_UNCHANGED=True'; 'SYSTEM_WALLPAPER_UNCHANGED=True'
     "WALLPAPER_WINDOW_HIDDEN=$([bool]$HideWallpaperWindow)"
 } finally {

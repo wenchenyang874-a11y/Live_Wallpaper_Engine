@@ -282,18 +282,28 @@ try {
     }
     $mediaChoice = [LweLibraryManagementProbe]::GetDlgItem($choice, 3200)
     $packageChoice = [LweLibraryManagementProbe]::GetDlgItem($choice, 3201)
+    $compressionChoice = [LweLibraryManagementProbe]::GetDlgItem($choice, 3202)
     $expectedMediaChoice = -join @(
         [char]0x5BFC, [char]0x5165, [char]0x56FE, [char]0x7247,
         ' / ', [char]0x89C6, [char]0x9891)
     $expectedPackageChoice = -join @(
         [char]0x5BFC, [char]0x5165, [char]0x5206, [char]0x4EAB,
         [char]0x5305)
+    $expectedCompressionChoice = -join @(
+        [char]0x538B, [char]0x7F29, [char]0x5230, [char]0x5C4F,
+        [char]0x5E55, [char]0x5206, [char]0x8FA8, [char]0x7387,
+        [char]0x5927, [char]0x5C0F)
     if ([LweLibraryManagementProbe]::Text($mediaChoice) -ne
             $expectedMediaChoice -or
         [LweLibraryManagementProbe]::Text($packageChoice) -ne
-            $expectedPackageChoice) {
+            $expectedPackageChoice -or
+        $compressionChoice -eq [IntPtr]::Zero -or
+        [LweLibraryManagementProbe]::Text($compressionChoice) -ne
+            $expectedCompressionChoice) {
         throw 'The import source choices are missing or mislabeled.'
     }
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $compressionChoice, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
 
     $bounds = New-Object LweLibraryManagementProbe+RECT
     [void][LweLibraryManagementProbe]::GetWindowRect($choice, [ref]$bounds)
@@ -310,6 +320,7 @@ try {
     Write-Output "LIBRARY_UI_EXPORT_SELECTION=True"
     Write-Output "LIBRARY_UI_DRAG_REORDER=True"
     Write-Output "LIBRARY_UI_IMPORT_CHOICE=True"
+    Write-Output "LIBRARY_UI_IMPORT_COMPRESSION_OPTION=True"
     Write-Output "LIBRARY_UI_SCREENSHOT=$ScreenshotPath"
 }
 finally {

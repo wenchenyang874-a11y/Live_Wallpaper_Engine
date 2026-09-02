@@ -24,6 +24,11 @@ public:
         SharePackage,
     };
 
+    struct ImportRequest final {
+        ImportChoice choice = ImportChoice::MediaFiles;
+        bool compressToDisplay = false;
+    };
+
     struct DisplayOption final {
         std::wstring id;
         std::wstring label;
@@ -96,7 +101,8 @@ public:
     void HandleAnimationTimer();
     void CloseTransientUi();
     std::optional<std::vector<std::wstring>> ChooseDisplayTargets();
-    std::optional<ImportChoice> ChooseImportSource();
+    std::optional<ImportRequest> ChooseImportSource();
+    std::optional<bool> ChoosePerformanceSettings(bool releaseResources);
 
     void SetItems(std::vector<core::WallpaperItem> items);
     void SetGroups(std::vector<core::WallpaperGroup> groups,
@@ -250,6 +256,7 @@ private:
     HBRUSH editBrush_ = nullptr;
     HBRUSH panelBrush_ = nullptr;
     HBRUSH sidebarBrush_ = nullptr;
+    ULONG_PTR gdiplusToken_ = 0;
     std::vector<core::WallpaperItem> items_;
     std::vector<core::WallpaperGroup> groups_;
     std::vector<std::wstring> favorites_;
@@ -257,7 +264,8 @@ private:
     std::vector<std::size_t> activeVisibleIndices_;
     std::vector<ActiveWallpaperInfo> activeWallpapers_;
     std::wstring status_ = L"准备就绪";
-    std::wstring resourceUsage_ = L"CPU --\tGPU --\n内存 --\t显存 --";
+    std::wstring resourceUsage_ =
+        L"CPU --\tGPU --\n内存 --\n专用 --\t共享 --";
     std::wstring renamingPath_;
     std::wstring currentGroupId_ = std::wstring(AllGroupId);
     std::wstring renamingGroupId_;

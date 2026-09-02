@@ -27,6 +27,7 @@
     <ClCompile Include="src\media\image\GifPlayer.cpp"><Filter>media\image</Filter></ClCompile>
     <ClCompile Include="src\media\image\WicImageLoader.cpp"><Filter>media\image</Filter></ClCompile>
     <ClCompile Include="src\media\video\MediaEnginePlayer.cpp"><Filter>media\video</Filter></ClCompile>
+    <ClCompile Include="src\media\video\VideoOptimizer.cpp"><Filter>media\video</Filter></ClCompile>
     <ClCompile Include="src\render\D3DRenderer.cpp"><Filter>render</Filter></ClCompile>
     <ClCompile Include="src\shell\DesktopHost.cpp"><Filter>shell</Filter></ClCompile>
     <ClCompile Include="src\platform\ProcessResourceMonitor.cpp"><Filter>platform</Filter></ClCompile>
@@ -48,6 +49,7 @@
     <ClInclude Include="src\media\image\GifPlayer.h"><Filter>media\image</Filter></ClInclude>
     <ClInclude Include="src\media\image\WicImageLoader.h"><Filter>media\image</Filter></ClInclude>
     <ClInclude Include="src\media\video\MediaEnginePlayer.h"><Filter>media\video</Filter></ClInclude>
+    <ClInclude Include="src\media\video\VideoOptimizer.h"><Filter>media\video</Filter></ClInclude>
     <ClInclude Include="src\render\D3DRenderer.h"><Filter>render</Filter></ClInclude>
     <ClInclude Include="src\shell\DesktopHost.h"><Filter>shell</Filter></ClInclude>
     <ClInclude Include="src\platform\ProcessResourceMonitor.h"><Filter>platform</Filter></ClInclude>

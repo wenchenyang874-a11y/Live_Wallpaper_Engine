@@ -27,6 +27,7 @@
 
 #include "core/Logger.h"
 #include "media/MediaProbe.h"
+#include "media/video/VideoOptimizer.h"
 
 namespace lwe::app {
 namespace {
@@ -43,16 +44,21 @@ constexpr UINT kRevealWallpaperMessage = WM_APP + 5;
 constexpr UINT kUpdateCheckResultMessage = WM_APP + 6;
 constexpr UINT kBeginUpdateCheckMessage = WM_APP + 7;
 constexpr UINT kInstallerShutdownMessage = WM_APP + 8;
+constexpr UINT kVideoOptimizationResultMessage = WM_APP + 9;
+constexpr UINT kShowSettingsMessage = WM_APP + 10;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT_PTR kExplorerRecoveryTimer = 1;
 constexpr UINT_PTR kPlaybackPolicyTimer = 2;
 constexpr UINT_PTR kResourceUsageTimer = 3;
+constexpr auto kDeepPauseReleaseDelay = std::chrono::seconds(60);
 constexpr int kTrayImportCommand = 2100;
 constexpr int kTrayShowCommand = 2101;
 constexpr int kTraySoundCommand = 2102;
 constexpr int kTrayExitCommand = 2103;
 constexpr int kTrayCancelCommand = 2104;
 constexpr int kTrayPauseCommand = 2105;
+constexpr int kControlledDeepPauseToggleCommand = 2193;
+constexpr int kControlledDeepPauseReleaseCommand = 2194;
 constexpr int kControlledLibraryDrawCountCommand = 2195;
 constexpr int kControlledFrameCountCommand = 2196;
 constexpr int kControlledTestSaveCommand = 2198;
@@ -83,6 +89,8 @@ constexpr wchar_t kUpdateDialogWindowClass[] =
     L"LiveWallpaperEngine.UpdateResult";
 constexpr wchar_t kUpdateButtonWindowClass[] =
     L"LiveWallpaperEngine.UpdateButton";
+constexpr wchar_t kSettingsButtonWindowClass[] =
+    L"LiveWallpaperEngine.SettingsButton";
 
 constexpr COLORREF kUpdateBackground = RGB(17, 20, 27);
 constexpr COLORREF kUpdatePanel = RGB(28, 33, 44);
@@ -473,8 +481,14 @@ bool ShowUpdateDialog(const HWND owner, const HINSTANCE instance,
 
 struct UpdateTitleButtonState final {
     HWND owner = nullptr;
+    UINT clickMessage = 0;
     bool hovered = false;
     bool pressed = false;
+};
+
+struct TitleButtonCreateParameters final {
+    HWND owner = nullptr;
+    UINT clickMessage = 0;
 };
 
 void PaintUpdateTitleButton(const HWND window,
@@ -516,8 +530,12 @@ LRESULT CALLBACK UpdateButtonWindowProcedure(const HWND window,
         GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        const auto* parameters =
+            static_cast<const TitleButtonCreateParameters*>(
+                create->lpCreateParams);
         state = new UpdateTitleButtonState{
-            static_cast<HWND>(create->lpCreateParams)};
+            parameters != nullptr ? parameters->owner : nullptr,
+            parameters != nullptr ? parameters->clickMessage : 0};
         SetWindowLongPtrW(window, GWLP_USERDATA,
                           reinterpret_cast<LONG_PTR>(state));
     }
@@ -559,8 +577,8 @@ LRESULT CALLBACK UpdateButtonWindowProcedure(const HWND window,
             const bool clicked = state->pressed && PtInRect(&client, point);
             state->pressed = false;
             InvalidateRect(window, nullptr, FALSE);
-            if (clicked && IsWindow(state->owner)) {
-                PostMessageW(state->owner, kBeginUpdateCheckMessage, 0, 0);
+            if (clicked && IsWindow(state->owner) && state->clickMessage != 0) {
+                PostMessageW(state->owner, state->clickMessage, 0, 0);
             }
             return 0;
         }
@@ -731,11 +749,15 @@ std::wstring FormatResourceUsage(
     }
     text << L"\n内存 " << std::setprecision(0)
          << static_cast<double>(usage.workingSetBytes) / mebibyte
-         << L" MB\t显存 ";
-    if (usage.videoMemoryBytes.has_value()) {
-        text << static_cast<double>(*usage.videoMemoryBytes) / mebibyte << L" MB";
+         << L" MB\n";
+    if (usage.gpuMemoryAvailable) {
+        text << L"专用 "
+             << static_cast<double>(usage.dedicatedGpuMemoryBytes) / mebibyte
+             << L" MB\t共享 "
+             << static_cast<double>(usage.sharedGpuMemoryBytes) / mebibyte
+             << L" MB";
     } else {
-        text << L"--";
+        text << L"专用 --\t共享 --";
     }
     return text.str();
 }
@@ -822,7 +844,6 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
             L"尚未选择壁纸 · 点击“导入壁纸”开始建立你的本地壁纸库");
     }
     RefreshLibrary();
-
     if (!AddTrayIcon()) {
         core::LogWarning(
             L"The tray icon could not be created; the main window will stay open.");
@@ -919,6 +940,8 @@ bool WallpaperApplication::RegisterWindowClasses() {
            RegisterApplicationClass(instance_, kUpdateDialogWindowClass,
                                     &UpdateDialogWindowProcedure, nullptr, icon) &&
            RegisterApplicationClass(instance_, kUpdateButtonWindowClass,
+                                    &UpdateButtonWindowProcedure, nullptr, icon) &&
+           RegisterApplicationClass(instance_, kSettingsButtonWindowClass,
                                     &UpdateButtonWindowProcedure, nullptr, icon);
 }
 
@@ -957,14 +980,31 @@ bool WallpaperApplication::CreateUpdateButtonWindow() {
         return false;
     }
     constexpr COLORREF transparentKey = RGB(1, 2, 3);
+    const TitleButtonCreateParameters updateParameters{
+        controlWindow_, kBeginUpdateCheckMessage};
     updateButtonWindow_ = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         kUpdateButtonWindowClass, L"检查更新", WS_POPUP, 0, 0, 1, 1,
-        controlWindow_, nullptr, instance_, controlWindow_);
+        controlWindow_, nullptr, instance_,
+        const_cast<TitleButtonCreateParameters*>(&updateParameters));
     if (!IsWindow(updateButtonWindow_)) {
         return false;
     }
     SetLayeredWindowAttributes(updateButtonWindow_, transparentKey, 0,
+                               LWA_COLORKEY);
+    const TitleButtonCreateParameters settingsParameters{
+        controlWindow_, kShowSettingsMessage};
+    settingsButtonWindow_ = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        kSettingsButtonWindowClass, L"设置", WS_POPUP, 0, 0, 1, 1,
+        controlWindow_, nullptr, instance_,
+        const_cast<TitleButtonCreateParameters*>(&settingsParameters));
+    if (!IsWindow(settingsButtonWindow_)) {
+        DestroyWindow(updateButtonWindow_);
+        updateButtonWindow_ = nullptr;
+        return false;
+    }
+    SetLayeredWindowAttributes(settingsButtonWindow_, transparentKey, 0,
                                LWA_COLORKEY);
     PositionUpdateButtonWindow();
     return true;
@@ -1080,6 +1120,8 @@ bool WallpaperApplication::RestoreSavedWallpaperSelection() {
         return false;
     }
     soundEnabled_ = settings->soundEnabled;
+    releaseVideoResourcesOnPause_ =
+        settings->releaseVideoResourcesOnPause;
     selectedDisplayIds_ = SplitDisplayIds(settings->displayTargets);
     spanAcrossDisplays_ = settings->spanAcrossDisplays;
     assignments_ = settings->assignments;
@@ -1341,8 +1383,8 @@ void WallpaperApplication::DeleteWallpapers(
 }
 
 void WallpaperApplication::ChooseImport() {
-    const std::optional choice = mainWindow_.ChooseImportSource();
-    if (!choice.has_value()) {
+    const std::optional request = mainWindow_.ChooseImportSource();
+    if (!request.has_value()) {
         return;
     }
 
@@ -1367,7 +1409,7 @@ void WallpaperApplication::ChooseImport() {
         {L"单个壁纸文件 (*.lwewall)", L"*.lwewall"},
     };
     const bool importingMedia =
-        *choice == ModernMainWindow::ImportChoice::MediaFiles;
+        request->choice == ModernMainWindow::ImportChoice::MediaFiles;
     result = importingMedia
                  ? dialog->SetFileTypes(static_cast<UINT>(std::size(mediaFilters)),
                                         mediaFilters)
@@ -1418,11 +1460,12 @@ void WallpaperApplication::ChooseImport() {
         CoTaskMemFree(path);
     }
     if (SUCCEEDED(result)) {
-        ImportPaths(paths);
+        ImportPaths(paths, request->compressToDisplay);
     }
 }
 
-void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths) {
+void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths,
+                                       const bool compressToDisplay) {
     std::vector<core::WallpaperItem> importedItems;
     std::size_t failedCount = 0;
     bool importedArchive = false;
@@ -1465,6 +1508,287 @@ void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths) {
                     MB_OK | MB_ICONWARNING);
     }
     mainWindow_.SetStatus(std::move(status));
+    if (compressToDisplay) {
+        QueueVideoOptimizations(importedItems);
+    }
+}
+
+void WallpaperApplication::QueueVideoOptimizations(
+    const std::span<const core::WallpaperItem> importedItems) {
+    UINT maximumWidth = 0;
+    UINT maximumHeight = 0;
+    for (const shell::DisplayTarget& display : displayTargets_) {
+        maximumWidth = std::max(
+            maximumWidth,
+            static_cast<UINT>(std::max(
+                0L, display.clientBounds.right - display.clientBounds.left)));
+        maximumHeight = std::max(
+            maximumHeight,
+            static_cast<UINT>(std::max(
+                0L, display.clientBounds.bottom - display.clientBounds.top)));
+    }
+    if (spanAcrossDisplays_ && displayTargets_.size() > 1) {
+        RECT desktopBounds = displayTargets_.front().clientBounds;
+        for (const shell::DisplayTarget& display : displayTargets_) {
+            desktopBounds.left = std::min(desktopBounds.left,
+                                          display.clientBounds.left);
+            desktopBounds.top = std::min(desktopBounds.top,
+                                         display.clientBounds.top);
+            desktopBounds.right = std::max(desktopBounds.right,
+                                           display.clientBounds.right);
+            desktopBounds.bottom = std::max(desktopBounds.bottom,
+                                            display.clientBounds.bottom);
+        }
+        maximumWidth = static_cast<UINT>(
+            std::max(0L, desktopBounds.right - desktopBounds.left));
+        maximumHeight = static_cast<UINT>(
+            std::max(0L, desktopBounds.bottom - desktopBounds.top));
+    }
+    if (maximumWidth == 0 || maximumHeight == 0) {
+        maximumWidth = 1920;
+        maximumHeight = 1080;
+    }
+
+    std::size_t queued = 0;
+    {
+        const std::scoped_lock lock(videoOptimizationMutex_);
+        if (videoOptimizationQueue_.empty() && !videoOptimizationJobActive_ &&
+            pendingVideoOptimizationResults_.empty()) {
+            videoOptimizationBatchOptimized_ = 0;
+            videoOptimizationBatchSkipped_ = 0;
+            videoOptimizationBatchFailed_ = 0;
+        }
+        for (const core::WallpaperItem& item : importedItems) {
+            if (item.kind != media::WallpaperKind::Video || item.external) {
+                continue;
+            }
+            const bool alreadyQueued = std::ranges::any_of(
+                videoOptimizationQueue_, [&](const VideoOptimizationJob& job) {
+                    return SamePath(job.originalPath, item.path.native());
+                });
+            if (alreadyQueued) {
+                continue;
+            }
+            videoOptimizationQueue_.push_back(VideoOptimizationJob{
+                item.path.native(), maximumWidth, maximumHeight});
+            ++queued;
+        }
+    }
+    if (queued == 0) {
+        const wchar_t* message =
+            L"导入的壁纸分辨率小于或等于屏幕分辨率，没有执行压缩。";
+        mainWindow_.SetStatus(message);
+        MessageBoxW(controlWindow_, message, kApplicationTitle,
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    StartVideoOptimizationThread();
+    videoOptimizationWake_.notify_all();
+    mainWindow_.SetStatus(
+        L"正在后台压缩 " + std::to_wstring(queued) +
+        L" 个视频 · 保留原始帧率和原文件");
+}
+
+void WallpaperApplication::StartVideoOptimizationThread() {
+    if (videoOptimizationThread_.joinable()) {
+        return;
+    }
+    const HWND notificationWindow = controlWindow_;
+    videoOptimizationThread_ = std::jthread(
+        [this, notificationWindow](const std::stop_token stopToken) {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+            const HRESULT comResult =
+                CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            while (!stopToken.stop_requested()) {
+                VideoOptimizationJob job;
+                {
+                    std::unique_lock lock(videoOptimizationMutex_);
+                    if (!videoOptimizationWake_.wait(
+                            lock, stopToken, [&] {
+                                return !videoOptimizationQueue_.empty();
+                            })) {
+                        break;
+                    }
+                    job = std::move(videoOptimizationQueue_.front());
+                    videoOptimizationQueue_.pop_front();
+                    videoOptimizationJobActive_ = true;
+                }
+
+                VideoOptimizationResult completed;
+                completed.originalPath = job.originalPath;
+                media::video::VideoOptimizationPlan plan;
+                completed.status = media::video::PlanVideoOptimization(
+                    job.originalPath, job.displayWidth, job.displayHeight,
+                    plan);
+                if (SUCCEEDED(completed.status) && !plan.needed) {
+                    completed.skipped = true;
+                } else if (SUCCEEDED(completed.status)) {
+                    std::filesystem::path optimizedPath;
+                    completed.status = wallpaperLibrary_.PrepareOptimizedVideoPath(
+                        job.originalPath, optimizedPath);
+                    const std::filesystem::path temporaryPath =
+                        optimizedPath.native() + L".optimizing.mp4";
+                    media::MediaInfo cachedInfo;
+                    std::error_code cachedError;
+                    const bool cacheReady =
+                        SUCCEEDED(completed.status) &&
+                        std::filesystem::is_regular_file(optimizedPath,
+                                                         cachedError) &&
+                        !cachedError &&
+                        SUCCEEDED(media::ProbeMediaFile(optimizedPath.native(),
+                                                        cachedInfo)) &&
+                        cachedInfo.kind == media::WallpaperKind::Video &&
+                        cachedInfo.width == plan.outputWidth &&
+                        cachedInfo.height == plan.outputHeight &&
+                        cachedInfo.frameRateDenominator != 0 &&
+                        static_cast<std::uint64_t>(
+                            cachedInfo.frameRateNumerator) *
+                                plan.frameRateDenominator ==
+                            static_cast<std::uint64_t>(
+                                plan.frameRateNumerator) *
+                                cachedInfo.frameRateDenominator &&
+                        (!plan.hasAudio || cachedInfo.hasAudio);
+                    if (cacheReady) {
+                        completed.skipped = true;
+                    }
+                    if (SUCCEEDED(completed.status) && !cacheReady) {
+                        DeleteFileW(temporaryPath.c_str());
+                        completed.status = media::video::OptimizeVideo(
+                            job.originalPath, temporaryPath.native(), plan,
+                            stopToken);
+                    }
+                    media::MediaInfo optimizedInfo;
+                    if (SUCCEEDED(completed.status) && !cacheReady) {
+                        completed.status = media::ProbeMediaFile(
+                            temporaryPath.native(), optimizedInfo);
+                    }
+                    if (SUCCEEDED(completed.status) && !cacheReady &&
+                        (optimizedInfo.kind != media::WallpaperKind::Video ||
+                         optimizedInfo.width != plan.outputWidth ||
+                         optimizedInfo.height != plan.outputHeight ||
+                         optimizedInfo.frameRateDenominator == 0 ||
+                         static_cast<std::uint64_t>(
+                             optimizedInfo.frameRateNumerator) *
+                                 plan.frameRateDenominator !=
+                             static_cast<std::uint64_t>(
+                                 plan.frameRateNumerator) *
+                                 optimizedInfo.frameRateDenominator ||
+                         (plan.hasAudio && !optimizedInfo.hasAudio))) {
+                        completed.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+                    }
+                    if (SUCCEEDED(completed.status) && !cacheReady &&
+                        !MoveFileExW(temporaryPath.c_str(), optimizedPath.c_str(),
+                                     MOVEFILE_REPLACE_EXISTING |
+                                         MOVEFILE_WRITE_THROUGH)) {
+                        completed.status = HRESULT_FROM_WIN32(GetLastError());
+                    }
+                    if (FAILED(completed.status)) {
+                        DeleteFileW(temporaryPath.c_str());
+                    } else if (!cacheReady) {
+                        completed.optimized = true;
+                    }
+                }
+
+                {
+                    const std::scoped_lock lock(videoOptimizationMutex_);
+                    videoOptimizationJobActive_ = false;
+                    pendingVideoOptimizationResults_.push_back(
+                        std::move(completed));
+                }
+                if (!stopToken.stop_requested() &&
+                    IsWindow(notificationWindow)) {
+                    PostMessageW(notificationWindow,
+                                 kVideoOptimizationResultMessage, 0, 0);
+                }
+            }
+            if (SUCCEEDED(comResult)) {
+                CoUninitialize();
+            }
+        });
+}
+
+void WallpaperApplication::StopVideoOptimizationThread() {
+    if (videoOptimizationThread_.joinable()) {
+        videoOptimizationThread_.request_stop();
+        videoOptimizationWake_.notify_all();
+        videoOptimizationThread_.join();
+    }
+    const std::scoped_lock lock(videoOptimizationMutex_);
+    videoOptimizationQueue_.clear();
+    pendingVideoOptimizationResults_.clear();
+    videoOptimizationJobActive_ = false;
+    videoOptimizationBatchOptimized_ = 0;
+    videoOptimizationBatchSkipped_ = 0;
+    videoOptimizationBatchFailed_ = 0;
+}
+
+void WallpaperApplication::CompleteVideoOptimizations() {
+    std::deque<VideoOptimizationResult> completed;
+    bool batchComplete = false;
+    {
+        const std::scoped_lock lock(videoOptimizationMutex_);
+        completed.swap(pendingVideoOptimizationResults_);
+        batchComplete = videoOptimizationQueue_.empty() &&
+                        !videoOptimizationJobActive_;
+    }
+    if (completed.empty()) {
+        return;
+    }
+
+    std::size_t optimizedCount = 0;
+    std::size_t skippedCount = 0;
+    std::size_t failedCount = 0;
+    for (const VideoOptimizationResult& result : completed) {
+        if (result.optimized) {
+            ++optimizedCount;
+        } else if (result.skipped) {
+            ++skippedCount;
+        } else {
+            ++failedCount;
+            core::LogError(L"Wallpaper video optimization failed; the original "
+                           L"file remains available: " +
+                               result.originalPath,
+                               result.status);
+        }
+    }
+    videoOptimizationBatchOptimized_ += optimizedCount;
+    videoOptimizationBatchSkipped_ += skippedCount;
+    videoOptimizationBatchFailed_ += failedCount;
+    if (!batchComplete) {
+        return;
+    }
+
+    std::wstring status;
+    if (videoOptimizationBatchOptimized_ > 0) {
+        status = L"视频压缩完成 " +
+                 std::to_wstring(videoOptimizationBatchOptimized_) +
+                 L" 项 · 保留原始帧率";
+        if (videoOptimizationBatchSkipped_ > 0) {
+            status += L" · " +
+                      std::to_wstring(videoOptimizationBatchSkipped_) +
+                      L" 项无需压缩";
+        }
+    } else if (videoOptimizationBatchSkipped_ > 0 &&
+               videoOptimizationBatchFailed_ == 0) {
+        const wchar_t* message =
+            L"导入的壁纸分辨率小于或等于屏幕分辨率，没有执行压缩。";
+        status = message;
+        MessageBoxW(controlWindow_, message, kApplicationTitle,
+                    MB_OK | MB_ICONINFORMATION);
+    }
+    if (videoOptimizationBatchFailed_ > 0) {
+        if (!status.empty()) {
+            status += L" · ";
+        }
+        status += std::to_wstring(videoOptimizationBatchFailed_) +
+                  L" 项压缩失败，继续使用原始文件";
+    }
+    if (!status.empty()) {
+        mainWindow_.SetStatus(std::move(status));
+    }
+    videoOptimizationBatchOptimized_ = 0;
+    videoOptimizationBatchSkipped_ = 0;
+    videoOptimizationBatchFailed_ = 0;
 }
 
 void WallpaperApplication::ChooseExport() {
@@ -2333,9 +2657,28 @@ HRESULT WallpaperApplication::StartWallpaperSession(WallpaperSession& session) {
         return MF_E_PLATFORM_NOT_INITIALIZED;
     }
     session.videoPlayer = std::make_unique<media::video::MediaEnginePlayer>();
-    return session.videoPlayer->Open(
+    UINT requiredWidth = 0;
+    UINT requiredHeight = 0;
+    for (const RECT& destination : session.destinations) {
+        requiredWidth = std::max(
+            requiredWidth,
+            static_cast<UINT>(std::max(0L, destination.right - destination.left)));
+        requiredHeight = std::max(
+            requiredHeight,
+            static_cast<UINT>(std::max(0L, destination.bottom - destination.top)));
+    }
+    const std::filesystem::path playbackPath =
+        wallpaperLibrary_.ResolveVideoPlaybackPath(
+            session.assignment.wallpaperPath, requiredWidth, requiredHeight);
+    if (!SamePath(playbackPath.native(), session.assignment.wallpaperPath)) {
+        core::LogInfo(L"Using a local optimized video copy: " +
+                      playbackPath.native());
+    }
+    const HRESULT result = session.videoPlayer->Open(
         renderer_.Device(), controlWindow_, kMediaEngineEventMessage,
-        session.assignment.wallpaperPath, soundEnabled_, session.token);
+        playbackPath.native(), soundEnabled_, session.token);
+    session.videoResourcesReleased = false;
+    return result;
 }
 
 HRESULT WallpaperApplication::RenderStaticImage(
@@ -2387,6 +2730,7 @@ void WallpaperApplication::StopAllPlayback() {
     }
     playbackSessions_.clear();
     dynamicPlaybackPaused_ = false;
+    dynamicPauseStartedAt_.reset();
     pendingWallpaperReveal_ = false;
 }
 
@@ -2480,6 +2824,42 @@ void WallpaperApplication::ToggleSound() {
     }
 }
 
+void WallpaperApplication::SetReleaseVideoResourcesOnPause(
+    const bool enabled) {
+    const std::scoped_lock playbackLock(playbackMutex_);
+    if (releaseVideoResourcesOnPause_ == enabled) {
+        return;
+    }
+    releaseVideoResourcesOnPause_ = enabled;
+    if (!releaseVideoResourcesOnPause_ && dynamicPlaybackPaused_) {
+        RestoreReleasedVideoResources(true);
+    } else if (releaseVideoResourcesOnPause_ && dynamicPlaybackPaused_ &&
+               CanDeepReleaseForCurrentPause() && systemSuspended_) {
+        ReleasePausedVideoResources();
+    }
+    if (!controlledTestMode_) {
+        SaveCurrentSelection();
+    }
+    core::LogInfo(releaseVideoResourcesOnPause_
+                      ? L"Deep-pause resource release setting enabled."
+                      : L"Deep-pause resource release setting disabled.");
+    mainWindow_.SetStatus(
+        releaseVideoResourcesOnPause_
+            ? L"锁屏/熄屏释放视频资源已开启 · 恢复时可能短暂卡顿"
+            : L"锁屏/熄屏释放视频资源已关闭 · 暂停时保留解码资源");
+}
+
+void WallpaperApplication::ShowSettings() {
+    ShowWindow(updateButtonWindow_, SW_HIDE);
+    ShowWindow(settingsButtonWindow_, SW_HIDE);
+    const std::optional result = mainWindow_.ChoosePerformanceSettings(
+        releaseVideoResourcesOnPause_);
+    PositionUpdateButtonWindow();
+    if (result.has_value()) {
+        SetReleaseVideoResourcesOnPause(*result);
+    }
+}
+
 void WallpaperApplication::ToggleManualPlaybackPause() {
     const std::scoped_lock playbackLock(playbackMutex_);
     if (!HasDynamicPlayback()) {
@@ -2493,6 +2873,7 @@ HRESULT WallpaperApplication::SaveCurrentSelection() const {
     core::AppSettings settings;
     settings.assignments = assignments_;
     settings.soundEnabled = soundEnabled_;
+    settings.releaseVideoResourcesOnPause = releaseVideoResourcesOnPause_;
     settings.displayTargets = JoinDisplayIds(selectedDisplayIds_);
     settings.spanAcrossDisplays = spanAcrossDisplays_;
     return settingsStore_.Save(settings);
@@ -2912,13 +3293,7 @@ WallpaperApplication::WallpaperSession* WallpaperApplication::FindSession(
 }
 
 void WallpaperApplication::UpdateResourceUsage() {
-    std::optional<std::uint64_t> videoMemoryBytes;
-    {
-        const std::scoped_lock playbackLock(playbackMutex_);
-        videoMemoryBytes = renderer_.VideoMemoryUsage();
-    }
-    const platform::ProcessResourceUsage usage =
-        resourceMonitor_.Sample(videoMemoryBytes);
+    const platform::ProcessResourceUsage usage = resourceMonitor_.Sample();
     mainWindow_.SetResourceUsage(FormatResourceUsage(usage));
 }
 
@@ -2972,6 +3347,20 @@ void WallpaperApplication::RefreshPlaybackPolicy() {
     const std::wstring reason = PlaybackPauseReason();
     const bool shouldPause = dynamic && !reason.empty();
     if (shouldPause == dynamicPlaybackPaused_) {
+        if (shouldPause && releaseVideoResourcesOnPause_ &&
+            CanDeepReleaseForCurrentPause() &&
+            dynamicPauseStartedAt_.has_value() &&
+            (systemSuspended_ || std::chrono::steady_clock::now() -
+                                     *dynamicPauseStartedAt_ >=
+                                     kDeepPauseReleaseDelay)) {
+            ReleasePausedVideoResources();
+        }
+        return;
+    }
+
+    if (!shouldPause && !RestoreReleasedVideoResources(false)) {
+        mainWindow_.SetStatus(
+            L"动态壁纸恢复失败 · 将自动重试视频解码器");
         return;
     }
 
@@ -2988,13 +3377,71 @@ void WallpaperApplication::RefreshPlaybackPolicy() {
     }
     dynamicPlaybackPaused_ = shouldPause;
     if (shouldPause) {
+        dynamicPauseStartedAt_ = std::chrono::steady_clock::now();
         mainWindow_.SetStatus(L"动态壁纸已暂停 · " + reason);
         core::LogInfo(L"Dynamic wallpaper paused: " + reason);
+        if (releaseVideoResourcesOnPause_ && systemSuspended_) {
+            ReleasePausedVideoResources();
+        }
     } else {
+        dynamicPauseStartedAt_.reset();
         mainWindow_.SetStatus(ActivePlaybackStatus());
         core::LogInfo(L"Dynamic wallpaper resumed after pause policy cleared.");
     }
     WakePlaybackRenderThread();
+}
+
+bool WallpaperApplication::CanDeepReleaseForCurrentPause() const noexcept {
+    return systemSuspended_ || sessionLocked_ || displayOff_;
+}
+
+void WallpaperApplication::ReleasePausedVideoResources() {
+    bool releasedAny = false;
+    for (const auto& session : playbackSessions_) {
+        if (!session->videoPlayer || session->videoResourcesReleased) {
+            continue;
+        }
+        session->videoPlayer->Shutdown();
+        session->videoPlayer.reset();
+        session->videoResourcesReleased = true;
+        releasedAny = true;
+    }
+    if (releasedAny) {
+        core::LogInfo(
+            L"Released paused video decoders and transfer surfaces to reduce "
+            L"memory usage.");
+        mainWindow_.SetStatus(
+            L"动态壁纸深度暂停 · 视频解码资源已释放");
+    }
+}
+
+bool WallpaperApplication::RestoreReleasedVideoResources(
+    const bool remainPaused) {
+    bool restoredAll = true;
+    bool restoredAny = false;
+    for (const auto& session : playbackSessions_) {
+        if (!session->videoResourcesReleased) {
+            continue;
+        }
+        const HRESULT result = StartWallpaperSession(*session);
+        if (FAILED(result)) {
+            session->videoPlayer.reset();
+            session->videoResourcesReleased = true;
+            restoredAll = false;
+            core::LogError(L"Unable to recreate a released video decoder.",
+                           result);
+            continue;
+        }
+        if (remainPaused && session->videoPlayer) {
+            session->videoPlayer->SetPaused(true);
+        }
+        restoredAny = true;
+    }
+    if (restoredAll && restoredAny) {
+        core::LogInfo(L"Restored video decoders after deep pause.");
+        WakePlaybackRenderThread();
+    }
+    return restoredAll;
 }
 
 void WallpaperApplication::ShowControlWindow() {
@@ -3116,12 +3563,24 @@ RECT WallpaperApplication::UpdateButtonRectangle() const {
     return RECT{left, top, left + MulDiv(84, dpi, 96), bottom};
 }
 
+RECT WallpaperApplication::SettingsButtonRectangle() const {
+    const RECT update = UpdateButtonRectangle();
+    if (IsRectEmpty(&update)) {
+        return {};
+    }
+    const UINT dpi = GetDpiForWindow(controlWindow_);
+    const int left = update.right + MulDiv(6, dpi, 96);
+    return RECT{left, update.top, left + MulDiv(58, dpi, 96), update.bottom};
+}
+
 void WallpaperApplication::PositionUpdateButtonWindow() const {
-    if (!IsWindow(controlWindow_) || !IsWindow(updateButtonWindow_)) {
+    if (!IsWindow(controlWindow_) || !IsWindow(updateButtonWindow_) ||
+        !IsWindow(settingsButtonWindow_)) {
         return;
     }
     if (!IsWindowVisible(controlWindow_) || IsIconic(controlWindow_)) {
         ShowWindow(updateButtonWindow_, SW_HIDE);
+        ShowWindow(settingsButtonWindow_, SW_HIDE);
         return;
     }
     RECT windowRectangle{};
@@ -3129,13 +3588,20 @@ void WallpaperApplication::PositionUpdateButtonWindow() const {
         return;
     }
     const RECT button = UpdateButtonRectangle();
-    if (IsRectEmpty(&button)) {
+    const RECT settingsButton = SettingsButtonRectangle();
+    if (IsRectEmpty(&button) || IsRectEmpty(&settingsButton)) {
         return;
     }
     SetWindowPos(updateButtonWindow_, HWND_TOP,
                  windowRectangle.left + button.left,
                  windowRectangle.top + button.top, button.right - button.left,
                  button.bottom - button.top,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    SetWindowPos(settingsButtonWindow_, HWND_TOP,
+                 windowRectangle.left + settingsButton.left,
+                 windowRectangle.top + settingsButton.top,
+                 settingsButton.right - settingsButton.left,
+                 settingsButton.bottom - settingsButton.top,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
@@ -3302,6 +3768,7 @@ void WallpaperApplication::Shutdown() {
     shuttingDown_ = true;
     running_ = false;
     StopUpdateCheck();
+    StopVideoOptimizationThread();
     if (controlWindow_ != nullptr) {
         KillTimer(controlWindow_, kPlaybackPolicyTimer);
         KillTimer(controlWindow_, kExplorerRecoveryTimer);
@@ -3342,6 +3809,10 @@ void WallpaperApplication::Shutdown() {
             DestroyWindow(updateButtonWindow_);
         }
         updateButtonWindow_ = nullptr;
+        if (IsWindow(settingsButtonWindow_)) {
+            DestroyWindow(settingsButtonWindow_);
+        }
+        settingsButtonWindow_ = nullptr;
         DestroyWindow(controlWindow_);
     }
     controlWindow_ = nullptr;
@@ -3395,6 +3866,29 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 if (controlledTestMode_ &&
                     identifier == kControlledTestExitCommand) {
                     RequestExit();
+                    return 0;
+                }
+                if (controlledTestMode_ &&
+                    identifier == kControlledDeepPauseToggleCommand) {
+                    SetReleaseVideoResourcesOnPause(
+                        !releaseVideoResourcesOnPause_);
+                    return 0;
+                }
+                if (controlledTestMode_ &&
+                    identifier == kControlledDeepPauseReleaseCommand) {
+                    sessionLocked_ = true;
+                    RefreshPlaybackPolicy();
+                    dynamicPauseStartedAt_ = std::chrono::steady_clock::now() -
+                                             kDeepPauseReleaseDelay;
+                    RefreshPlaybackPolicy();
+                    const std::scoped_lock playbackLock(playbackMutex_);
+                    const bool released = std::ranges::any_of(
+                        playbackSessions_, [](const auto& session) {
+                            return session->videoResourcesReleased;
+                        });
+                    core::LogInfo(
+                        std::wstring(L"CONTROLLED_DEEP_PAUSE_RELEASE=") +
+                        (released ? L"True" : L"False"));
                     return 0;
                 }
                 if (controlledTestMode_ &&
@@ -3720,8 +4214,16 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 CompleteUpdateCheck();
                 return 0;
 
+            case kVideoOptimizationResultMessage:
+                CompleteVideoOptimizations();
+                return 0;
+
             case kBeginUpdateCheckMessage:
                 BeginUpdateCheck();
+                return 0;
+
+            case kShowSettingsMessage:
+                ShowSettings();
                 return 0;
 
             case kInstallerShutdownMessage:

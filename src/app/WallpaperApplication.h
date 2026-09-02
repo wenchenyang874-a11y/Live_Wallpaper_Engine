@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -57,6 +58,20 @@ private:
         std::vector<RECT> destinations;
         std::unique_ptr<media::image::GifPlayer> gifPlayer;
         std::unique_ptr<media::video::MediaEnginePlayer> videoPlayer;
+        bool videoResourcesReleased = false;
+    };
+
+    struct VideoOptimizationJob final {
+        std::wstring originalPath;
+        std::uint32_t displayWidth = 0;
+        std::uint32_t displayHeight = 0;
+    };
+
+    struct VideoOptimizationResult final {
+        std::wstring originalPath;
+        HRESULT status = S_OK;
+        bool optimized = false;
+        bool skipped = false;
     };
 
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam,
@@ -66,6 +81,7 @@ private:
     bool RegisterWindowClasses();
     bool CreateControlWindow();
     bool CreateUpdateButtonWindow();
+    void ShowSettings();
     bool CreateWallpaperWindow();
     bool EnsureRenderer();
     bool ReattachToDesktop();
@@ -90,7 +106,13 @@ private:
                                bool favorite);
     void DeleteWallpapers(std::span<const core::WallpaperItem> items);
     void ChooseImport();
-    void ImportPaths(const std::vector<std::wstring>& paths);
+    void ImportPaths(const std::vector<std::wstring>& paths,
+                     bool compressToDisplay = false);
+    void QueueVideoOptimizations(
+        std::span<const core::WallpaperItem> importedItems);
+    void StartVideoOptimizationThread();
+    void StopVideoOptimizationThread();
+    void CompleteVideoOptimizations();
     void ChooseExport();
     void ExportWallpapers(const std::vector<core::WallpaperItem>& items);
     void OpenWallpaperLocation(const core::WallpaperItem& item);
@@ -118,6 +140,7 @@ private:
     void StopAllPlayback();
     bool RemoveFailedPlaybackSessions();
     void ToggleSound();
+    void SetReleaseVideoResourcesOnPause(bool enabled);
     void ToggleManualPlaybackPause();
     HRESULT SaveCurrentSelection() const;
     void RefreshDisplayTargets(bool preserveSelection);
@@ -139,11 +162,15 @@ private:
     void UpdateResourceUsage();
     void InitializePlaybackPolicy();
     void RefreshPlaybackPolicy();
+    void ReleasePausedVideoResources();
+    bool RestoreReleasedVideoResources(bool remainPaused);
+    [[nodiscard]] bool CanDeepReleaseForCurrentPause() const noexcept;
     std::wstring PlaybackPauseReason() const;
 
     void ShowControlWindow();
     void ShowTrayMenu();
     [[nodiscard]] RECT UpdateButtonRectangle() const;
+    [[nodiscard]] RECT SettingsButtonRectangle() const;
     void PositionUpdateButtonWindow() const;
     void RedrawUpdateButton() const;
     void BeginUpdateCheck();
@@ -159,6 +186,7 @@ private:
     bool desktopCompatibilityMutexOwned_ = false;
     HWND controlWindow_ = nullptr;
     HWND updateButtonWindow_ = nullptr;
+    HWND settingsButtonWindow_ = nullptr;
     HWND wallpaperWindow_ = nullptr;
     UINT taskbarCreatedMessage_ = 0;
     bool running_ = false;
@@ -173,12 +201,14 @@ private:
     bool fullScreenActive_ = false;
     bool dynamicPlaybackPaused_ = false;
     bool manualPlaybackPaused_ = false;
+    bool releaseVideoResourcesOnPause_ = true;
     bool pendingWallpaperReveal_ = false;
     std::atomic_int runtimeExitCode_{0};
     std::atomic_bool playbackFailurePending_{false};
     bool sessionNotificationsRegistered_ = false;
     HPOWERNOTIFY displayPowerNotification_ = nullptr;
     bool soundEnabled_ = false;
+    std::optional<std::chrono::steady_clock::time_point> dynamicPauseStartedAt_;
     PlaybackMode playbackMode_ = PlaybackMode::TechnicalTest;
     shell::DesktopTarget desktopTarget_{};
     std::vector<shell::DisplayTarget> displayTargets_;
@@ -191,6 +221,15 @@ private:
     std::jthread updateCheckThread_;
     std::mutex updateCheckMutex_;
     std::optional<updates::UpdateCheckResult> pendingUpdateResult_;
+    std::jthread videoOptimizationThread_;
+    std::mutex videoOptimizationMutex_;
+    std::condition_variable_any videoOptimizationWake_;
+    std::deque<VideoOptimizationJob> videoOptimizationQueue_;
+    std::deque<VideoOptimizationResult> pendingVideoOptimizationResults_;
+    bool videoOptimizationJobActive_ = false;
+    std::size_t videoOptimizationBatchOptimized_ = 0;
+    std::size_t videoOptimizationBatchSkipped_ = 0;
+    std::size_t videoOptimizationBatchFailed_ = 0;
     updates::UpdateCheckMode updateCheckMode_ = updates::UpdateCheckMode::Live;
     std::uint32_t nextSessionToken_ = 1;
     bool spanAcrossDisplays_ = true;

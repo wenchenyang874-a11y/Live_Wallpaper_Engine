@@ -215,12 +215,6 @@ HRESULT MediaEnginePlayer::PresentFrame(
     }
 
     const auto now = std::chrono::steady_clock::now();
-    constexpr std::uint64_t kFullHdPixels = 1920ULL * 1080ULL;
-    if (static_cast<std::uint64_t>(nativeWidth_) * nativeHeight_ >
-            kFullHdPixels &&
-        now < nextFrameTransferAt_) {
-        return S_FALSE;
-    }
 
     LONGLONG presentationTime = 0;
     HRESULT result = engine_->OnVideoStreamTick(&presentationTime);
@@ -308,13 +302,6 @@ HRESULT MediaEnginePlayer::PresentFrame(
     }
     lastPresentationTime_ = presentationTime;
     hasPresentationTime_ = true;
-    if (static_cast<std::uint64_t>(nativeWidth_) * nativeHeight_ >
-        kFullHdPixels) {
-        // 4K/greater wallpaper presentation is capped at 30 FPS. The media
-        // engine remains hardware-decoded, while halving conversion, shader
-        // and layered-window Present work that has little desktop benefit.
-        nextFrameTransferAt_ = now + std::chrono::milliseconds(33);
-    }
     ++transferredFrameCount_;
     return S_OK;
 }
@@ -463,7 +450,6 @@ void MediaEnginePlayer::Shutdown() {
     transferredFrameCount_ = 0;
     lastPresentationTime_ = 0;
     hasPresentationTime_ = false;
-    nextFrameTransferAt_ = {};
 }
 
 bool MediaEnginePlayer::IsActive() const noexcept {

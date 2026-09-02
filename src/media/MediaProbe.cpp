@@ -158,6 +158,19 @@ HRESULT ProbeMediaFoundationVideo(const std::wstring& path, MediaInfo& info) {
         info.width = width;
         info.height = height;
     }
+    UINT32 frameRateNumerator = 0;
+    UINT32 frameRateDenominator = 0;
+    if (SUCCEEDED(MFGetAttributeRatio(nativeVideoType.Get(), MF_MT_FRAME_RATE,
+                                      &frameRateNumerator,
+                                      &frameRateDenominator))) {
+        info.frameRateNumerator = frameRateNumerator;
+        info.frameRateDenominator = frameRateDenominator;
+    }
+    UINT32 averageBitrate = 0;
+    if (SUCCEEDED(nativeVideoType->GetUINT32(MF_MT_AVG_BITRATE,
+                                             &averageBitrate))) {
+        info.averageVideoBitrate = averageBitrate;
+    }
 
     ComPtr<IMFMediaType> nativeAudioType;
     info.hasAudio = SUCCEEDED(reader->GetNativeMediaType(

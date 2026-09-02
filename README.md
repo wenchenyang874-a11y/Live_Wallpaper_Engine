@@ -4,7 +4,7 @@
 
 [下载最新版本](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest) · [查看更新记录](CHANGELOG.md) · [Apache-2.0 License](LICENSE)
 
-> 当前开发版本为 `v1.1.0-unreleased`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
+> 当前开发版本为 `v1.1.1-unreleased`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
 
 ![Live Wallpaper Engine 应用预览](assets/application-preview.png)
 
@@ -14,11 +14,12 @@
 - **常见壁纸格式**：支持 JPG/JPEG、PNG、BMP、GIF，以及系统 Media Foundation 能够解码的常见视频格式。
 - **多屏自由分配**：支持跨屏扩展和分屏显示；分屏模式下，同一壁纸可应用到多个屏幕，不同屏幕也可使用不同壁纸。
 - **动态壁纸播放**：GIF 和视频循环播放，视频默认静音，可在主界面或托盘菜单中开关声音、暂停或继续播放。
+- **原画优先与可选压缩**：默认按视频原分辨率、原帧率播放；导入时可主动选择“压缩到屏幕分辨率大小”，压缩副本不会低于当前显示所需尺寸且保持源帧率，原文件完整保留。
 - **本地壁纸库与分组**：提供全部壁纸、最爱壁纸和可排序的自定义分组；同一壁纸可加入多个分组，搜索只作用于当前分组。
 - **通用批量操作**：壁纸支持泛用多选、全选和取消全选，可批量添加到分组、收藏、导出；在全部壁纸中还可确认后批量删除。
 - **导入与分享**：可批量导入图片/视频，也可导入或导出标准 ZIP 分享包；每张壁纸独立保存为带 SHA-256 校验的 `.lwewall` 文件。
 - **播放与界面解耦**：动态壁纸由独立播放线程驱动，打开菜单、下拉框或对话框不会阻塞桌面取帧与呈现。
-- **资源状态可见**：主界面实时显示本进程的 CPU、GPU、内存和显存占用。
+- **资源状态可见**：主界面实时显示本进程的 CPU、GPU 和内存，并把 GPU 内存区分为专用与共享。
 - **按需检查更新**：标题栏提供“检查更新”按钮，不在启动或后台自动联网；发现新版本后由用户决定是否打开 GitHub Release 下载页。
 
 ## 下载与使用
@@ -38,7 +39,9 @@
 | 视频 | MP4、M4V、MOV、WMV、AVI 等，实际兼容性取决于 Windows 系统解码器 |
 | 分享文件 | 软件导出的 ZIP 分享包、单个 `.lwewall` 文件 |
 
-动态内容会在会话锁定、系统睡眠、显示器关闭，以及检测到符合规则的全屏应用时暂停。视频使用 Media Foundation/Media Engine 解码并优先利用系统硬件解码能力；GIF 使用 WIC 按帧解码与合成。
+动态内容会在会话锁定、系统睡眠、显示器关闭，以及检测到符合规则的全屏应用时暂停。顶部 `设置 → 性能优化` 中的“锁屏/熄屏时释放视频资源”默认开启：锁屏或熄屏持续 1 分钟后会关闭视频解码会话并释放转换表面，系统睡眠时立即释放；恢复后自动重建，可能出现短暂卡顿。关闭后仍会暂停播放，但保留解码资源以换取更快恢复。视频使用 Media Foundation/Media Engine 解码并优先利用系统硬件解码能力，4K 视频不再额外限制为 30 FPS；GIF 使用 WIC 按帧解码与合成。
+
+“压缩到屏幕分辨率大小”只作用于本次导入的视频，默认关闭。开启后软件在导入完成后后台检查分辨率，只压缩高于当前显示需求的视频，使用高质量 H.264 编码并保留源帧率；分辨率小于或等于屏幕时不会执行压缩，并给出提示。图片和 GIF 本来就会在渲染阶段高质量缩放到目标屏幕，不额外生成有损副本。
 
 ## 多屏显示
 
@@ -73,6 +76,7 @@
 | 数据 | 位置 |
 | --- | --- |
 | 壁纸库 | `%LOCALAPPDATA%\LiveWallpaperEngine\library` |
+| 用户选择生成的视频压缩副本 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.optimized` |
 | 设置 | `%LOCALAPPDATA%\LiveWallpaperEngine\settings.json` |
 | 自定义排序 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.library-order.v1` |
 | 最爱与壁纸分组 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.wallpaper-groups.v1` |
@@ -89,6 +93,7 @@
 - 单实例运行；再次启动程序会唤醒已有主窗口，不会创建第二套渲染器。
 - 当前壁纸可从底部上拉列表、壁纸库的“使用中”状态或托盘菜单逐项取消，覆盖窗口会立即隐藏并显露 Windows 原壁纸。
 - GPU 指标与任务管理器“进程”页一致，取本进程最繁忙的 GPU 引擎，而不是把不同引擎相加。
+- 界面的“内存”采用进程工作集，即当前驻留在物理内存中的部分；为便于普通用户理解，界面不显示“工作集”术语。GPU 内存读取 Windows 进程计数器并分别显示“专用”和“共享”，核显通常主要使用共享内存。
 
 ## 构建
 
@@ -110,13 +115,13 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 本地构建安装包需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.1.0
+.\tools\build-release.ps1 -Version 1.1.1
 ```
 
 日常开发验证使用带有明确标记的未发布安装包：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.1.0 -Unreleased
+.\tools\build-release.ps1 -Version 1.1.1 -Unreleased
 ```
 
 安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出。确认覆盖后，安装器会先发送专用退出请求，让当前版本快速、完整地释放壁纸窗口和媒体资源；升级不支持该请求的旧版本时，安装器只会短暂等待，再结束经固定窗口类确认的目标进程，避免长时间停在“正在关闭应用程序”。
@@ -136,6 +141,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 ```powershell
 .\tools\test-static-overlay.ps1 -Configuration Release
 .\tools\test-media.ps1 -Configuration Release -GifPath .\sample.gif -VideoPath .\sample.mp4
+.\tools\test-video-optimizer.ps1 -Configuration Release -VideoPath .\sample-4k.mp4
 .\tools\test-multi-display.ps1 -Configuration Release -ImagePath .\sample.png -VideoPath .\sample.mp4
 .\tools\test-wallpaper-switch.ps1 -Configuration Release -ImagePath .\sample.png -VideoPath .\sample.mp4
 .\tools\test-video-failure-containment.ps1 -Configuration Release -VideoPath .\sample.mp4
@@ -144,6 +150,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\test-wallpaper-groups-ui.ps1 -Configuration Release
 .\tools\test-tray-controls.ps1 -Configuration Release
 .\tools\test-ui-playback-independence.ps1 -Configuration Release -VideoPath .\sample.mp4
+.\tools\test-settings-ui.ps1 -Configuration Release -VideoPath .\sample.mp4
 .\tools\test-update-check.ps1 -Configuration Release -ExpectedStatus Current
 .\tools\test-crash-diagnostics.ps1 -Configuration Release
 ```
@@ -169,6 +176,10 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 ### 为什么软件显示的 GPU 占用与任务管理器“性能”页不同？
 
 软件底部显示的是本进程占用，适合与任务管理器“进程”页中 `Live Wallpaper Engine` 这一行比较；任务管理器“性能”页显示的是整块 GPU 的系统总占用，两者不是同一统计对象。不同采样时刻也可能出现少量波动。
+
+### 为什么十几 MB 的 4K 视频播放后会占用大量 GPU 内存？
+
+文件大小是压缩后的磁盘体积，解码器工作时需要保存多张未压缩帧、硬件解码表面和转换纹理，因此不能按视频文件大小估算运行内存。核显还会从系统内存借用“共享 GPU 内存”。默认模式优先保证原画和源帧率；如果用户在导入时主动选择压缩，软件才会为高于屏幕需求的视频生成屏幕尺寸副本。原始文件仍保存在壁纸库，删除或重命名壁纸时会同步处理对应缓存。
 
 ## 许可
 

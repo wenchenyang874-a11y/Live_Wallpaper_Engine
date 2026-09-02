@@ -19,6 +19,9 @@ struct MediaInfo final {
     std::wstring formatLabel;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::uint32_t frameRateNumerator = 0;
+    std::uint32_t frameRateDenominator = 0;
+    std::uint32_t averageVideoBitrate = 0;
     bool hasAudio = false;
     GUID videoSubtype{};
 };

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <chrono>
 #include <cwchar>
 #include <filesystem>
@@ -16,6 +17,8 @@
 #include "core/InstanceCoordinator.h"
 #include "core/Logger.h"
 #include "core/WallpaperLibrarySelfTest.h"
+#include "media/MediaProbe.h"
+#include "media/video/VideoOptimizer.h"
 
 namespace {
 
@@ -27,6 +30,9 @@ struct StartupOptions final {
         lwe::app::updates::UpdateCheckMode::Live;
     std::wstring crashDiagnosticsTestMode;
     std::filesystem::path crashDiagnosticsTestDirectory;
+    std::filesystem::path videoOptimizerTestSource;
+    std::filesystem::path videoOptimizerTestOutput;
+    bool videoOptimizerExpectSkip = false;
     bool updateCheckerSelfTest = false;
 };
 
@@ -46,11 +52,19 @@ StartupOptions ParseStartupOptions() {
         L"--test-crash-diagnostics=";
     constexpr std::wstring_view crashDirectoryPrefix =
         L"--test-crash-directory=";
+    constexpr std::wstring_view optimizerSourcePrefix =
+        L"--test-video-optimizer=";
+    constexpr std::wstring_view optimizerOutputPrefix =
+        L"--test-video-optimizer-output=";
 
     for (int index = 1; index < argumentCount; ++index) {
         const std::wstring_view argument(arguments[index]);
         if (argument == L"--test-update-check") {
             options.updateCheckerSelfTest = true;
+            continue;
+        }
+        if (argument == L"--test-video-optimizer-expect-skip") {
+            options.videoOptimizerExpectSkip = true;
             continue;
         }
         if (argument == L"--test-update-result=rate-limit") {
@@ -66,6 +80,16 @@ StartupOptions ParseStartupOptions() {
         if (argument.starts_with(crashDirectoryPrefix)) {
             options.crashDiagnosticsTestDirectory =
                 std::wstring(argument.substr(crashDirectoryPrefix.size()));
+            continue;
+        }
+        if (argument.starts_with(optimizerSourcePrefix)) {
+            options.videoOptimizerTestSource =
+                std::wstring(argument.substr(optimizerSourcePrefix.size()));
+            continue;
+        }
+        if (argument.starts_with(optimizerOutputPrefix)) {
+            options.videoOptimizerTestOutput =
+                std::wstring(argument.substr(optimizerOutputPrefix.size()));
             continue;
         }
         if (argument.starts_with(libraryTestPrefix)) {
@@ -152,6 +176,102 @@ int RunCrashDiagnosticsSelfTest(const StartupOptions& options) {
     return exitCode;
 }
 
+int RunVideoOptimizerSelfTest(const StartupOptions& options) {
+    if (options.videoOptimizerTestSource.empty() ||
+        options.videoOptimizerTestOutput.empty()) {
+        lwe::core::LogError(
+            L"Video optimizer self-test requires source and output paths.");
+        return 2;
+    }
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(comResult) && comResult != RPC_E_CHANGED_MODE) {
+        lwe::core::LogError(L"COM initialization failed.", comResult);
+        return 3;
+    }
+    const HRESULT mediaFoundationResult =
+        MFStartup(MF_VERSION, MFSTARTUP_FULL);
+    if (FAILED(mediaFoundationResult)) {
+        if (SUCCEEDED(comResult)) {
+            CoUninitialize();
+        }
+        lwe::core::LogError(L"Media Foundation initialization failed.",
+                            mediaFoundationResult);
+        return 4;
+    }
+
+    lwe::media::MediaInfo sourceInfo;
+    HRESULT result = lwe::media::ProbeMediaFile(
+        options.videoOptimizerTestSource.native(), sourceInfo);
+    const std::uint32_t targetWidth =
+        options.videoOptimizerExpectSkip
+            ? std::max(1920U, sourceInfo.width)
+            : (sourceInfo.width > 1920 ? 1920U : 640U);
+    const std::uint32_t targetHeight =
+        options.videoOptimizerExpectSkip
+            ? std::max(1080U, sourceInfo.height)
+            : (sourceInfo.height > 1080 ? 1080U : 360U);
+    lwe::media::video::VideoOptimizationPlan plan;
+    if (SUCCEEDED(result)) {
+        result = lwe::media::video::PlanVideoOptimization(
+            options.videoOptimizerTestSource.native(), targetWidth,
+            targetHeight, plan);
+    }
+    if (SUCCEEDED(result) && options.videoOptimizerExpectSkip) {
+        if (plan.needed) {
+            result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        } else {
+            DeleteFileW(options.videoOptimizerTestOutput.c_str());
+            MFShutdown();
+            if (SUCCEEDED(comResult)) {
+                CoUninitialize();
+            }
+            lwe::core::LogInfo(L"VIDEO_OPTIMIZER_SKIP_SELF_TEST=True");
+            return 0;
+        }
+    } else if (SUCCEEDED(result) && !plan.needed) {
+        result = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
+    if (SUCCEEDED(result)) {
+        DeleteFileW(options.videoOptimizerTestOutput.c_str());
+        result = lwe::media::video::OptimizeVideo(
+            options.videoOptimizerTestSource.native(),
+            options.videoOptimizerTestOutput.native(), plan);
+    }
+    lwe::media::MediaInfo optimizedInfo;
+    if (SUCCEEDED(result)) {
+        result = lwe::media::ProbeMediaFile(
+            options.videoOptimizerTestOutput.native(), optimizedInfo);
+    }
+    if (SUCCEEDED(result) &&
+        (optimizedInfo.kind != lwe::media::WallpaperKind::Video ||
+         optimizedInfo.width != plan.outputWidth ||
+         optimizedInfo.height != plan.outputHeight ||
+         optimizedInfo.frameRateDenominator == 0 ||
+         static_cast<std::uint64_t>(optimizedInfo.frameRateNumerator) *
+                 plan.frameRateDenominator !=
+             static_cast<std::uint64_t>(plan.frameRateNumerator) *
+                 optimizedInfo.frameRateDenominator ||
+         (plan.hasAudio && !optimizedInfo.hasAudio))) {
+        result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+    }
+
+    MFShutdown();
+    if (SUCCEEDED(comResult)) {
+        CoUninitialize();
+    }
+    if (FAILED(result)) {
+        lwe::core::LogError(L"Video optimizer self-test failed.", result);
+        return 5;
+    }
+    lwe::core::LogInfo(
+        L"VIDEO_OPTIMIZER_SELF_TEST=True, output=" +
+        std::to_wstring(optimizedInfo.width) + L"x" +
+        std::to_wstring(optimizedInfo.height) + L", fps=" +
+        std::to_wstring(optimizedInfo.frameRateNumerator) + L"/" +
+        std::to_wstring(optimizedInfo.frameRateDenominator));
+    return 0;
+}
+
 }  // namespace
 
 int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
@@ -174,6 +294,12 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 L"Update checker self-test failed with code " +
                 std::to_wstring(exitCode) + L'.');
         }
+        lwe::core::ShutdownLogging();
+        return exitCode;
+    }
+    if (!options.videoOptimizerTestSource.empty() ||
+        !options.videoOptimizerTestOutput.empty()) {
+        const int exitCode = RunVideoOptimizerSelfTest(options);
         lwe::core::ShutdownLogging();
         return exitCode;
     }

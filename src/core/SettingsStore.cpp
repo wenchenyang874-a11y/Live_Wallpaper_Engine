@@ -499,6 +499,11 @@ std::optional<AppSettings> SettingsStore::Load() const {
             ParseBooleanField(json, L"spanSelection").value_or(true);
         settings.soundEnabled =
             ParseBooleanField(json, L"soundEnabled").value_or(false);
+        settings.releaseVideoResourcesOnPause =
+            *version >= 5
+                ? ParseBooleanField(json, L"releaseVideoResourcesOnPause")
+                      .value_or(true)
+                : true;
     } else {
         const auto wallpaperType = ParseStringField(json, L"wallpaperType");
         const auto kind = wallpaperType.has_value()
@@ -547,8 +552,10 @@ HRESULT SettingsStore::Save(const AppSettings& settings) const {
         }
     }
 
-    std::wstring json = L"{\r\n  \"version\": 4,\r\n  \"soundEnabled\": ";
+    std::wstring json = L"{\r\n  \"version\": 5,\r\n  \"soundEnabled\": ";
     json += settings.soundEnabled ? L"true" : L"false";
+    json += L",\r\n  \"releaseVideoResourcesOnPause\": ";
+    json += settings.releaseVideoResourcesOnPause ? L"true" : L"false";
     json += L",\r\n  \"selectedDisplayTargets\": \"";
     json += EscapeJsonString(settings.displayTargets);
     json += L"\",\r\n  \"spanSelection\": ";

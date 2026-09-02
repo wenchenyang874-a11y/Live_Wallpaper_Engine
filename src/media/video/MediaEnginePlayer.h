@@ -90,7 +90,6 @@ private:
     std::uint32_t generation_ = 0;
     std::chrono::steady_clock::time_point statisticsStartedAt_{};
     std::chrono::steady_clock::time_point statisticsPauseStartedAt_{};
-    std::chrono::steady_clock::time_point nextFrameTransferAt_{};
     std::chrono::steady_clock::duration statisticsPausedDuration_{};
 };
 

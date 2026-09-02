@@ -177,7 +177,7 @@ try {
         [LweUiPlaybackProbe]::GetDlgItem($control, 1112) -eq [IntPtr]::Zero
     if (-not $applyButtonRemoved -or -not $globalCancelButtonRemoved -or
         -not $activeDrawerHeaderRemoved) {
-        throw 'A removed legacy action/header control is still present.'
+        throw 'The current action controls do not match the expected layout.'
     }
     [void][LweUiPlaybackProbe]::SendMessage(
         $displayMode, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 20))

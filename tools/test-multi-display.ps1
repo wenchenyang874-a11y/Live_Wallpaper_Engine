@@ -138,14 +138,15 @@ try {
     }
 
     # The save hook exists only in controlled mode. It verifies that the app's
-    # own v4 serializer round-trips both assignments before this script restores
+    # own current serializer round-trips both assignments before this script restores
     # the user's exact original bytes.
     [void][LweMultiDisplayProbe]::PostMessage(
         $control, 0x0111, [IntPtr]2198, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 300
     $saved = Get-Content -Raw -Encoding UTF8 $settingsPath | ConvertFrom-Json
-    if ($saved.version -ne 4 -or @($saved.assignments).Count -ne 2) {
-        throw 'The overlapping v4 settings were not normalized to two assignments.'
+    if ($saved.version -ne 5 -or @($saved.assignments).Count -ne 2 -or
+        $saved.releaseVideoResourcesOnPause -ne $true) {
+        throw 'The overlapping v4 settings were not normalized and migrated to v5.'
     }
     $normalizedTargets = @{}
     foreach ($assignment in @($saved.assignments)) {
