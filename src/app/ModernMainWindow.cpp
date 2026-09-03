@@ -136,6 +136,60 @@ bool IsPointInVerticalScrollStrip(const HWND window, const POINT point) {
     return scrollWidth > 0 && point.x >= client.right - scrollWidth;
 }
 
+struct ListScrollGeometry final {
+    RECT scrollRectangle{};
+    int trackTop = 0;
+    int trackBottom = 0;
+    int thumbTop = 0;
+    int thumbBottom = 0;
+    int maximumTopIndex = 0;
+    int visibleRows = 1;
+};
+
+std::optional<ListScrollGeometry> GetListScrollGeometry(const HWND list) {
+    RECT windowRectangle{};
+    RECT client{};
+    if (!IsWindow(list) || !GetWindowRect(list, &windowRectangle) ||
+        !GetClientRect(list, &client)) {
+        return std::nullopt;
+    }
+    const int count = static_cast<int>(
+        SendMessageW(list, LB_GETCOUNT, 0, 0));
+    const int rowHeight = std::max(
+        1, static_cast<int>(SendMessageW(list, LB_GETITEMHEIGHT, 0, 0)));
+    const int visibleRows = std::max(
+        1, static_cast<int>(client.bottom - client.top) / rowHeight);
+    const int maximumTop = std::max(0, count - visibleRows);
+    if (maximumTop == 0) {
+        return std::nullopt;
+    }
+
+    const int scrollWidth = std::max(
+        1, GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(list)));
+    ListScrollGeometry geometry;
+    geometry.scrollRectangle = {
+        windowRectangle.right - scrollWidth, windowRectangle.top,
+        windowRectangle.right, windowRectangle.bottom};
+    geometry.trackTop = windowRectangle.top + scrollWidth;
+    geometry.trackBottom = windowRectangle.bottom - scrollWidth;
+    geometry.maximumTopIndex = maximumTop;
+    geometry.visibleRows = visibleRows;
+
+    const int trackHeight = std::max(1, geometry.trackBottom - geometry.trackTop);
+    const int thumbHeight = std::clamp(
+        MulDiv(trackHeight, visibleRows, std::max(1, count)), scrollWidth,
+        trackHeight);
+    const int travel = std::max(0, trackHeight - thumbHeight);
+    const int topIndex = std::clamp(
+        static_cast<int>(SendMessageW(list, LB_GETTOPINDEX, 0, 0)), 0,
+        maximumTop);
+    geometry.thumbTop = geometry.trackTop +
+                        (maximumTop == 0 ? 0
+                                         : MulDiv(travel, topIndex, maximumTop));
+    geometry.thumbBottom = geometry.thumbTop + thumbHeight;
+    return geometry;
+}
+
 void FillRoundedRectangle(const HDC context, const RECT& rectangle,
                           const COLORREF fill, const COLORREF outline,
                           const int radius, const int outlineWidth = 1) {
@@ -1726,7 +1780,13 @@ std::optional<bool> ShowPerformanceSettingsDialog(
     const BOOL dark = TRUE;
     DwmSetWindowAttribute(dialog, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
                           sizeof(dark));
-    EnableWindow(owner, FALSE);
+    const LONG_PTR ownerStyle = GetWindowLongPtrW(owner, GWL_STYLE);
+    const bool ownerWasEnabled = (ownerStyle & WS_DISABLED) == 0;
+    if (ownerWasEnabled) {
+        // Avoid EnableWindow: it broadcasts enabled-state changes through the
+        // entire owner-drawn tree and produces a visible repaint on close.
+        SetWindowLongPtrW(owner, GWL_STYLE, ownerStyle | WS_DISABLED);
+    }
     ShowWindow(dialog, SW_SHOWNORMAL);
     SetForegroundWindow(dialog);
     SetFocus(state.releaseResources);
@@ -1750,7 +1810,9 @@ std::optional<bool> ShowPerformanceSettingsDialog(
     if (IsWindow(dialog)) {
         DestroyWindow(dialog);
     }
-    EnableWindow(owner, TRUE);
+    if (ownerWasEnabled && IsWindow(owner)) {
+        SetWindowLongPtrW(owner, GWL_STYLE, ownerStyle);
+    }
     SetForegroundWindow(owner);
     if (receivedQuit) {
         PostQuitMessage(static_cast<int>(quitCode));
@@ -1761,6 +1823,7 @@ std::optional<bool> ShowPerformanceSettingsDialog(
 }  // namespace
 
 ModernMainWindow::~ModernMainWindow() {
+    FinishLibraryScrollbarDrag();
     if (groupTooltip_ != nullptr && IsWindow(groupTooltip_)) {
         RemoveWindowSubclass(groupTooltip_,
                              &ModernMainWindow::GroupTooltipProcedure, 3);
@@ -3642,6 +3705,90 @@ void ModernMainWindow::CancelLibraryDrag() {
     }
 }
 
+bool ModernMainWindow::BeginLibraryScrollbarInteraction(
+    const POINT screenPoint) {
+    const auto geometry = GetListScrollGeometry(library_);
+    if (!geometry.has_value() ||
+        !PtInRect(&geometry->scrollRectangle, screenPoint)) {
+        return false;
+    }
+
+    const int currentTop = std::clamp(
+        static_cast<int>(SendMessageW(library_, LB_GETTOPINDEX, 0, 0)), 0,
+        geometry->maximumTopIndex);
+    int nextTop = currentTop;
+    if (screenPoint.y < geometry->trackTop) {
+        --nextTop;
+    } else if (screenPoint.y >= geometry->trackBottom) {
+        ++nextTop;
+    } else if (screenPoint.y < geometry->thumbTop) {
+        nextTop -= geometry->visibleRows;
+    } else if (screenPoint.y >= geometry->thumbBottom) {
+        nextTop += geometry->visibleRows;
+    } else {
+        CancelLibraryDrag();
+        libraryScrollbarDragOffset_ = screenPoint.y - geometry->thumbTop;
+        libraryScrollbarDragActive_ = true;
+        SetCapture(library_);
+        return true;
+    }
+
+    nextTop = std::clamp(nextTop, 0, geometry->maximumTopIndex);
+    if (nextTop != currentTop) {
+        SendMessageW(library_, LB_SETTOPINDEX, nextTop, 0);
+        RedrawWindow(library_, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+    }
+    return true;
+}
+
+void ModernMainWindow::UpdateLibraryScrollbarDrag(POINT clientPoint) {
+    if (!libraryScrollbarDragActive_) {
+        return;
+    }
+    const auto geometry = GetListScrollGeometry(library_);
+    if (!geometry.has_value()) {
+        FinishLibraryScrollbarDrag();
+        return;
+    }
+    if (!ClientToScreen(library_, &clientPoint)) {
+        return;
+    }
+    const int thumbHeight = geometry->thumbBottom - geometry->thumbTop;
+    const int travel = std::max(
+        0, geometry->trackBottom - geometry->trackTop - thumbHeight);
+    const int thumbTop = std::clamp(
+        static_cast<int>(clientPoint.y) - libraryScrollbarDragOffset_,
+        geometry->trackTop,
+        geometry->trackTop + travel);
+    const int nextTop = travel == 0
+                            ? 0
+                            : std::clamp(
+                                  MulDiv(geometry->maximumTopIndex,
+                                         thumbTop - geometry->trackTop,
+                                         travel),
+                                  0, geometry->maximumTopIndex);
+    const int currentTop = static_cast<int>(
+        SendMessageW(library_, LB_GETTOPINDEX, 0, 0));
+    if (nextTop == currentTop) {
+        return;
+    }
+    SendMessageW(library_, LB_SETTOPINDEX, nextTop, 0);
+    RedrawWindow(library_, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_FRAME | RDW_UPDATENOW);
+}
+
+void ModernMainWindow::FinishLibraryScrollbarDrag() {
+    if (!libraryScrollbarDragActive_) {
+        return;
+    }
+    libraryScrollbarDragActive_ = false;
+    libraryScrollbarDragOffset_ = 0;
+    if (GetCapture() == library_) {
+        ReleaseCapture();
+    }
+}
+
 void ModernMainWindow::UpdateGroupTooltip(const int groupIndex) {
     if (!IsWindow(groupTooltip_)) {
         return;
@@ -3908,6 +4055,14 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         return 1;
     }
 
+    if ((message == WM_NCLBUTTONDOWN || message == WM_NCLBUTTONDBLCLK) &&
+        window == self->library_ && wParam == HTVSCROLL) {
+        const POINT screenPoint{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (self->BeginLibraryScrollbarInteraction(screenPoint)) {
+            return 0;
+        }
+    }
+
     if (message == WM_LBUTTONDOWN && window == self->library_) {
         const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         if (!IsPointInVerticalScrollStrip(window, point)) {
@@ -3923,6 +4078,12 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         }
         self->CancelGroupDrag();
     } else if (message == WM_MOUSEMOVE) {
+        if (window == self->library_ &&
+            self->libraryScrollbarDragActive_) {
+            self->UpdateLibraryScrollbarDrag(
+                POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+            return 0;
+        }
         POINT cursor{};
         if (GetCursorPos(&cursor) && WindowFromPoint(cursor) == window) {
             TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
@@ -3974,6 +4135,10 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
             self->SetControlHovered(window, false);
         }
     } else if (message == WM_LBUTTONUP && window == self->library_) {
+        if (self->libraryScrollbarDragActive_) {
+            self->FinishLibraryScrollbarDrag();
+            return 0;
+        }
         const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         if (self->libraryDragActive_) {
             self->FinishLibraryDrag(point);
@@ -4089,6 +4254,8 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         self->ScrollGroupsDuringDrag();
         return 0;
     } else if (message == WM_CAPTURECHANGED && window == self->library_) {
+        self->libraryScrollbarDragActive_ = false;
+        self->libraryScrollbarDragOffset_ = 0;
         self->CancelLibraryDrag();
     } else if (message == WM_SETCURSOR && window == self->library_ &&
                self->libraryDragActive_) {

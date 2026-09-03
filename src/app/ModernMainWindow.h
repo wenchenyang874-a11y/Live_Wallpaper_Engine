@@ -208,6 +208,9 @@ private:
     void CancelLibraryDrag();
     void ScrollLibraryDuringDrag();
     void UpdateLibraryDragTarget(POINT clientPoint);
+    bool BeginLibraryScrollbarInteraction(POINT screenPoint);
+    void UpdateLibraryScrollbarDrag(POINT clientPoint);
+    void FinishLibraryScrollbarDrag();
     void SetControlHovered(HWND control, bool hovered);
     void SetListHovered(HWND list, POINT clientPoint, bool hovered);
     void StartHoverAnimation();
@@ -303,6 +306,8 @@ private:
     int libraryDragScrollDirection_ = 0;
     bool libraryDragActive_ = false;
     bool libraryDragInsertAfter_ = false;
+    bool libraryScrollbarDragActive_ = false;
+    int libraryScrollbarDragOffset_ = 0;
     std::optional<std::vector<core::WallpaperItem>> pendingLibraryOrder_;
     POINT groupDragStart_{};
     int groupDragSourceIndex_ = -1;

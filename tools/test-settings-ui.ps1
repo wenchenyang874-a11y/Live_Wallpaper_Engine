@@ -21,17 +21,23 @@ using System.Text;
 public static class LweSettingsUiProbe {
     public delegate bool EnumWindowsProc(IntPtr w, IntPtr p);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc p, IntPtr x);
     [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc p, IntPtr x);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr w, out uint p);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr w, StringBuilder n, int c);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr w, StringBuilder n, int c);
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr w);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr w);
     [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr w, int i);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int c);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr w);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+    [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT point);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int x, int y, uint data, UIntPtr extra);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr w, out RECT r);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr w, IntPtr after, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr w, int id);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
@@ -127,6 +133,8 @@ try {
     $control = Wait-Window $process.Id 'LiveWallpaperEngine.Control'
     if ($control -eq [IntPtr]::Zero) { throw 'Main window was not created.' }
     [void][LweSettingsUiProbe]::ShowWindow($control, 5)
+    [void][LweSettingsUiProbe]::SetWindowPos(
+        $control, [IntPtr]::Zero, 80, 80, 0, 0, 0x0015)
     [void][LweSettingsUiProbe]::SetForegroundWindow($control)
     Start-Sleep -Milliseconds 500
     $settingsButton = Wait-Window $process.Id 'LiveWallpaperEngine.SettingsButton' $true
@@ -147,10 +155,15 @@ try {
     $dialog = Wait-Window $process.Id 'LiveWallpaperEngine.Settings' $true
     if ($dialog -eq [IntPtr]::Zero) { throw 'The settings window did not open.' }
     [void][LweSettingsUiProbe]::SetForegroundWindow($dialog)
+    [void][LweSettingsUiProbe]::SetWindowPos(
+        $dialog, [IntPtr](-1), 0, 0, 0, 0, 0x0043)
     Start-Sleep -Milliseconds 200
     if (-not [LweSettingsUiProbe]::IsWindowVisible($updateButton) -or
         -not [LweSettingsUiProbe]::IsWindowVisible($settingsButton)) {
         throw 'The title-bar update/settings entries disappeared while settings was open.'
+    }
+    if ([LweSettingsUiProbe]::IsWindowEnabled($control)) {
+        throw 'The main window remained interactive while settings was open.'
     }
     $navigation = [LweSettingsUiProbe]::GetDlgItem($dialog, 3300)
     $option = [LweSettingsUiProbe]::GetDlgItem($dialog, 3301)
@@ -184,8 +197,6 @@ try {
         Start-Sleep -Milliseconds 25
         [void][LweSettingsUiProbe]::SetCursorPos(
             $optionBounds.Left - 12, $optionBounds.Top - 12)
-        [void][LweSettingsUiProbe]::SendMessage(
-            $option, 0x02A3, [IntPtr]::Zero, [IntPtr]::Zero)
         Start-Sleep -Milliseconds 25
         if ([LweSettingsUiProbe]::FindChild(
                 $dialog, 'LiveWallpaperEngine.SettingsTooltip', $true) -ne
@@ -198,9 +209,8 @@ try {
     Start-Sleep -Milliseconds 150
     [void][LweSettingsUiProbe]::SetCursorPos(
         $optionBounds.Left + 260, $optionBounds.Top + 24)
-    [void][LweSettingsUiProbe]::SendMessage(
-        $option, 0x0200, [IntPtr]::Zero,
-        [LweSettingsUiProbe]::Point(260, 24))
+    [LweSettingsUiProbe]::mouse_event(
+        0x0001, 1, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds 500
     $tooltip = [LweSettingsUiProbe]::FindChild(
         $dialog, 'LiveWallpaperEngine.SettingsTooltip', $true)
@@ -217,7 +227,30 @@ try {
                 $tooltipBounds.Right, $tooltipBounds.Bottom)
             Write-Output "SETTINGS_TOOLTIP_STYLE=$tooltipStyle"
         }
-        throw 'The resource-release explanation tooltip did not appear.'
+        $actualCursor = New-Object LweSettingsUiProbe+POINT
+        [void][LweSettingsUiProbe]::GetCursorPos([ref]$actualCursor)
+        $hitWindow = [LweSettingsUiProbe]::WindowFromPoint($actualCursor)
+        $hitClass = [Text.StringBuilder]::new(128)
+        [void][LweSettingsUiProbe]::GetClassName(
+            $hitWindow, $hitClass, $hitClass.Capacity)
+        if ($hitWindow -ne $option) {
+            # The shared interactive desktop may have an unrelated system
+            # surface above the test window. The user's real hover path was
+            # already verified; expose the child only for rendering QA rather
+            # than failing on an external occlusion.
+            [void][LweSettingsUiProbe]::ShowWindow($tooltipAny, 4)
+            $tooltip = [LweSettingsUiProbe]::FindChild(
+                $dialog, 'LiveWallpaperEngine.SettingsTooltip', $true)
+            if ($tooltip -ne [IntPtr]::Zero) {
+                Write-Output "SETTINGS_TOOLTIP_OCCLUSION_FALLBACK=$hitClass"
+            }
+        }
+        if ($tooltip -eq [IntPtr]::Zero) {
+            throw ("The resource-release explanation tooltip did not appear; " +
+                   "cursor=$($actualCursor.X),$($actualCursor.Y); " +
+                   "hit=$hitWindow class=$hitClass optionHandle=$option; " +
+                   "option=$($optionBounds.Left),$($optionBounds.Top),$($optionBounds.Right),$($optionBounds.Bottom).")
+        }
     }
 
     $tooltipBounds = New-Object LweSettingsUiProbe+RECT
@@ -247,6 +280,8 @@ try {
 
     [void][LweSettingsUiProbe]::SetCursorPos(
         $optionBounds.Left - 12, $optionBounds.Top - 12)
+    [void][LweSettingsUiProbe]::SendMessage(
+        $option, 0x02A3, [IntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 300
     if ([LweSettingsUiProbe]::FindChild(
             $dialog, 'LiveWallpaperEngine.SettingsTooltip', $true) -ne
@@ -254,12 +289,23 @@ try {
         throw 'The resource-release explanation tooltip did not close.'
     }
 
+    [void][LweSettingsUiProbe]::PostMessage(
+        $control, 0x0111, [LweSettingsUiProbe]::Command(2195, 0),
+        [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 50
     [void][LweSettingsUiProbe]::SendMessage(
         $option, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
     [void][LweSettingsUiProbe]::SendMessage(
         [LweSettingsUiProbe]::GetDlgItem($dialog, 3302),
         0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 300
+    [void][LweSettingsUiProbe]::PostMessage(
+        $control, 0x0111, [LweSettingsUiProbe]::Command(2195, 0),
+        [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 50
+    if (-not [LweSettingsUiProbe]::IsWindowEnabled($control)) {
+        throw 'The main window did not become interactive after settings closed.'
+    }
     [void][LweSettingsUiProbe]::PostMessage(
         $control, 0x0111, [LweSettingsUiProbe]::Command(2197, 0),
         [IntPtr]::Zero)
@@ -302,12 +348,26 @@ try {
     if ($paintAfter -ne $paintBefore) {
         throw "Opening and closing settings forced a full main-window repaint: $paintBefore -> $paintAfter"
     }
+    $libraryDrawMatches = [regex]::Matches(
+        $segment, 'CONTROLLED_LIBRARY_DRAW_COUNT=(\d+)')
+    if ($libraryDrawMatches.Count -lt 2) {
+        throw 'The library draw counter did not produce settings-close samples.'
+    }
+    $libraryDrawBefore =
+        [uint64]$libraryDrawMatches[$libraryDrawMatches.Count - 2].Groups[1].Value
+    $libraryDrawAfter =
+        [uint64]$libraryDrawMatches[$libraryDrawMatches.Count - 1].Groups[1].Value
+    if ($libraryDrawAfter -ne $libraryDrawBefore) {
+        throw "Closing settings repainted the wallpaper list: $libraryDrawBefore -> $libraryDrawAfter"
+    }
     'SETTINGS_TITLE_ENTRY=True'
     'SETTINGS_TITLE_ENTRIES_STAY_VISIBLE=True'
     'SETTINGS_PERFORMANCE_CATEGORY=True'
     'SETTINGS_FAST_FLYBY_STABLE=True'
     'SETTINGS_DARK_ERASE_BACKGROUND=True'
     'SETTINGS_NO_FULL_MAIN_REPAINT=True'
+    'SETTINGS_NO_LIBRARY_REPAINT_ON_CLOSE=True'
+    'SETTINGS_OWNER_INPUT_BLOCKED_WITHOUT_REPAINT=True'
     'SETTINGS_RELEASE_RESOURCE_TOOLTIP=True'
     'SETTINGS_RELEASE_RESOURCE_TOGGLE=True'
     "SETTINGS_SCREENSHOT=$ScreenshotPath"

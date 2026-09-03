@@ -20,6 +20,8 @@ public static class LweLibraryManagementProbe
     public delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc p, IntPtr x);
     [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr w, out uint p);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr w, StringBuilder n, int c);
@@ -31,7 +33,11 @@ public static class LweLibraryManagementProbe
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr w, uint m, IntPtr a, ref RECT b);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr w, uint m, IntPtr a, IntPtr b);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr w, out RECT r);
+    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr w, out RECT r);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr w);
+    [DllImport("user32.dll")] public static extern int GetSystemMetricsForDpi(int index, uint dpi);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] public static extern bool ScreenToClient(IntPtr w, ref POINT point);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr w);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr w, int command);
 
@@ -170,17 +176,52 @@ try {
         throw 'The local wallpaper library needs at least two items for this test.'
     }
 
-    # Exercise the list box's native vertical-scroll path. The product fix keeps
-    # pointer messages in the scroll strip on this same default-control path;
-    # a direct scroll command is deterministic in unattended test sessions.
+    # Drive the same non-client thumb path used by a real mouse drag. The app
+    # owns this path so card dragging and hover suppression cannot consume it.
     [void][LweLibraryManagementProbe]::SendMessage(
         $library, 0x0197, [IntPtr]::Zero, [IntPtr]::Zero) # LB_SETTOPINDEX
+    $libraryBounds = New-Object LweLibraryManagementProbe+RECT
+    $libraryClient = New-Object LweLibraryManagementProbe+RECT
+    [void][LweLibraryManagementProbe]::GetWindowRect(
+        $library, [ref]$libraryBounds)
+    [void][LweLibraryManagementProbe]::GetClientRect(
+        $library, [ref]$libraryClient)
+    $rowHeight = [int][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x01A1, [IntPtr]::Zero, [IntPtr]::Zero) # LB_GETITEMHEIGHT
+    $visibleRows = [Math]::Max(
+        1, [int](($libraryClient.Bottom - $libraryClient.Top) / $rowHeight))
+    if ($count -le $visibleRows) {
+        throw 'The wallpaper list is not long enough to test thumb dragging.'
+    }
+    $scrollWidth = [Math]::Max(
+        1, [LweLibraryManagementProbe]::GetSystemMetricsForDpi(
+            2, [LweLibraryManagementProbe]::GetDpiForWindow($library)))
+    $trackTop = $libraryBounds.Top + $scrollWidth
+    $trackBottom = $libraryBounds.Bottom - $scrollWidth
+    $trackHeight = $trackBottom - $trackTop
+    $thumbHeight = [Math]::Max(
+        $scrollWidth,
+        [int][Math]::Round($trackHeight * $visibleRows / $count))
+    $dragX = $libraryBounds.Right - [int]($scrollWidth / 2)
+    $dragStartY = $trackTop + [int]($thumbHeight / 2)
+    $dragEndY = $trackBottom - [int]($thumbHeight / 2)
+    [void][LweLibraryManagementProbe]::SetCursorPos($dragX, $dragStartY)
     [void][LweLibraryManagementProbe]::SendMessage(
-        $library, 0x0115, [IntPtr]1, [IntPtr]::Zero) # WM_VSCROLL/SB_LINEDOWN
+        $library, 0x00A1, [IntPtr]7,
+        [LweLibraryManagementProbe]::Point($dragX, $dragStartY)) # WM_NCLBUTTONDOWN/HTVSCROLL
+    $endPoint = New-Object LweLibraryManagementProbe+POINT
+    $endPoint.X = $dragX
+    $endPoint.Y = $dragEndY
+    [void][LweLibraryManagementProbe]::ScreenToClient($library, [ref]$endPoint)
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x0200, [IntPtr]1,
+        [LweLibraryManagementProbe]::Point($endPoint.X, $endPoint.Y)) # WM_MOUSEMOVE/MK_LBUTTON
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x0202, [IntPtr]::Zero, [IntPtr]::Zero)
     $scrolledTopIndex = [int][LweLibraryManagementProbe]::SendMessage(
         $library, 0x018E, [IntPtr]::Zero, [IntPtr]::Zero) # LB_GETTOPINDEX
     if ($scrolledTopIndex -le 0) {
-        throw 'The wallpaper list did not respond to its native vertical-scroll command.'
+        throw 'Dragging the wallpaper-list scroll thumb did not move the list.'
     }
     [void][LweLibraryManagementProbe]::SendMessage(
         $library, 0x0197, [IntPtr]::Zero, [IntPtr]::Zero)
@@ -334,7 +375,7 @@ try {
         $choice, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
 
     Write-Output "LIBRARY_UI_EXPORT_SELECTION=True"
-    Write-Output "LIBRARY_UI_SCROLLBAR_NATIVE_PATH=True"
+    Write-Output "LIBRARY_UI_SCROLLBAR_DRAG=True"
     Write-Output "LIBRARY_UI_DRAG_REORDER=True"
     Write-Output "LIBRARY_UI_IMPORT_CHOICE=True"
     Write-Output "LIBRARY_UI_IMPORT_COMPRESSION_OPTION=True"
