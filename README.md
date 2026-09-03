@@ -14,7 +14,7 @@
 - **常见壁纸格式**：支持 JPG/JPEG、PNG、BMP、GIF，以及系统 Media Foundation 能够解码的常见视频格式。
 - **多屏自由分配**：支持跨屏扩展和分屏显示；分屏模式下，同一壁纸可应用到多个屏幕，不同屏幕也可使用不同壁纸。
 - **动态壁纸播放**：GIF 和视频循环播放，视频默认静音，可在主界面或托盘菜单中开关声音、暂停或继续播放。
-- **原画优先与可选压缩**：默认按视频原分辨率、原帧率播放；导入时可主动选择“压缩到屏幕分辨率大小”，压缩副本不会低于当前显示所需尺寸且保持源帧率，原文件完整保留。
+- **原画优先与可选压缩**：默认按视频原分辨率、原帧率播放；导入时可主动选择“压缩到屏幕分辨率大小”，压缩后的视频会作为实际壁纸保存到本地库，不低于当前显示所需尺寸并保持源帧率，用户选择的来源文件不会被修改。
 - **本地壁纸库与分组**：提供全部壁纸、最爱壁纸和可排序的自定义分组；同一壁纸可加入多个分组，搜索只作用于当前分组。
 - **通用批量操作**：壁纸支持泛用多选、全选和取消全选，可批量添加到分组、收藏、导出；在全部壁纸中还可确认后批量删除。
 - **导入与分享**：可批量导入图片/视频，也可导入或导出标准 ZIP 分享包；每张壁纸独立保存为带 SHA-256 校验的 `.lwewall` 文件。
@@ -41,7 +41,7 @@
 
 动态内容会在会话锁定、系统睡眠、显示器关闭，以及检测到符合规则的全屏应用时暂停。顶部 `设置 → 性能优化` 中的“锁屏/熄屏时释放视频资源”默认开启：锁屏或熄屏持续 1 分钟后会关闭视频解码会话并释放转换表面，系统睡眠时立即释放；恢复后自动重建，可能出现短暂卡顿。关闭后仍会暂停播放，但保留解码资源以换取更快恢复。视频使用 Media Foundation/Media Engine 解码并优先利用系统硬件解码能力，4K 视频不再额外限制为 30 FPS；GIF 使用 WIC 按帧解码与合成。
 
-“压缩到屏幕分辨率大小”只作用于本次导入的视频，默认关闭。开启后软件在导入完成后后台检查分辨率，只压缩高于当前显示需求的视频，使用高质量 H.264 编码并保留源帧率；分辨率小于或等于屏幕时不会执行压缩，并给出提示。图片和 GIF 本来就会在渲染阶段高质量缩放到目标屏幕，不额外生成有损副本。
+“压缩到屏幕分辨率大小”只作用于本次导入的视频，默认关闭。开启后软件先在后台检查分辨率，只转码高于当前显示需求的视频，再把转码后的 H.264/MP4 文件作为实际壁纸导入；壁纸列表因此会显示压缩后的真实分辨率。分辨率小于或等于屏幕时直接导入来源文件并给出提示。用户选择的来源文件始终不变；图片和 GIF 会在渲染阶段高质量缩放，不额外生成有损副本。
 
 ## 多屏显示
 
@@ -76,7 +76,6 @@
 | 数据 | 位置 |
 | --- | --- |
 | 壁纸库 | `%LOCALAPPDATA%\LiveWallpaperEngine\library` |
-| 用户选择生成的视频压缩副本 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.optimized` |
 | 设置 | `%LOCALAPPDATA%\LiveWallpaperEngine\settings.json` |
 | 自定义排序 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.library-order.v1` |
 | 最爱与壁纸分组 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.wallpaper-groups.v1` |
@@ -142,6 +141,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\test-static-overlay.ps1 -Configuration Release
 .\tools\test-media.ps1 -Configuration Release -GifPath .\sample.gif -VideoPath .\sample.mp4
 .\tools\test-video-optimizer.ps1 -Configuration Release -VideoPath .\sample-4k.mp4
+.\tools\test-compressed-import.ps1 -Configuration Release -VideoPath .\sample-4k.mp4
 .\tools\test-multi-display.ps1 -Configuration Release -ImagePath .\sample.png -VideoPath .\sample.mp4
 .\tools\test-wallpaper-switch.ps1 -Configuration Release -ImagePath .\sample.png -VideoPath .\sample.mp4
 .\tools\test-video-failure-containment.ps1 -Configuration Release -VideoPath .\sample.mp4
@@ -179,7 +179,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 
 ### 为什么十几 MB 的 4K 视频播放后会占用大量 GPU 内存？
 
-文件大小是压缩后的磁盘体积，解码器工作时需要保存多张未压缩帧、硬件解码表面和转换纹理，因此不能按视频文件大小估算运行内存。核显还会从系统内存借用“共享 GPU 内存”。默认模式优先保证原画和源帧率；如果用户在导入时主动选择压缩，软件才会为高于屏幕需求的视频生成屏幕尺寸副本。原始文件仍保存在壁纸库，删除或重命名壁纸时会同步处理对应缓存。
+文件大小是压缩后的磁盘体积，解码器工作时需要保存多张未压缩帧、硬件解码表面和转换纹理，因此不能按视频文件大小估算运行内存。核显还会从系统内存借用“共享 GPU 内存”。默认模式优先保证原画和源帧率；如果用户在导入时主动选择压缩，软件会把高于屏幕需求的视频转码后再作为实际壁纸导入，用户选择的来源文件不会被修改。
 
 ## 许可
 

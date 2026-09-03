@@ -16,6 +16,7 @@
 #include "core/CrashDiagnostics.h"
 #include "core/InstanceCoordinator.h"
 #include "core/Logger.h"
+#include "core/WallpaperLibrary.h"
 #include "core/WallpaperLibrarySelfTest.h"
 #include "media/MediaProbe.h"
 #include "media/video/VideoOptimizer.h"
@@ -32,6 +33,8 @@ struct StartupOptions final {
     std::filesystem::path crashDiagnosticsTestDirectory;
     std::filesystem::path videoOptimizerTestSource;
     std::filesystem::path videoOptimizerTestOutput;
+    std::filesystem::path compressedImportTestSource;
+    std::filesystem::path testLibraryRoot;
     bool videoOptimizerExpectSkip = false;
     bool updateCheckerSelfTest = false;
 };
@@ -56,6 +59,10 @@ StartupOptions ParseStartupOptions() {
         L"--test-video-optimizer=";
     constexpr std::wstring_view optimizerOutputPrefix =
         L"--test-video-optimizer-output=";
+    constexpr std::wstring_view compressedImportPrefix =
+        L"--test-compressed-import=";
+    constexpr std::wstring_view testLibraryRootPrefix =
+        L"--test-library-root=";
 
     for (int index = 1; index < argumentCount; ++index) {
         const std::wstring_view argument(arguments[index]);
@@ -90,6 +97,16 @@ StartupOptions ParseStartupOptions() {
         if (argument.starts_with(optimizerOutputPrefix)) {
             options.videoOptimizerTestOutput =
                 std::wstring(argument.substr(optimizerOutputPrefix.size()));
+            continue;
+        }
+        if (argument.starts_with(compressedImportPrefix)) {
+            options.compressedImportTestSource = std::wstring(
+                argument.substr(compressedImportPrefix.size()));
+            continue;
+        }
+        if (argument.starts_with(testLibraryRootPrefix)) {
+            options.testLibraryRoot = std::wstring(
+                argument.substr(testLibraryRootPrefix.size()));
             continue;
         }
         if (argument.starts_with(libraryTestPrefix)) {
@@ -255,6 +272,54 @@ int RunVideoOptimizerSelfTest(const StartupOptions& options) {
         result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
     }
 
+    const std::filesystem::path importTestRoot =
+        options.videoOptimizerTestOutput.parent_path() /
+        (options.videoOptimizerTestOutput.stem().native() +
+         L".import-test");
+    std::error_code cleanupError;
+    std::filesystem::remove_all(importTestRoot, cleanupError);
+    cleanupError.clear();
+    if (SUCCEEDED(result)) {
+        const std::filesystem::path legacyDirectory =
+            importTestRoot / L".optimized";
+        std::filesystem::create_directories(legacyDirectory, cleanupError);
+        const std::filesystem::path legacyFile =
+            legacyDirectory / L"test.optimized.mp4";
+        if (cleanupError ||
+            !CopyFileW(options.videoOptimizerTestOutput.c_str(),
+                       legacyFile.c_str(), TRUE)) {
+            result = cleanupError
+                         ? HRESULT_FROM_WIN32(cleanupError.value())
+                         : HRESULT_FROM_WIN32(GetLastError());
+        }
+    }
+    lwe::core::WallpaperItem imported;
+    if (SUCCEEDED(result)) {
+        lwe::core::WallpaperLibrary importLibrary;
+        result = importLibrary.InitializeAt(importTestRoot);
+        std::filesystem::path destinationName =
+            options.videoOptimizerTestSource.filename();
+        destinationName.replace_extension(L".mp4");
+        if (SUCCEEDED(result) &&
+            std::filesystem::exists(importTestRoot / L".optimized")) {
+            result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        }
+        if (SUCCEEDED(result)) {
+            result = importLibrary.ImportFileAs(
+                options.videoOptimizerTestOutput.native(),
+                destinationName.native(), imported);
+        }
+        if (SUCCEEDED(result) &&
+            (imported.width != optimizedInfo.width ||
+             imported.height != optimizedInfo.height ||
+             imported.path.parent_path() != importTestRoot ||
+             !std::filesystem::is_regular_file(
+                 options.videoOptimizerTestSource, cleanupError))) {
+            result = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+        }
+    }
+    std::filesystem::remove_all(importTestRoot, cleanupError);
+
     MFShutdown();
     if (SUCCEEDED(comResult)) {
         CoUninitialize();
@@ -269,6 +334,7 @@ int RunVideoOptimizerSelfTest(const StartupOptions& options) {
         std::to_wstring(optimizedInfo.height) + L", fps=" +
         std::to_wstring(optimizedInfo.frameRateNumerator) + L"/" +
         std::to_wstring(optimizedInfo.frameRateDenominator));
+    lwe::core::LogInfo(L"VIDEO_OPTIMIZER_IMPORT_SELF_TEST=True");
     return 0;
 }
 
@@ -356,7 +422,9 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
         lwe::app::WallpaperApplication application(instance,
                                                    instanceCoordinator.ActivationEvent());
         exitCode = application.Run(options.testDuration, options.testWallpapers,
-                                   options.updateCheckMode);
+                                   options.updateCheckMode,
+                                   options.compressedImportTestSource.native(),
+                                   options.testLibraryRoot);
     } else {
         lwe::core::LogError(L"COM initialization failed.", comResult);
     }

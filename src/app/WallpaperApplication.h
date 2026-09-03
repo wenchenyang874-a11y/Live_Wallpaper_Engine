@@ -42,7 +42,9 @@ public:
     int Run(std::chrono::seconds testDuration,
             const std::vector<std::wstring>& testWallpapers,
             updates::UpdateCheckMode updateCheckMode =
-                updates::UpdateCheckMode::Live);
+                updates::UpdateCheckMode::Live,
+            std::wstring_view compressedImportTestSource = {},
+            std::filesystem::path testLibraryRoot = {});
 
 private:
     enum class PlaybackMode {
@@ -62,13 +64,14 @@ private:
     };
 
     struct VideoOptimizationJob final {
-        std::wstring originalPath;
+        std::wstring sourcePath;
         std::uint32_t displayWidth = 0;
         std::uint32_t displayHeight = 0;
     };
 
     struct VideoOptimizationResult final {
-        std::wstring originalPath;
+        std::wstring sourcePath;
+        std::wstring outputPath;
         HRESULT status = S_OK;
         bool optimized = false;
         bool skipped = false;
@@ -108,8 +111,8 @@ private:
     void ChooseImport();
     void ImportPaths(const std::vector<std::wstring>& paths,
                      bool compressToDisplay = false);
-    void QueueVideoOptimizations(
-        std::span<const core::WallpaperItem> importedItems);
+    void QueueVideoOptimizations(std::span<const std::wstring> sourcePaths,
+                                 bool applyFirstImported);
     void StartVideoOptimizationThread();
     void StopVideoOptimizationThread();
     void CompleteVideoOptimizations();
@@ -195,6 +198,7 @@ private:
     bool updateCheckInProgress_ = false;
     bool mediaFoundationStarted_ = false;
     bool controlledTestMode_ = false;
+    bool compressedImportTestActive_ = false;
     bool sessionLocked_ = false;
     bool systemSuspended_ = false;
     bool displayOff_ = false;
@@ -230,6 +234,8 @@ private:
     std::size_t videoOptimizationBatchOptimized_ = 0;
     std::size_t videoOptimizationBatchSkipped_ = 0;
     std::size_t videoOptimizationBatchFailed_ = 0;
+    std::size_t videoOptimizationBatchImportFailed_ = 0;
+    bool videoOptimizationBatchApplyFirst_ = false;
     updates::UpdateCheckMode updateCheckMode_ = updates::UpdateCheckMode::Live;
     std::uint32_t nextSessionToken_ = 1;
     bool spanAcrossDisplays_ = true;

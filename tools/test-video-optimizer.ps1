@@ -64,6 +64,8 @@ try {
         throw 'The optimized video is empty.'
     }
     "VIDEO_OPTIMIZER_SELF_TEST=True"
+    "VIDEO_OPTIMIZER_LIBRARY_IMPORT=True"
+    "VIDEO_OPTIMIZER_LEGACY_CACHE_CLEANUP=True"
     "SOURCE_BYTES=$sourceBytes"
     "OPTIMIZED_BYTES=$outputBytes"
     "ORIGINAL_PRESERVED=$((Get-Item -LiteralPath $VideoPath).Length -eq $sourceBytes)"

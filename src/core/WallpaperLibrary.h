@@ -32,6 +32,9 @@ public:
     std::vector<WallpaperItem> Scan() const;
 
     HRESULT ImportFile(std::wstring_view sourcePath, WallpaperItem& imported) const;
+    HRESULT ImportFileAs(std::wstring_view sourcePath,
+                         std::wstring_view destinationFileName,
+                         WallpaperItem& imported) const;
     HRESULT ImportPackage(std::wstring_view packagePath, WallpaperItem& imported) const;
     HRESULT ImportArchive(std::wstring_view archivePath,
                           std::vector<WallpaperItem>& imported) const;
@@ -44,13 +47,6 @@ public:
     HRESULT Remove(const WallpaperItem& item) const;
     HRESULT Reorder(std::span<const WallpaperItem> items) const;
 
-    HRESULT PrepareOptimizedVideoPath(
-        std::wstring_view originalPath,
-        std::filesystem::path& optimizedPath) const;
-    [[nodiscard]] std::filesystem::path ResolveVideoPlaybackPath(
-        std::wstring_view originalPath, std::uint32_t requiredWidth,
-        std::uint32_t requiredHeight) const;
-
     [[nodiscard]] const std::filesystem::path& RootDirectory() const noexcept;
 
 private:
@@ -60,11 +56,7 @@ private:
     std::vector<std::wstring> LoadOrder() const;
     HRESULT SaveOrder(std::span<const std::wstring> fileNames) const;
     HRESULT AppendOrderEntry(std::wstring_view fileName) const;
-    [[nodiscard]] std::filesystem::path OptimizedVideoPath(
-        std::wstring_view originalPath) const;
-    void RemoveOptimizedVideo(std::wstring_view originalPath) const;
-    void MoveOptimizedVideo(std::wstring_view previousOriginalPath,
-                            std::wstring_view nextOriginalPath) const;
+    void CleanupLegacyOptimizedVideos() const;
 
     std::filesystem::path rootDirectory_;
 };

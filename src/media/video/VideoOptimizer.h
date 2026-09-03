@@ -21,9 +21,9 @@ struct VideoOptimizationPlan final {
     bool needed = false;
 };
 
-// Creates an opt-in, display-sized H.264/MP4 playback copy while leaving the
-// library original untouched. Source frame rate is preserved; neither output
-// dimension is allowed to undershoot the fill size required by the display.
+// Creates an opt-in, display-sized H.264/MP4 file for subsequent library
+// import. The selected source file is never modified. Source frame rate is
+// preserved; neither output dimension may undershoot the display fill size.
 HRESULT PlanVideoOptimization(std::wstring_view sourcePath,
                               std::uint32_t maximumDisplayWidth,
                               std::uint32_t maximumDisplayHeight,

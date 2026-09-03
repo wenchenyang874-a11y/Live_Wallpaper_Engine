@@ -16,7 +16,6 @@
 #include "core/Logger.h"
 #include "core/ShareArchive.h"
 #include "media/MediaProbe.h"
-#include "media/video/VideoOptimizer.h"
 
 namespace lwe::core {
 namespace {
@@ -27,6 +26,7 @@ constexpr std::uint32_t kMaximumNameBytes = 1024;
 constexpr std::uint64_t kMaximumPayloadBytes = 16ULL * 1024ULL * 1024ULL * 1024ULL;
 constexpr DWORD kIoBufferBytes = 1024 * 1024;
 constexpr wchar_t kOrderFileName[] = L".library-order.v1";
+constexpr wchar_t kGroupMetadataFileName[] = L".wallpaper-groups.v1";
 constexpr wchar_t kOptimizedDirectoryName[] = L".optimized";
 constexpr std::uint64_t kMaximumOrderFileBytes = 4ULL * 1024ULL * 1024ULL;
 
@@ -245,6 +245,20 @@ std::wstring OrdinalKey(std::wstring value) {
     return value;
 }
 
+bool IsLegacyOptimizedVideoName(const std::wstring_view fileName) {
+    constexpr std::wstring_view optimizedSuffix = L".optimized.mp4";
+    constexpr std::wstring_view temporarySuffix =
+        L".optimized.mp4.optimizing.mp4";
+    const auto hasSuffix = [&](const std::wstring_view suffix) {
+        return fileName.size() >= suffix.size() &&
+               CompareStringOrdinal(
+                   fileName.data() + fileName.size() - suffix.size(),
+                   static_cast<int>(suffix.size()), suffix.data(),
+                   static_cast<int>(suffix.size()), TRUE) == CSTR_EQUAL;
+    };
+    return hasSuffix(optimizedSuffix) || hasSuffix(temporarySuffix);
+}
+
 HRESULT CreateTemporaryDirectory(std::filesystem::path& directory) {
     std::array<wchar_t, MAX_PATH> temporaryRoot{};
     const DWORD length = GetTempPathW(static_cast<DWORD>(temporaryRoot.size()),
@@ -301,6 +315,7 @@ HRESULT WallpaperLibrary::InitializeAt(std::filesystem::path rootDirectory) {
     if (error) {
         return HRESULT_FROM_WIN32(error.value());
     }
+    CleanupLegacyOptimizedVideos();
     return S_OK;
 }
 
@@ -436,7 +451,9 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
             continue;
         }
 
-        if (_wcsicmp(entry.path().filename().c_str(), kOrderFileName) == 0) {
+        if (_wcsicmp(entry.path().filename().c_str(), kOrderFileName) == 0 ||
+            _wcsicmp(entry.path().filename().c_str(),
+                     kGroupMetadataFileName) == 0) {
             continue;
         }
         const std::wstring extension = entry.path().extension().native();
@@ -526,18 +543,30 @@ std::filesystem::path WallpaperLibrary::UniqueDestination(
 
 HRESULT WallpaperLibrary::ImportFile(const std::wstring_view sourcePath,
                                      WallpaperItem& imported) const {
+    const std::filesystem::path source(sourcePath);
+    return ImportFileAs(sourcePath, source.filename().native(), imported);
+}
+
+HRESULT WallpaperLibrary::ImportFileAs(
+    const std::wstring_view sourcePath,
+    const std::wstring_view destinationFileName,
+    WallpaperItem& imported) const {
     if (rootDirectory_.empty() || sourcePath.empty()) {
         return E_UNEXPECTED;
     }
 
     const std::filesystem::path source(sourcePath);
+    if (!IsSafePackageFileName(destinationFileName)) {
+        return HRESULT_FROM_WIN32(ERROR_INVALID_NAME);
+    }
     WallpaperItem sourceItem;
     HRESULT result = DescribeFile(source, true, sourceItem);
     if (FAILED(result)) {
         return result;
     }
 
-    const std::filesystem::path destination = UniqueDestination(source.filename().native());
+    const std::filesystem::path destination =
+        UniqueDestination(destinationFileName);
     if (destination.empty()) {
         return HRESULT_FROM_WIN32(ERROR_TOO_MANY_NAMES);
     }
@@ -626,7 +655,6 @@ HRESULT WallpaperLibrary::Rename(const WallpaperItem& item,
         MoveFileExW(destination.c_str(), item.path.c_str(), MOVEFILE_WRITE_THROUGH);
         return result;
     }
-    MoveOptimizedVideo(item.path.native(), destination.native());
     LogInfo(L"Renamed a local wallpaper: " + item.path.native() + L" -> " +
             destination.native());
     return S_OK;
@@ -949,7 +977,6 @@ HRESULT WallpaperLibrary::Remove(const WallpaperItem& item) const {
         }
         return result;
     }
-    RemoveOptimizedVideo(item.path.native());
     LogInfo(L"Removed a wallpaper from the local library: " + item.path.native());
     return S_OK;
 }
@@ -990,96 +1017,41 @@ const std::filesystem::path& WallpaperLibrary::RootDirectory() const noexcept {
     return rootDirectory_;
 }
 
-std::filesystem::path WallpaperLibrary::OptimizedVideoPath(
-    const std::wstring_view originalPath) const {
-    if (rootDirectory_.empty() || originalPath.empty()) {
-        return {};
-    }
-    const std::filesystem::path source(originalPath);
-    if (source.parent_path() != rootDirectory_) {
-        return {};
-    }
-    return rootDirectory_ / kOptimizedDirectoryName /
-           (source.filename().native() + L".optimized.mp4");
-}
-
-HRESULT WallpaperLibrary::PrepareOptimizedVideoPath(
-    const std::wstring_view originalPath,
-    std::filesystem::path& optimizedPath) const {
-    optimizedPath = OptimizedVideoPath(originalPath);
-    if (optimizedPath.empty()) {
-        return E_INVALIDARG;
-    }
+void WallpaperLibrary::CleanupLegacyOptimizedVideos() const {
+    const std::filesystem::path directory =
+        rootDirectory_ / kOptimizedDirectoryName;
     std::error_code error;
-    std::filesystem::create_directories(optimizedPath.parent_path(), error);
-    return error ? HRESULT_FROM_WIN32(error.value()) : S_OK;
-}
-
-std::filesystem::path WallpaperLibrary::ResolveVideoPlaybackPath(
-    const std::wstring_view originalPath, const std::uint32_t requiredWidth,
-    const std::uint32_t requiredHeight) const {
-    const std::filesystem::path original(originalPath);
-    const std::filesystem::path optimized = OptimizedVideoPath(originalPath);
-    if (optimized.empty()) {
-        return original;
-    }
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(optimized, error) || error) {
-        return original;
-    }
-
-    media::video::VideoOptimizationPlan plan;
-    if (FAILED(media::video::PlanVideoOptimization(
-            originalPath, requiredWidth, requiredHeight, plan)) ||
-        !plan.needed) {
-        return original;
-    }
-
-    media::MediaInfo optimizedInfo;
-    if (FAILED(media::ProbeMediaFile(optimized.native(), optimizedInfo)) ||
-        optimizedInfo.kind != media::WallpaperKind::Video ||
-        optimizedInfo.width != plan.outputWidth ||
-        optimizedInfo.height != plan.outputHeight ||
-        optimizedInfo.frameRateDenominator == 0 ||
-        static_cast<std::uint64_t>(optimizedInfo.frameRateNumerator) *
-                plan.frameRateDenominator !=
-            static_cast<std::uint64_t>(plan.frameRateNumerator) *
-                optimizedInfo.frameRateDenominator) {
-        return original;
-    }
-    if (plan.hasAudio && !optimizedInfo.hasAudio) {
-        return original;
-    }
-    return optimized;
-}
-
-void WallpaperLibrary::RemoveOptimizedVideo(
-    const std::wstring_view originalPath) const {
-    const std::filesystem::path optimized = OptimizedVideoPath(originalPath);
-    if (optimized.empty()) {
+    if (!std::filesystem::is_directory(directory, error) || error) {
         return;
     }
-    if (!DeleteFileW(optimized.c_str()) &&
+
+    std::size_t removed = 0;
+    for (const std::filesystem::directory_entry& entry :
+         std::filesystem::directory_iterator(directory, error)) {
+        if (error) {
+            break;
+        }
+        if (!entry.is_regular_file(error) || error ||
+            !IsLegacyOptimizedVideoName(entry.path().filename().native())) {
+            error.clear();
+            continue;
+        }
+        if (DeleteFileW(entry.path().c_str())) {
+            ++removed;
+        } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
+            LogWarning(L"Could not remove a legacy optimized video: " +
+                       entry.path().native());
+        }
+    }
+    if (!RemoveDirectoryW(directory.c_str()) &&
+        GetLastError() != ERROR_DIR_NOT_EMPTY &&
         GetLastError() != ERROR_FILE_NOT_FOUND) {
-        LogWarning(L"Could not remove an obsolete optimized video copy: " +
-                   optimized.native());
+        LogWarning(L"Could not remove the legacy optimized video directory: " +
+                   directory.native());
     }
-}
-
-void WallpaperLibrary::MoveOptimizedVideo(
-    const std::wstring_view previousOriginalPath,
-    const std::wstring_view nextOriginalPath) const {
-    const std::filesystem::path previous =
-        OptimizedVideoPath(previousOriginalPath);
-    const std::filesystem::path next = OptimizedVideoPath(nextOriginalPath);
-    if (previous.empty() || next.empty() ||
-        GetFileAttributesW(previous.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        return;
-    }
-    if (!MoveFileExW(previous.c_str(), next.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        LogWarning(L"Could not move an optimized video copy after rename: " +
-                   previous.native());
+    if (removed > 0) {
+        LogInfo(L"Removed " + std::to_wstring(removed) +
+                L" legacy optimized video file(s).");
     }
 }
 
