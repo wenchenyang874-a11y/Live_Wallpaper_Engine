@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-03
+
 ### Added
 
 - 增加本地崩溃诊断：未处理异常会在 `%LOCALAPPDATA%\LiveWallpaperEngine\crashes` 生成带程序版本、UTC 时间和进程 ID 的 MiniDump，自动保留最近 10 份且不会上传。

@@ -179,6 +179,11 @@ try {
         -not $activeDrawerHeaderRemoved) {
         throw 'The current action controls do not match the expected layout.'
     }
+    $displayBounds = New-Object LweUiPlaybackProbe+RECT
+    [void][LweUiPlaybackProbe]::GetWindowRect($displayMode, [ref]$displayBounds)
+    [void][LweUiPlaybackProbe]::SetCursorPos(
+        $displayBounds.Left + 100, $displayBounds.Top + 20)
+    Start-Sleep -Milliseconds 100
     [void][LweUiPlaybackProbe]::SendMessage(
         $displayMode, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 20))
     [void][LweUiPlaybackProbe]::SendMessage(
