@@ -142,6 +142,7 @@ public:
     HWND GroupListControl() const noexcept;
     HWND BatchActionsControl() const noexcept;
     [[nodiscard]] std::uint64_t LibraryDrawCount() const noexcept;
+    [[nodiscard]] std::uint64_t MainFullPaintCount() const noexcept;
 
 private:
     enum class FilterKind {
@@ -311,9 +312,11 @@ private:
     bool groupDragInsertAfter_ = false;
     std::optional<std::vector<std::wstring>> pendingGroupOrder_;
     mutable std::uint64_t libraryDrawCount_ = 0;
+    mutable std::uint64_t mainFullPaintCount_ = 0;
 
     void UpdateFilterSelectorText();
     void UpdateDisplayModeText();
+    void LayoutDropdown();
 };
 
 }  // namespace lwe::app

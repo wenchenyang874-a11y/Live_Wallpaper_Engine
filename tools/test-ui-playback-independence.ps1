@@ -169,6 +169,14 @@ try {
     $displayMode = [LweUiPlaybackProbe]::GetDlgItem($control, 1199)
     $dropdown = [LweUiPlaybackProbe]::GetDlgItem($control, 1109)
     $library = [LweUiPlaybackProbe]::GetDlgItem($control, 1102)
+    $filter = [LweUiPlaybackProbe]::GetDlgItem($control, 1101)
+    foreach ($paintControl in @($filter, $displayMode, $dropdown)) {
+        if ([LweUiPlaybackProbe]::SendMessage(
+                $paintControl, 0x0014, [IntPtr]::Zero,
+                [IntPtr]::Zero) -eq [IntPtr]::Zero) {
+            throw 'An owner-drawn dropdown control still delegates background erasing to its system class.'
+        }
+    }
     $applyButtonRemoved =
         [LweUiPlaybackProbe]::GetDlgItem($control, 1105) -eq [IntPtr]::Zero
     $globalCancelButtonRemoved =
@@ -185,9 +193,7 @@ try {
         $displayBounds.Left + 100, $displayBounds.Top + 20)
     Start-Sleep -Milliseconds 100
     [void][LweUiPlaybackProbe]::SendMessage(
-        $displayMode, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 20))
-    [void][LweUiPlaybackProbe]::SendMessage(
-        $displayMode, 0x0202, [IntPtr]::Zero, [LweUiPlaybackProbe]::Point(100, 20))
+        $displayMode, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         if ([LweUiPlaybackProbe]::IsWindowVisible($dropdown)) { break }
         Start-Sleep -Milliseconds 100
@@ -231,6 +237,11 @@ try {
     # A rapid second click is delivered by Win32 as BN_DBLCLK. It must close the
     # list, and the next regular click must open it again rather than being
     # swallowed. Close once more before exercising the classification list.
+    if (-not [LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+        [void][LweUiPlaybackProbe]::SendMessage(
+            $control, 0x0111,
+            [LweUiPlaybackProbe]::Command(1199, 0), $displayMode)
+    }
     [void][LweUiPlaybackProbe]::SendMessage(
         $control, 0x0111, [LweUiPlaybackProbe]::Command(1199, 5), $displayMode)
     if ([LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
@@ -247,14 +258,44 @@ try {
         throw 'The reopened display-mode dropdown did not close rapidly.'
     }
 
+    # Alternate both selectors quickly. Every click must be a deterministic
+    # open/close transition; stale focus or pressed state must not survive the
+    # previous popup.
+    [void][LweUiPlaybackProbe]::PostMessage(
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(2197, 0),
+        [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 50
+    for ($toggle = 0; $toggle -lt 12; $toggle++) {
+        $selector = if (($toggle % 2) -eq 0) { $filter } else { $displayMode }
+        $identifier = if (($toggle % 2) -eq 0) { 1101 } else { 1199 }
+        [void][LweUiPlaybackProbe]::SendMessage(
+            $control, 0x0111,
+            [LweUiPlaybackProbe]::Command($identifier, 0), $selector)
+        if (-not [LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+            throw "Rapid selector click did not open the dropdown at iteration $toggle."
+        }
+        [void][LweUiPlaybackProbe]::SendMessage(
+            $control, 0x0111,
+            [LweUiPlaybackProbe]::Command($identifier, 5), $selector)
+        if ([LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
+            throw "Rapid selector click did not close the dropdown at iteration $toggle."
+        }
+    }
+    [void][LweUiPlaybackProbe]::PostMessage(
+        $control, 0x0111, [LweUiPlaybackProbe]::Command(2197, 0),
+        [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 50
+
     # Exercise the filter dropdown through the same down/up messages produced
     # by a real mouse click. Selecting its first row must close it without
     # relying on LBN_SELCHANGE timing.
-    $filter = [LweUiPlaybackProbe]::GetDlgItem($control, 1101)
+    $filterBounds = New-Object LweUiPlaybackProbe+RECT
+    [void][LweUiPlaybackProbe]::GetWindowRect($filter, [ref]$filterBounds)
+    [void][LweUiPlaybackProbe]::SetCursorPos(
+        $filterBounds.Left + 100, $filterBounds.Top + 20)
+    Start-Sleep -Milliseconds 50
     [void][LweUiPlaybackProbe]::SendMessage(
-        $filter, 0x0201, [IntPtr]1, [LweUiPlaybackProbe]::Point(100, 20))
-    [void][LweUiPlaybackProbe]::SendMessage(
-        $filter, 0x0202, [IntPtr]::Zero, [LweUiPlaybackProbe]::Point(100, 20))
+        $filter, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
     if (-not [LweUiPlaybackProbe]::IsWindowVisible($dropdown)) {
         throw 'The classification dropdown did not open through a mouse click.'
     }
@@ -303,6 +344,18 @@ try {
         $control, [IntPtr](-2), 0, 0, 0, 0, 0x0043)
     if ($drawAfter - $drawBefore -gt 1) {
         throw "Stationary-row mouse movement repainted the wallpaper list: $drawBefore -> $drawAfter"
+    }
+    $mainPaintMatches = [regex]::Matches(
+        $updatedLogSegment, 'CONTROLLED_MAIN_FULL_PAINT_COUNT=(\d+)')
+    if ($mainPaintMatches.Count -lt 2) {
+        throw 'The main full-paint counter did not produce two dropdown samples.'
+    }
+    $mainPaintBefore =
+        [uint64]$mainPaintMatches[$mainPaintMatches.Count - 2].Groups[1].Value
+    $mainPaintAfter =
+        [uint64]$mainPaintMatches[$mainPaintMatches.Count - 1].Groups[1].Value
+    if ($mainPaintAfter -ne $mainPaintBefore) {
+        throw "Rapid dropdown toggles forced a full main repaint: $mainPaintBefore -> $mainPaintAfter"
     }
 
     $activeStatus = [LweUiPlaybackProbe]::GetDlgItem($control, 1110)
@@ -364,7 +417,10 @@ try {
     "DROPDOWN_FRAME_COUNT_BEFORE=$before"
     "DROPDOWN_FRAME_COUNT_AFTER=$after"
     'DROPDOWN_PLAYBACK_CONTINUED=True'
-    'CLASSIFICATION_DROPDOWN_MOUSE_CLICK=True'
+    'DROPDOWN_DARK_ERASE_BACKGROUND=True'
+    'DROPDOWN_RAPID_ALTERNATION=True'
+    'DROPDOWN_NO_FULL_MAIN_REPAINT=True'
+    'CLASSIFICATION_DROPDOWN_BUTTON_CLICK=True'
     'INDEPENDENT_RENDER_THREAD=True'
     "LIBRARY_DRAW_COUNT_BEFORE_MOVES=$drawBefore"
     "LIBRARY_DRAW_COUNT_AFTER_MOVES=$drawAfter"

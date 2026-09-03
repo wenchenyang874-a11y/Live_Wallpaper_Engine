@@ -64,6 +64,9 @@ public static class LweSettingsUiProbe {
     public static IntPtr Point(int x, int y) {
         return (IntPtr)(((long)(y & 0xffff) << 16) | (uint)(x & 0xffff));
     }
+    public static IntPtr Command(int identifier, int notification) {
+        return (IntPtr)((notification << 16) | (identifier & 0xffff));
+    }
 }
 '@
 
@@ -135,12 +138,20 @@ try {
     if ([LweSettingsUiProbe]::GetDlgItem($control, 1107) -ne [IntPtr]::Zero) {
         throw 'The old sidebar resource-release control is still present.'
     }
+    $updateButton = Wait-Window $process.Id 'LiveWallpaperEngine.UpdateButton' $true
+    [void][LweSettingsUiProbe]::PostMessage(
+        $control, 0x0111, [LweSettingsUiProbe]::Command(2197, 0),
+        [IntPtr]::Zero)
 
     Click-Window $settingsButton
     $dialog = Wait-Window $process.Id 'LiveWallpaperEngine.Settings' $true
     if ($dialog -eq [IntPtr]::Zero) { throw 'The settings window did not open.' }
     [void][LweSettingsUiProbe]::SetForegroundWindow($dialog)
     Start-Sleep -Milliseconds 200
+    if (-not [LweSettingsUiProbe]::IsWindowVisible($updateButton) -or
+        -not [LweSettingsUiProbe]::IsWindowVisible($settingsButton)) {
+        throw 'The title-bar update/settings entries disappeared while settings was open.'
+    }
     $navigation = [LweSettingsUiProbe]::GetDlgItem($dialog, 3300)
     $option = [LweSettingsUiProbe]::GetDlgItem($dialog, 3301)
     $navigationText = [LweSettingsUiProbe]::Text($navigation)
@@ -157,6 +168,31 @@ try {
     }
     $optionBounds = New-Object LweSettingsUiProbe+RECT
     [void][LweSettingsUiProbe]::GetWindowRect($option, [ref]$optionBounds)
+
+    $eraseResult = [LweSettingsUiProbe]::SendMessage(
+        $option, 0x0014, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($eraseResult -eq [IntPtr]::Zero) {
+        throw 'The settings option still delegates background erasing to the system button class.'
+    }
+
+    for ($pass = 0; $pass -lt 16; $pass++) {
+        [void][LweSettingsUiProbe]::SetCursorPos(
+            $optionBounds.Left + 260, $optionBounds.Top + 24)
+        [void][LweSettingsUiProbe]::SendMessage(
+            $option, 0x0200, [IntPtr]::Zero,
+            [LweSettingsUiProbe]::Point(260, 24))
+        Start-Sleep -Milliseconds 25
+        [void][LweSettingsUiProbe]::SetCursorPos(
+            $optionBounds.Left - 12, $optionBounds.Top - 12)
+        [void][LweSettingsUiProbe]::SendMessage(
+            $option, 0x02A3, [IntPtr]::Zero, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 25
+        if ([LweSettingsUiProbe]::FindChild(
+                $dialog, 'LiveWallpaperEngine.SettingsTooltip', $true) -ne
+            [IntPtr]::Zero) {
+            throw "A fast settings flyby flashed the tooltip at iteration $pass."
+        }
+    }
     [void][LweSettingsUiProbe]::SetCursorPos(
         $optionBounds.Left - 12, $optionBounds.Top - 12)
     Start-Sleep -Milliseconds 150
@@ -165,12 +201,12 @@ try {
     [void][LweSettingsUiProbe]::SendMessage(
         $option, 0x0200, [IntPtr]::Zero,
         [LweSettingsUiProbe]::Point(260, 24))
-    Start-Sleep -Milliseconds 1200
-    $tooltip = [LweSettingsUiProbe]::Find(
-        [uint32]$process.Id, 'LiveWallpaperEngine.SettingsTooltip', $true)
+    Start-Sleep -Milliseconds 500
+    $tooltip = [LweSettingsUiProbe]::FindChild(
+        $dialog, 'LiveWallpaperEngine.SettingsTooltip', $true)
     if ($tooltip -eq [IntPtr]::Zero) {
-        $tooltipAny = [LweSettingsUiProbe]::Find(
-            [uint32]$process.Id, 'LiveWallpaperEngine.SettingsTooltip', $false)
+        $tooltipAny = [LweSettingsUiProbe]::FindChild(
+            $dialog, 'LiveWallpaperEngine.SettingsTooltip', $false)
         Write-Output "SETTINGS_TOOLTIP_HANDLE=$tooltipAny"
         if ($tooltipAny -ne [IntPtr]::Zero) {
             $tooltipBounds = New-Object LweSettingsUiProbe+RECT
@@ -212,9 +248,8 @@ try {
     [void][LweSettingsUiProbe]::SetCursorPos(
         $optionBounds.Left - 12, $optionBounds.Top - 12)
     Start-Sleep -Milliseconds 300
-    if ([LweSettingsUiProbe]::Find(
-            [uint32]$process.Id,
-            'LiveWallpaperEngine.SettingsTooltip', $true) -ne
+    if ([LweSettingsUiProbe]::FindChild(
+            $dialog, 'LiveWallpaperEngine.SettingsTooltip', $true) -ne
         [IntPtr]::Zero) {
         throw 'The resource-release explanation tooltip did not close.'
     }
@@ -225,6 +260,10 @@ try {
         [LweSettingsUiProbe]::GetDlgItem($dialog, 3302),
         0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 300
+    [void][LweSettingsUiProbe]::PostMessage(
+        $control, 0x0111, [LweSettingsUiProbe]::Command(2197, 0),
+        [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 150
     Click-Window $settingsButton
     $dialog = Wait-Window $process.Id 'LiveWallpaperEngine.Settings' $true
     $option = [LweSettingsUiProbe]::GetDlgItem($dialog, 3301)
@@ -253,8 +292,22 @@ try {
             throw "Settings change was not logged: $required"
         }
     }
+    $paintMatches = [regex]::Matches(
+        $segment, 'CONTROLLED_MAIN_FULL_PAINT_COUNT=(\d+)')
+    if ($paintMatches.Count -lt 2) {
+        throw 'The main full-paint counter did not produce two samples.'
+    }
+    $paintBefore = [uint64]$paintMatches[0].Groups[1].Value
+    $paintAfter = [uint64]$paintMatches[$paintMatches.Count - 1].Groups[1].Value
+    if ($paintAfter -ne $paintBefore) {
+        throw "Opening and closing settings forced a full main-window repaint: $paintBefore -> $paintAfter"
+    }
     'SETTINGS_TITLE_ENTRY=True'
+    'SETTINGS_TITLE_ENTRIES_STAY_VISIBLE=True'
     'SETTINGS_PERFORMANCE_CATEGORY=True'
+    'SETTINGS_FAST_FLYBY_STABLE=True'
+    'SETTINGS_DARK_ERASE_BACKGROUND=True'
+    'SETTINGS_NO_FULL_MAIN_REPAINT=True'
     'SETTINGS_RELEASE_RESOURCE_TOOLTIP=True'
     'SETTINGS_RELEASE_RESOURCE_TOGGLE=True'
     "SETTINGS_SCREENSHOT=$ScreenshotPath"

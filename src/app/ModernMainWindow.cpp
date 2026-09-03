@@ -47,6 +47,7 @@ constexpr int kSettingsReleaseResources = 3301;
 constexpr int kSettingsSave = 3302;
 constexpr int kSettingsCancel = 3303;
 constexpr UINT_PTR kSettingsTooltipTimer = 3304;
+constexpr UINT kSettingsTooltipDelayMilliseconds = 280;
 
 Gdiplus::Color GdiPlusColor(const COLORREF color, const BYTE alpha = 255) {
     return Gdiplus::Color(alpha, GetRValue(color), GetGValue(color),
@@ -123,6 +124,16 @@ void FillRectangle(const HDC context, const RECT& rectangle, const COLORREF colo
     const HBRUSH brush = CreateSolidBrush(color);
     FillRect(context, &rectangle, brush);
     DeleteObject(brush);
+}
+
+bool IsPointInVerticalScrollStrip(const HWND window, const POINT point) {
+    RECT client{};
+    if (window == nullptr || !GetClientRect(window, &client)) {
+        return false;
+    }
+    const UINT dpi = GetDpiForWindow(window);
+    const int scrollWidth = GetSystemMetricsForDpi(SM_CXVSCROLL, dpi);
+    return scrollWidth > 0 && point.x >= client.right - scrollWidth;
 }
 
 void FillRoundedRectangle(const HDC context, const RECT& rectangle,
@@ -1166,6 +1177,7 @@ struct PerformanceSettingsDialogState final {
     HFONT bodyFont = nullptr;
     HFONT detailFont = nullptr;
     int hoveredControl = 0;
+    bool pointerOverReleaseResources = false;
     bool releaseResourcesEnabled = true;
     std::optional<bool> result;
     bool complete = false;
@@ -1208,6 +1220,19 @@ void LayoutPerformanceSettingsDialog(PerformanceSettingsDialogState& state) {
     MoveWindow(state.releaseResources, contentLeft, Scale(state.window, 36),
                client.right - contentLeft - Scale(state.window, 24),
                Scale(state.window, 76), TRUE);
+    const int tooltipTop = Scale(state.window, 122);
+    const int tooltipWidth = client.right - contentLeft - Scale(state.window, 24);
+    const int tooltipHeight = Scale(state.window, 82);
+    MoveWindow(state.tooltip, contentLeft, tooltipTop, tooltipWidth,
+               tooltipHeight, TRUE);
+    const int tooltipRadius = Scale(state.window, 9);
+    HRGN tooltipRegion = CreateRoundRectRgn(
+        0, 0, tooltipWidth + 1, tooltipHeight + 1, tooltipRadius,
+        tooltipRadius);
+    if (tooltipRegion != nullptr &&
+        !SetWindowRgn(state.tooltip, tooltipRegion, FALSE)) {
+        DeleteObject(tooltipRegion);
+    }
     const int actionWidth = Scale(state.window, 112);
     const int actionHeight = Scale(state.window, 38);
     const int actionTop = client.bottom - Scale(state.window, 22) - actionHeight;
@@ -1293,6 +1318,40 @@ void DrawPerformanceSettingsControl(const DRAWITEMSTRUCT& draw,
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+void DrawPerformanceSettingsControlBuffered(
+    const DRAWITEMSTRUCT& draw,
+    const PerformanceSettingsDialogState& state) {
+    const int width = draw.rcItem.right - draw.rcItem.left;
+    const int height = draw.rcItem.bottom - draw.rcItem.top;
+    if (width <= 0 || height <= 0) {
+        DrawPerformanceSettingsControl(draw, state);
+        return;
+    }
+    const HDC buffer = CreateCompatibleDC(draw.hDC);
+    const HBITMAP bitmap = CreateCompatibleBitmap(draw.hDC, width, height);
+    if (buffer == nullptr || bitmap == nullptr) {
+        if (bitmap != nullptr) {
+            DeleteObject(bitmap);
+        }
+        if (buffer != nullptr) {
+            DeleteDC(buffer);
+        }
+        DrawPerformanceSettingsControl(draw, state);
+        return;
+    }
+    const HGDIOBJ previousBitmap = SelectObject(buffer, bitmap);
+    SetViewportOrgEx(buffer, -draw.rcItem.left, -draw.rcItem.top, nullptr);
+    DRAWITEMSTRUCT buffered = draw;
+    buffered.hDC = buffer;
+    DrawPerformanceSettingsControl(buffered, state);
+    SetViewportOrgEx(buffer, 0, 0, nullptr);
+    BitBlt(draw.hDC, draw.rcItem.left, draw.rcItem.top, width, height, buffer,
+           0, 0, SRCCOPY);
+    SelectObject(buffer, previousBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(buffer);
+}
+
 LRESULT CALLBACK PerformanceSettingsTooltipProcedure(
     const HWND window, const UINT message, const WPARAM wParam,
     const LPARAM lParam) {
@@ -1337,42 +1396,17 @@ void ShowPerformanceSettingsTooltip(
         return;
     }
     if (!visible) {
-        KillTimer(state.window, kSettingsTooltipTimer);
-        ShowWindow(state.tooltip, SW_HIDE);
+        if (IsWindowVisible(state.tooltip)) {
+            ShowWindow(state.tooltip, SW_HIDE);
+        }
         return;
     }
-    POINT cursor{};
-    if (!GetCursorPos(&cursor)) {
+    if (IsWindowVisible(state.tooltip)) {
         return;
     }
-    const int width = Scale(state.window, 460);
-    const int height = Scale(state.window, 82);
-    int left = cursor.x + Scale(state.window, 12);
-    int top = cursor.y + Scale(state.window, 20);
-    HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO info{sizeof(info)};
-    if (GetMonitorInfoW(monitor, &info)) {
-        left = std::clamp(
-            left, static_cast<int>(info.rcWork.left),
-            std::max(static_cast<int>(info.rcWork.left),
-                     static_cast<int>(info.rcWork.right) - width));
-        top = std::clamp(
-            top, static_cast<int>(info.rcWork.top),
-            std::max(static_cast<int>(info.rcWork.top),
-                     static_cast<int>(info.rcWork.bottom) - height));
-    }
-    const int radius = Scale(state.window, 9);
-    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1,
-                                     radius, radius);
-    if (region != nullptr && !SetWindowRgn(state.tooltip, region, FALSE)) {
-        DeleteObject(region);
-    }
-    SetWindowPos(state.tooltip, HWND_TOPMOST, left, top, width, height,
-                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    ShowWindow(state.tooltip, SW_SHOWNOACTIVATE);
+    ShowWindow(state.tooltip, SW_SHOWNA);
     InvalidateRect(state.tooltip, nullptr, TRUE);
     UpdateWindow(state.tooltip);
-    SetTimer(state.window, kSettingsTooltipTimer, 100, nullptr);
 }
 
 LRESULT CALLBACK PerformanceSettingsControlProcedure(
@@ -1380,24 +1414,53 @@ LRESULT CALLBACK PerformanceSettingsControlProcedure(
     const LPARAM lParam, const UINT_PTR, const DWORD_PTR referenceData) {
     auto* state =
         reinterpret_cast<PerformanceSettingsDialogState*>(referenceData);
+    if (state != nullptr && message == WM_ERASEBKGND) {
+        RECT client{};
+        GetClientRect(window, &client);
+        FillRectangle(reinterpret_cast<HDC>(wParam), client,
+                      GetDlgCtrlID(window) == kSettingsPerformance ? kSidebar
+                                                                  : kBackground);
+        return 1;
+    }
     if (state != nullptr && message == WM_MOUSEMOVE) {
         const int identifier = GetDlgCtrlID(window);
         if (state->hoveredControl != identifier) {
+            const int previous = state->hoveredControl;
             state->hoveredControl = identifier;
-            for (const HWND control : {state->navigation,
-                                       state->releaseResources, state->save,
-                                       state->cancel}) {
-                InvalidateRect(control, nullptr, FALSE);
+            const auto controlForId = [&](const int id) -> HWND {
+                switch (id) {
+                    case kSettingsPerformance:
+                        return state->navigation;
+                    case kSettingsReleaseResources:
+                        return state->releaseResources;
+                    case kSettingsSave:
+                        return state->save;
+                    case kSettingsCancel:
+                        return state->cancel;
+                    default:
+                        return nullptr;
+                }
+            };
+            if (const HWND previousControl = controlForId(previous);
+                previousControl != nullptr) {
+                InvalidateRect(previousControl, nullptr, FALSE);
             }
+            InvalidateRect(window, nullptr, FALSE);
         }
-        if (identifier == kSettingsReleaseResources) {
-            ShowPerformanceSettingsTooltip(*state, true);
+        if (identifier == kSettingsReleaseResources &&
+            !state->pointerOverReleaseResources) {
+            state->pointerOverReleaseResources = true;
+            ShowPerformanceSettingsTooltip(*state, false);
+            SetTimer(state->window, kSettingsTooltipTimer,
+                     kSettingsTooltipDelayMilliseconds, nullptr);
         }
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
         TrackMouseEvent(&tracking);
     } else if (state != nullptr && message == WM_MOUSELEAVE) {
         if (GetDlgCtrlID(window) == kSettingsReleaseResources) {
-            return DefSubclassProc(window, message, wParam, lParam);
+            state->pointerOverReleaseResources = false;
+            KillTimer(state->window, kSettingsTooltipTimer);
+            ShowPerformanceSettingsTooltip(*state, false);
         }
         if (state->hoveredControl == GetDlgCtrlID(window)) {
             state->hoveredControl = 0;
@@ -1442,11 +1505,10 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
             state->save = createButton(kSettingsSave, L"保存");
             state->cancel = createButton(kSettingsCancel, L"取消");
             state->tooltip = CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                kSettingsTooltipWindowClass,
+                0, kSettingsTooltipWindowClass,
                 L"开启后，锁屏或熄屏 1 分钟会释放视频解码资源，系统睡眠时立即释放；恢复后自动继续播放。开启后可能会出现恢复时的短暂卡顿。",
-                WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-                CW_USEDEFAULT, window, nullptr, state->instance, nullptr);
+                WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, window, nullptr,
+                state->instance, nullptr);
             if (state->navigation == nullptr ||
                 state->releaseResources == nullptr || state->save == nullptr ||
                 state->cancel == nullptr || state->tooltip == nullptr) {
@@ -1468,13 +1530,17 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
             return 0;
         case WM_TIMER:
             if (wParam == kSettingsTooltipTimer) {
+                KillTimer(window, kSettingsTooltipTimer);
                 POINT cursor{};
                 RECT bounds{};
                 const bool pointerInside =
+                    state->pointerOverReleaseResources &&
                     GetCursorPos(&cursor) &&
                     GetWindowRect(state->releaseResources, &bounds) &&
                     PtInRect(&bounds, cursor);
-                if (!pointerInside) {
+                if (pointerInside) {
+                    ShowPerformanceSettingsTooltip(*state, true);
+                } else {
                     ShowPerformanceSettingsTooltip(*state, false);
                     if (state->hoveredControl == kSettingsReleaseResources) {
                         state->hoveredControl = 0;
@@ -1507,7 +1573,7 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
         case WM_DRAWITEM: {
             const auto& draw = *reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
             if (draw.CtlType == ODT_BUTTON) {
-                DrawPerformanceSettingsControl(draw, *state);
+                DrawPerformanceSettingsControlBuffered(draw, *state);
                 return TRUE;
             }
             break;
@@ -1517,16 +1583,43 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
             const HDC context = BeginPaint(window, &paint);
             RECT client{};
             GetClientRect(window, &client);
-            FillRectangle(context, client, kBackground);
+            const int width = client.right - client.left;
+            const int height = client.bottom - client.top;
+            const HDC bufferContext = CreateCompatibleDC(context);
+            const HBITMAP buffer =
+                width > 0 && height > 0
+                    ? CreateCompatibleBitmap(context, width, height)
+                    : nullptr;
+            const HDC target = bufferContext != nullptr && buffer != nullptr
+                                   ? bufferContext
+                                   : context;
+            HGDIOBJ previous = nullptr;
+            if (target == bufferContext) {
+                previous = SelectObject(bufferContext, buffer);
+            }
+            FillRectangle(target, client, kBackground);
             RECT sidebar{0, 0, Scale(window, 176), client.bottom};
-            FillRectangle(context, sidebar, kSidebar);
+            FillRectangle(target, sidebar, kSidebar);
             RECT divider{sidebar.right - 1, 0, sidebar.right, client.bottom};
-            FillRectangle(context, divider, kBorder);
+            FillRectangle(target, divider, kBorder);
             RECT settingsTitle{Scale(window, 20), Scale(window, 14),
                                sidebar.right - Scale(window, 16),
                                Scale(window, 50)};
-            DrawTextLine(context, L"设置", settingsTitle, state->headingFont,
+            DrawTextLine(target, L"设置", settingsTitle, state->headingFont,
                          kTextPrimary, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            if (target == bufferContext) {
+                BitBlt(context, paint.rcPaint.left, paint.rcPaint.top,
+                       paint.rcPaint.right - paint.rcPaint.left,
+                       paint.rcPaint.bottom - paint.rcPaint.top, bufferContext,
+                       paint.rcPaint.left, paint.rcPaint.top, SRCCOPY);
+                SelectObject(bufferContext, previous);
+            }
+            if (buffer != nullptr) {
+                DeleteObject(buffer);
+            }
+            if (bufferContext != nullptr) {
+                DeleteDC(bufferContext);
+            }
             EndPaint(window, &paint);
             return 0;
         }
@@ -2002,25 +2095,36 @@ void ModernMainWindow::Layout() {
         ShowWindow(activeList_, SW_HIDE);
     }
 
-    if (dropdownKind_ != DropdownKind::None) {
-        const HWND anchor = dropdownKind_ == DropdownKind::Filter
-                                ? filter_
-                                : displayMode_;
-        RECT anchorRectangle{};
-        GetWindowRect(anchor, &anchorRectangle);
-        MapWindowPoints(nullptr, parent_,
-                        reinterpret_cast<POINT*>(&anchorRectangle), 2);
-        const int rows = static_cast<int>(dropdownLabels_.size());
-        const int rowHeight = dropdownKind_ == DropdownKind::DisplayMode
-                                  ? Scale(parent_, 58)
-                                  : Scale(parent_, 42);
-        SendMessageW(dropdownList_, LB_SETITEMHEIGHT, 0, rowHeight);
-        SetWindowPos(dropdownList_, HWND_TOP, anchorRectangle.left,
-                     anchorRectangle.bottom + Scale(parent_, 4),
-                     anchorRectangle.right - anchorRectangle.left,
-                     rowHeight * rows + Scale(parent_, 4), SWP_SHOWWINDOW);
-    }
+    LayoutDropdown();
     InvalidateRect(parent_, nullptr, FALSE);
+}
+
+void ModernMainWindow::LayoutDropdown() {
+    if (dropdownKind_ == DropdownKind::None) {
+        return;
+    }
+    const HWND anchor =
+        dropdownKind_ == DropdownKind::Filter ? filter_ : displayMode_;
+    RECT anchorRectangle{};
+    GetWindowRect(anchor, &anchorRectangle);
+    MapWindowPoints(nullptr, parent_,
+                    reinterpret_cast<POINT*>(&anchorRectangle), 2);
+    const int rows = static_cast<int>(dropdownLabels_.size());
+    const int rowHeight = dropdownKind_ == DropdownKind::DisplayMode
+                              ? Scale(parent_, 58)
+                              : Scale(parent_, 42);
+    SendMessageW(dropdownList_, LB_SETITEMHEIGHT, 0, rowHeight);
+    const bool showing = !IsWindowVisible(dropdownList_);
+    SetWindowPos(dropdownList_, HWND_TOP, anchorRectangle.left,
+                 anchorRectangle.bottom + Scale(parent_, 4),
+                 anchorRectangle.right - anchorRectangle.left,
+                 rowHeight * rows + Scale(parent_, 4),
+                 SWP_NOACTIVATE | (showing ? SWP_NOREDRAW : 0));
+    if (showing) {
+        ShowWindow(dropdownList_, SW_SHOWNA);
+        RedrawWindow(dropdownList_, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_UPDATENOW | RDW_FRAME);
+    }
 }
 
 void ModernMainWindow::DpiChanged() {
@@ -2028,9 +2132,19 @@ void ModernMainWindow::DpiChanged() {
     Layout();
 }
 
-void ModernMainWindow::Paint(const HDC deviceContext, const RECT&) const {
+void ModernMainWindow::Paint(const HDC deviceContext,
+                             const RECT& paintRectangle) const {
     RECT client{};
     GetClientRect(parent_, &client);
+    const std::int64_t clientArea =
+        static_cast<std::int64_t>(client.right - client.left) *
+        (client.bottom - client.top);
+    const std::int64_t paintArea =
+        static_cast<std::int64_t>(paintRectangle.right - paintRectangle.left) *
+        (paintRectangle.bottom - paintRectangle.top);
+    if (clientArea > 0 && paintArea * 10 >= clientArea * 8) {
+        ++mainFullPaintCount_;
+    }
     FillRectangle(deviceContext, client, kBackground);
 
     RECT sidebar{0, 0, Scale(parent_, 216), client.bottom};
@@ -2760,7 +2874,7 @@ bool ModernMainWindow::ToggleDropdown(const DropdownKind kind) {
     dropdownHoverIndex_ = -1;
     dropdownHoverProgress_ = 0.0F;
     dropdownHoverTarget_ = false;
-    Layout();
+    LayoutDropdown();
     InvalidateRect(dropdownList_, nullptr, FALSE);
     InvalidateRect(kind == DropdownKind::Filter ? filter_ : displayMode_, nullptr,
                    FALSE);
@@ -3297,6 +3411,10 @@ std::uint64_t ModernMainWindow::LibraryDrawCount() const noexcept {
     return libraryDrawCount_;
 }
 
+std::uint64_t ModernMainWindow::MainFullPaintCount() const noexcept {
+    return mainFullPaintCount_;
+}
+
 HBITMAP ModernMainWindow::LoadThumbnail(const std::wstring_view path) const {
     Microsoft::WRL::ComPtr<IShellItem> item;
     const std::wstring filePath(path);
@@ -3775,13 +3893,35 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
         return DefSubclassProc(window, message, wParam, lParam);
     }
 
+    if (message == WM_ERASEBKGND) {
+        RECT client{};
+        GetClientRect(window, &client);
+        const bool sidebar =
+            window == self->groupList_ || window == self->sound_ ||
+            window == self->groupAll_ || window == self->groupFavorites_ ||
+            window == self->groupCreate_;
+        const bool panel = window == self->library_ ||
+                           window == self->activeList_ ||
+                           window == self->dropdownList_;
+        FillRectangle(reinterpret_cast<HDC>(wParam), client,
+                      sidebar ? kSidebar : (panel ? kPanel : kBackground));
+        return 1;
+    }
+
     if (message == WM_LBUTTONDOWN && window == self->library_) {
-        self->BeginLibraryDrag(
-            POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (!IsPointInVerticalScrollStrip(window, point)) {
+            self->BeginLibraryDrag(point);
+        } else {
+            self->CancelLibraryDrag();
+        }
     } else if (message == WM_LBUTTONDOWN && window == self->groupList_) {
-        self->BeginGroupDrag(
-            POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
-        return 0;
+        const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (!IsPointInVerticalScrollStrip(window, point)) {
+            self->BeginGroupDrag(point);
+            return 0;
+        }
+        self->CancelGroupDrag();
     } else if (message == WM_MOUSEMOVE) {
         POINT cursor{};
         if (GetCursorPos(&cursor) && WindowFromPoint(cursor) == window) {
@@ -3789,6 +3929,10 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
             TrackMouseEvent(&tracking);
         }
         const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if ((window == self->library_ || window == self->groupList_) &&
+            IsPointInVerticalScrollStrip(window, point)) {
+            return DefSubclassProc(window, message, wParam, lParam);
+        }
         if (window == self->library_ && (wParam & MK_LBUTTON) != 0 &&
             self->libraryDragSourceVisibleIndex_ >= 0) {
             self->UpdateLibraryDrag(point);
@@ -3814,7 +3958,9 @@ LRESULT CALLBACK ModernMainWindow::InteractiveControlProcedure(
             // ordinary mouse movement even though selection did not change.
             // Our hover state already owns that visual update. Preserve the
             // native path only while the list has mouse capture for dragging.
-            if (GetCapture() != window) {
+            const bool pointerButtonDown =
+                (wParam & (MK_LBUTTON | MK_RBUTTON | MK_MBUTTON)) != 0;
+            if (!pointerButtonDown && GetCapture() != window) {
                 return 0;
             }
         } else {

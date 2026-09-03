@@ -62,6 +62,7 @@ constexpr int kControlledDeepPauseToggleCommand = 2193;
 constexpr int kControlledDeepPauseReleaseCommand = 2194;
 constexpr int kControlledLibraryDrawCountCommand = 2195;
 constexpr int kControlledFrameCountCommand = 2196;
+constexpr int kControlledMainPaintCountCommand = 2197;
 constexpr int kControlledTestSaveCommand = 2198;
 constexpr int kControlledTestExitCommand = 2199;
 constexpr int kLibraryPreviewCommand = 2200;
@@ -2943,10 +2944,12 @@ void WallpaperApplication::SetReleaseVideoResourcesOnPause(
 }
 
 void WallpaperApplication::ShowSettings() {
-    ShowWindow(updateButtonWindow_, SW_HIDE);
-    ShowWindow(settingsButtonWindow_, SW_HIDE);
+    EnableWindow(updateButtonWindow_, FALSE);
+    EnableWindow(settingsButtonWindow_, FALSE);
     const std::optional result = mainWindow_.ChoosePerformanceSettings(
         releaseVideoResourcesOnPause_);
+    EnableWindow(updateButtonWindow_, TRUE);
+    EnableWindow(settingsButtonWindow_, TRUE);
     PositionUpdateButtonWindow();
     if (result.has_value()) {
         SetReleaseVideoResourcesOnPause(*result);
@@ -3999,6 +4002,13 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                     return 0;
                 }
                 if (controlledTestMode_ &&
+                    identifier == kControlledMainPaintCountCommand) {
+                    core::LogInfo(
+                        L"CONTROLLED_MAIN_FULL_PAINT_COUNT=" +
+                        std::to_wstring(mainWindow_.MainFullPaintCount()));
+                    return 0;
+                }
+                if (controlledTestMode_ &&
                     identifier == kControlledTestSaveCommand) {
                     const HRESULT result = SaveCurrentSelection();
                     if (SUCCEEDED(result)) {
@@ -4160,6 +4170,12 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
 
             case WM_ERASEBKGND:
                 return 1;
+
+            case WM_ENABLE:
+                // All client content is custom-painted and has no disabled
+                // appearance. Suppress DefWindowProc's redundant full-window
+                // invalidation when modal dialogs disable/enable the owner.
+                return 0;
 
             case WM_CLOSE:
                 if (trayIconAdded_) {

@@ -68,6 +68,7 @@ public static class LweLibraryManagementProbe
     {
         return (IntPtr)((y << 16) | (x & 0xffff));
     }
+
 }
 '@
 
@@ -168,6 +169,21 @@ try {
     if ($count -lt 2) {
         throw 'The local wallpaper library needs at least two items for this test.'
     }
+
+    # Exercise the list box's native vertical-scroll path. The product fix keeps
+    # pointer messages in the scroll strip on this same default-control path;
+    # a direct scroll command is deterministic in unattended test sessions.
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x0197, [IntPtr]::Zero, [IntPtr]::Zero) # LB_SETTOPINDEX
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x0115, [IntPtr]1, [IntPtr]::Zero) # WM_VSCROLL/SB_LINEDOWN
+    $scrolledTopIndex = [int][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x018E, [IntPtr]::Zero, [IntPtr]::Zero) # LB_GETTOPINDEX
+    if ($scrolledTopIndex -le 0) {
+        throw 'The wallpaper list did not respond to its native vertical-scroll command.'
+    }
+    [void][LweLibraryManagementProbe]::SendMessage(
+        $library, 0x0197, [IntPtr]::Zero, [IntPtr]::Zero)
 
     [void][LweLibraryManagementProbe]::SendMessage(
         $control, 0x0111,
@@ -318,6 +334,7 @@ try {
         $choice, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
 
     Write-Output "LIBRARY_UI_EXPORT_SELECTION=True"
+    Write-Output "LIBRARY_UI_SCROLLBAR_NATIVE_PATH=True"
     Write-Output "LIBRARY_UI_DRAG_REORDER=True"
     Write-Output "LIBRARY_UI_IMPORT_CHOICE=True"
     Write-Output "LIBRARY_UI_IMPORT_COMPRESSION_OPTION=True"
