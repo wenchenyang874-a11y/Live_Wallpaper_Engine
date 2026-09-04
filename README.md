@@ -4,7 +4,7 @@
 
 [下载最新版本](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest) · [查看更新记录](CHANGELOG.md) · [Apache-2.0 License](LICENSE)
 
-> 当前发布版本为 `v1.2.0`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
+> 当前发布版本为 `v1.2.1`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
 
 ![Live Wallpaper Engine 应用预览](assets/application-preview.png)
 
@@ -114,13 +114,13 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 本地构建安装包需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.2.0
+.\tools\build-release.ps1 -Version 1.2.1
 ```
 
 日常开发验证使用带有明确标记的未发布安装包：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.2.0 -Unreleased
+.\tools\build-release.ps1 -Version 1.2.1 -Unreleased
 ```
 
 安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出。确认覆盖后，安装器会先发送专用退出请求，让当前版本快速、完整地释放壁纸窗口和媒体资源；升级不支持该请求的旧版本时，安装器只会短暂等待，再结束经固定窗口类确认的目标进程，避免长时间停在“正在关闭应用程序”。
