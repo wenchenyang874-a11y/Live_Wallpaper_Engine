@@ -110,7 +110,13 @@ function Open-Settings([Diagnostics.Process] $Process, [IntPtr] $ControlWindow) 
     if ($dialog -eq [IntPtr]::Zero) {
         throw 'The settings window did not open.'
     }
-    return $dialog
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        if ([LweStartupProbe]::IsWindowVisible($dialog)) {
+            return $dialog
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    throw 'The settings window was created but did not become visible.'
 }
 
 function Save-StartupSetting([IntPtr] $Dialog) {
