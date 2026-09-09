@@ -4,7 +4,7 @@
 
 [下载最新版本](https://github.com/wenchenyang874-a11y/Live_Wallpaper_Engine/releases/latest) · [查看更新记录](CHANGELOG.md) · [Apache-2.0 License](LICENSE)
 
-> 当前发布版本为 `v1.2.1`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
+> 当前发布版本为 `v1.2.2`。程序以本地运行为主，不需要账号、服务器或管理员权限；只有用户主动点击“检查更新”时才会访问 GitHub，当前安装包尚未进行代码签名。
 
 ![Live Wallpaper Engine 应用预览](assets/application-preview.png)
 

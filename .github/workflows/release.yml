@@ -81,7 +81,13 @@ jobs:
             throw "Changelog section for $version is empty."
           }
 
-          $notes = @("本版本主要更新如下：", "") + @($section)
+          $notes = @("本版本主要更新如下：", "") + @($section) + @(
+            "",
+            "### 安装说明",
+            "",
+            "- Windows x64 安装包默认按当前用户安装，不需要管理员权限。",
+            "- 当前安装包尚未进行代码签名，Windows 可能显示未知发布者或 SmartScreen 提示。"
+          )
           Set-Content -LiteralPath '.\release-notes.md' -Value $notes -Encoding utf8
 
       - name: Publish GitHub Release
