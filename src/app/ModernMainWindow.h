@@ -29,6 +29,11 @@ public:
         bool compressToDisplay = false;
     };
 
+    struct SettingsResult final {
+        bool startWithWindows = false;
+        bool releaseVideoResources = true;
+    };
+
     struct DisplayOption final {
         std::wstring id;
         std::wstring label;
@@ -102,7 +107,8 @@ public:
     void CloseTransientUi();
     std::optional<std::vector<std::wstring>> ChooseDisplayTargets();
     std::optional<ImportRequest> ChooseImportSource();
-    std::optional<bool> ChoosePerformanceSettings(bool releaseResources);
+    std::optional<SettingsResult> ChooseSettings(bool startWithWindows,
+                                                 bool releaseResources);
 
     void SetItems(std::vector<core::WallpaperItem> items);
     void SetGroups(std::vector<core::WallpaperGroup> groups,

@@ -6,6 +6,8 @@ param(
     [string] $VideoPath,
     [string] $ScreenshotPath =
         (Join-Path $env:TEMP 'LWE-performance-settings.png'),
+    [string] $GeneralScreenshotPath =
+        (Join-Path $env:TEMP 'LWE-general-settings.png'),
     [string] $TooltipScreenshotPath =
         (Join-Path $env:TEMP 'LWE-performance-settings-tooltip.png')
 )
@@ -165,19 +167,51 @@ try {
     if ([LweSettingsUiProbe]::IsWindowEnabled($control)) {
         throw 'The main window remained interactive while settings was open.'
     }
+    $generalNavigation = [LweSettingsUiProbe]::GetDlgItem($dialog, 3305)
+    $startupOption = [LweSettingsUiProbe]::GetDlgItem($dialog, 3306)
     $navigation = [LweSettingsUiProbe]::GetDlgItem($dialog, 3300)
     $option = [LweSettingsUiProbe]::GetDlgItem($dialog, 3301)
+    $generalText = [LweSettingsUiProbe]::Text($generalNavigation)
+    $startupText = [LweSettingsUiProbe]::Text($startupOption)
     $navigationText = [LweSettingsUiProbe]::Text($navigation)
     $optionText = [LweSettingsUiProbe]::Text($option)
+    $expectedGeneral = -join @([char]0x5E38, [char]0x89C4)
+    $expectedStartup = -join @(
+        [char]0x5F00, [char]0x673A, [char]0x65F6, [char]0x81EA,
+        [char]0x52A8, [char]0x542F, [char]0x52A8)
     $expectedNavigation = -join @(
         [char]0x6027, [char]0x80FD, [char]0x4F18, [char]0x5316)
     $expectedOption = -join @(
         [char]0x9501, [char]0x5C4F, '/', [char]0x7184, [char]0x5C4F,
         [char]0x65F6, [char]0x91CA, [char]0x653E, [char]0x89C6,
         [char]0x9891, [char]0x8D44, [char]0x6E90)
-    if ($navigationText -ne $expectedNavigation -or
-        $optionText -ne $expectedOption) {
-        throw 'The performance settings controls are missing or mislabeled.'
+    if ($generalText -ne $expectedGeneral -or
+        $startupText -ne $expectedStartup -or
+        $navigationText -ne $expectedNavigation -or
+        $optionText -ne $expectedOption -or
+        -not [LweSettingsUiProbe]::IsWindowVisible($startupOption) -or
+        [LweSettingsUiProbe]::IsWindowVisible($option)) {
+        throw 'The general/performance settings controls are missing or mislabeled.'
+    }
+    $generalDialogBounds = New-Object LweSettingsUiProbe+RECT
+    [void][LweSettingsUiProbe]::GetWindowRect(
+        $dialog, [ref]$generalDialogBounds)
+    $generalBitmap = [Drawing.Bitmap]::new(
+        $generalDialogBounds.Right - $generalDialogBounds.Left,
+        $generalDialogBounds.Bottom - $generalDialogBounds.Top)
+    $generalGraphics = [Drawing.Graphics]::FromImage($generalBitmap)
+    $generalDc = $generalGraphics.GetHdc()
+    [void][LweSettingsUiProbe]::PrintWindow($dialog, $generalDc, 2)
+    $generalGraphics.ReleaseHdc($generalDc)
+    $generalBitmap.Save(
+        $GeneralScreenshotPath, [Drawing.Imaging.ImageFormat]::Png)
+    $generalGraphics.Dispose(); $generalBitmap.Dispose()
+
+    [void][LweSettingsUiProbe]::SendMessage(
+        $navigation, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+    if (-not [LweSettingsUiProbe]::IsWindowVisible($option) -or
+        [LweSettingsUiProbe]::IsWindowVisible($startupOption)) {
+        throw 'Switching to the performance category did not update its content.'
     }
     $optionBounds = New-Object LweSettingsUiProbe+RECT
     [void][LweSettingsUiProbe]::GetWindowRect($option, [ref]$optionBounds)
@@ -289,6 +323,12 @@ try {
         throw 'The resource-release explanation tooltip did not close.'
     }
 
+    # Keep the pointer outside the owner before sampling. Otherwise closing
+    # the dialog can reveal a wallpaper card under the cursor and its expected
+    # hover animation is indistinguishable from a settings-close repaint.
+    [void][LweSettingsUiProbe]::SetCursorPos(4, 4)
+    Start-Sleep -Milliseconds 200
+
     [void][LweSettingsUiProbe]::PostMessage(
         $control, 0x0111, [LweSettingsUiProbe]::Command(2195, 0),
         [IntPtr]::Zero)
@@ -312,6 +352,9 @@ try {
     Start-Sleep -Milliseconds 150
     Click-Window $settingsButton
     $dialog = Wait-Window $process.Id 'LiveWallpaperEngine.Settings' $true
+    [void][LweSettingsUiProbe]::SendMessage(
+        [LweSettingsUiProbe]::GetDlgItem($dialog, 3300),
+        0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
     $option = [LweSettingsUiProbe]::GetDlgItem($dialog, 3301)
     [void][LweSettingsUiProbe]::SendMessage(
         $option, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
@@ -362,6 +405,7 @@ try {
     }
     'SETTINGS_TITLE_ENTRY=True'
     'SETTINGS_TITLE_ENTRIES_STAY_VISIBLE=True'
+    'SETTINGS_GENERAL_CATEGORY=True'
     'SETTINGS_PERFORMANCE_CATEGORY=True'
     'SETTINGS_FAST_FLYBY_STABLE=True'
     'SETTINGS_DARK_ERASE_BACKGROUND=True'
@@ -370,6 +414,7 @@ try {
     'SETTINGS_OWNER_INPUT_BLOCKED_WITHOUT_REPAINT=True'
     'SETTINGS_RELEASE_RESOURCE_TOOLTIP=True'
     'SETTINGS_RELEASE_RESOURCE_TOGGLE=True'
+    "SETTINGS_GENERAL_SCREENSHOT=$GeneralScreenshotPath"
     "SETTINGS_SCREENSHOT=$ScreenshotPath"
     "SETTINGS_TOOLTIP_SCREENSHOT=$TooltipScreenshotPath"
 } finally {

@@ -47,6 +47,8 @@ constexpr int kSettingsReleaseResources = 3301;
 constexpr int kSettingsSave = 3302;
 constexpr int kSettingsCancel = 3303;
 constexpr UINT_PTR kSettingsTooltipTimer = 3304;
+constexpr int kSettingsGeneral = 3305;
+constexpr int kSettingsStartup = 3306;
 constexpr UINT kSettingsTooltipDelayMilliseconds = 280;
 
 Gdiplus::Color GdiPlusColor(const COLORREF color, const BYTE alpha = 255) {
@@ -1219,10 +1221,17 @@ std::optional<ModernMainWindow::ImportRequest> ShowImportChoiceDialog(
     return state.result;
 }
 
+enum class SettingsCategory {
+    General,
+    Performance,
+};
+
 struct PerformanceSettingsDialogState final {
     HINSTANCE instance = nullptr;
     HWND window = nullptr;
-    HWND navigation = nullptr;
+    HWND generalNavigation = nullptr;
+    HWND performanceNavigation = nullptr;
+    HWND startup = nullptr;
     HWND releaseResources = nullptr;
     HWND save = nullptr;
     HWND cancel = nullptr;
@@ -1232,8 +1241,10 @@ struct PerformanceSettingsDialogState final {
     HFONT detailFont = nullptr;
     int hoveredControl = 0;
     bool pointerOverReleaseResources = false;
+    SettingsCategory category = SettingsCategory::General;
+    bool startWithWindowsEnabled = false;
     bool releaseResourcesEnabled = true;
-    std::optional<bool> result;
+    std::optional<ModernMainWindow::SettingsResult> result;
     bool complete = false;
 };
 
@@ -1257,8 +1268,10 @@ void RecreatePerformanceSettingsFonts(PerformanceSettingsDialogState& state) {
         -MulDiv(12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
-    for (const HWND control : {state.navigation, state.releaseResources,
-                               state.save, state.cancel}) {
+    for (const HWND control : {state.generalNavigation,
+                               state.performanceNavigation, state.startup,
+                               state.releaseResources, state.save,
+                               state.cancel}) {
         SetControlFont(control, state.bodyFont);
     }
 }
@@ -1267,10 +1280,18 @@ void LayoutPerformanceSettingsDialog(PerformanceSettingsDialogState& state) {
     RECT client{};
     GetClientRect(state.window, &client);
     const int navigationWidth = Scale(state.window, 176);
-    MoveWindow(state.navigation, Scale(state.window, 16),
-               Scale(state.window, 64), navigationWidth - Scale(state.window, 32),
+    const int navigationLeft = Scale(state.window, 16);
+    const int navigationItemWidth = navigationWidth - Scale(state.window, 32);
+    MoveWindow(state.generalNavigation, navigationLeft,
+               Scale(state.window, 64), navigationItemWidth,
+               Scale(state.window, 42), TRUE);
+    MoveWindow(state.performanceNavigation, navigationLeft,
+               Scale(state.window, 114), navigationItemWidth,
                Scale(state.window, 42), TRUE);
     const int contentLeft = navigationWidth + Scale(state.window, 24);
+    MoveWindow(state.startup, contentLeft, Scale(state.window, 36),
+               client.right - contentLeft - Scale(state.window, 24),
+               Scale(state.window, 76), TRUE);
     MoveWindow(state.releaseResources, contentLeft, Scale(state.window, 36),
                client.right - contentLeft - Scale(state.window, 24),
                Scale(state.window, 76), TRUE);
@@ -1287,6 +1308,14 @@ void LayoutPerformanceSettingsDialog(PerformanceSettingsDialogState& state) {
         !SetWindowRgn(state.tooltip, tooltipRegion, FALSE)) {
         DeleteObject(tooltipRegion);
     }
+    const bool general = state.category == SettingsCategory::General;
+    ShowWindow(state.startup, general ? SW_SHOW : SW_HIDE);
+    ShowWindow(state.releaseResources, general ? SW_HIDE : SW_SHOW);
+    if (general) {
+        KillTimer(state.window, kSettingsTooltipTimer);
+        state.pointerOverReleaseResources = false;
+        ShowWindow(state.tooltip, SW_HIDE);
+    }
     const int actionWidth = Scale(state.window, 112);
     const int actionHeight = Scale(state.window, 38);
     const int actionTop = client.bottom - Scale(state.window, 22) - actionHeight;
@@ -1300,39 +1329,58 @@ void LayoutPerformanceSettingsDialog(PerformanceSettingsDialogState& state) {
 
 void DrawPerformanceSettingsControl(const DRAWITEMSTRUCT& draw,
                                     const PerformanceSettingsDialogState& state) {
+    const bool navigation = draw.CtlID == kSettingsGeneral ||
+                            draw.CtlID == kSettingsPerformance;
     FillRectangle(draw.hDC, draw.rcItem,
-                  draw.CtlID == kSettingsPerformance ? kSidebar : kBackground);
+                  navigation ? kSidebar : kBackground);
     const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
     const bool hovered = state.hoveredControl == static_cast<int>(draw.CtlID);
     RECT card = draw.rcItem;
     InflateRect(&card, -1, -1);
 
-    if (draw.CtlID == kSettingsPerformance) {
-        const COLORREF fill = hovered ? RGB(43, 52, 72) : RGB(38, 45, 62);
-        FillRoundedRectangle(draw.hDC, card, fill, kAccent,
+    if (navigation) {
+        const bool selected =
+            (draw.CtlID == kSettingsGeneral &&
+             state.category == SettingsCategory::General) ||
+            (draw.CtlID == kSettingsPerformance &&
+             state.category == SettingsCategory::Performance);
+        const COLORREF fill = selected
+                                  ? (hovered ? RGB(43, 52, 72)
+                                             : RGB(38, 45, 62))
+                                  : (hovered ? RGB(31, 37, 50) : kSidebar);
+        FillRoundedRectangle(draw.hDC, card, fill,
+                             selected ? kAccent : kSidebar,
                              Scale(state.window, 9));
-        DrawTextLine(draw.hDC, L"性能优化", card, state.bodyFont, kTextPrimary,
+        DrawTextLine(draw.hDC,
+                     draw.CtlID == kSettingsGeneral ? L"常规" : L"性能优化",
+                     card, state.bodyFont, kTextPrimary,
                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
-    if (draw.CtlID == kSettingsReleaseResources) {
+    if (draw.CtlID == kSettingsStartup ||
+        draw.CtlID == kSettingsReleaseResources) {
+        const bool startup = draw.CtlID == kSettingsStartup;
+        const bool enabled = startup ? state.startWithWindowsEnabled
+                                     : state.releaseResourcesEnabled;
         const COLORREF fill = pressed
                                   ? RGB(40, 51, 76)
                                   : (hovered ? kPanelHover : kPanel);
-        FillRoundedRectangle(draw.hDC, card, fill,
-                             state.releaseResourcesEnabled ? kAccent : kBorder,
+        FillRoundedRectangle(draw.hDC, card, fill, enabled ? kAccent : kBorder,
                              Scale(state.window, 11));
-        constexpr wchar_t labelText[] = L"锁屏/熄屏时释放视频资源";
         RECT label{card.left + Scale(state.window, 16),
                    card.top + Scale(state.window, 10),
                    card.right - Scale(state.window, 76),
                    card.top + Scale(state.window, 36)};
-        DrawTextLine(draw.hDC, labelText, label, state.bodyFont, kTextPrimary,
+        DrawTextLine(draw.hDC,
+                     startup ? L"开机时自动启动"
+                             : L"锁屏/熄屏时释放视频资源",
+                     label, state.bodyFont, kTextPrimary,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         RECT detail{label.left, label.bottom, label.right,
                     card.bottom - Scale(state.window, 8)};
         DrawTextLine(draw.hDC,
-                     L"降低暂停期间占用；恢复时可能短暂卡顿",
+                     startup ? L"登录 Windows 后自动在后台运行"
+                             : L"降低暂停期间占用；恢复时可能短暂卡顿",
                      detail, state.detailFont, kTextSecondary,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -1342,13 +1390,13 @@ void DrawPerformanceSettingsControl(const DRAWITEMSTRUCT& draw,
                    card.top + (card.bottom - card.top - switchHeight) / 2,
                    card.right - Scale(state.window, 16),
                    card.top + (card.bottom - card.top + switchHeight) / 2};
-        const COLORREF trackFill = state.releaseResourcesEnabled
+        const COLORREF trackFill = enabled
                                        ? (hovered ? kAccentHover : kAccent)
                                        : (hovered ? RGB(70, 80, 104)
                                                   : RGB(55, 64, 84));
         const int knobDiameter = Scale(state.window, 16);
         const int knobMargin = (switchHeight - knobDiameter) / 2;
-        const int knobLeft = state.releaseResourcesEnabled
+        const int knobLeft = enabled
                                  ? track.right - knobMargin - knobDiameter
                                  : track.left + knobMargin;
         RECT knob{knobLeft, track.top + knobMargin,
@@ -1471,9 +1519,11 @@ LRESULT CALLBACK PerformanceSettingsControlProcedure(
     if (state != nullptr && message == WM_ERASEBKGND) {
         RECT client{};
         GetClientRect(window, &client);
+        const int identifier = GetDlgCtrlID(window);
+        const bool navigation = identifier == kSettingsGeneral ||
+                                identifier == kSettingsPerformance;
         FillRectangle(reinterpret_cast<HDC>(wParam), client,
-                      GetDlgCtrlID(window) == kSettingsPerformance ? kSidebar
-                                                                  : kBackground);
+                      navigation ? kSidebar : kBackground);
         return 1;
     }
     if (state != nullptr && message == WM_MOUSEMOVE) {
@@ -1483,8 +1533,12 @@ LRESULT CALLBACK PerformanceSettingsControlProcedure(
             state->hoveredControl = identifier;
             const auto controlForId = [&](const int id) -> HWND {
                 switch (id) {
+                    case kSettingsGeneral:
+                        return state->generalNavigation;
                     case kSettingsPerformance:
-                        return state->navigation;
+                        return state->performanceNavigation;
+                    case kSettingsStartup:
+                        return state->startup;
                     case kSettingsReleaseResources:
                         return state->releaseResources;
                     case kSettingsSave:
@@ -1552,8 +1606,12 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
                         static_cast<INT_PTR>(identifier)),
                     state->instance, nullptr);
             };
-            state->navigation =
+            state->generalNavigation =
+                createButton(kSettingsGeneral, L"常规");
+            state->performanceNavigation =
                 createButton(kSettingsPerformance, L"性能优化");
+            state->startup = createButton(
+                kSettingsStartup, L"开机时自动启动");
             state->releaseResources = createButton(
                 kSettingsReleaseResources, L"锁屏/熄屏时释放视频资源");
             state->save = createButton(kSettingsSave, L"保存");
@@ -1563,14 +1621,18 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
                 L"开启后，锁屏或熄屏 1 分钟会释放视频解码资源，系统睡眠时立即释放；恢复后自动继续播放。开启后可能会出现恢复时的短暂卡顿。",
                 WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, window, nullptr,
                 state->instance, nullptr);
-            if (state->navigation == nullptr ||
+            if (state->generalNavigation == nullptr ||
+                state->performanceNavigation == nullptr ||
+                state->startup == nullptr ||
                 state->releaseResources == nullptr || state->save == nullptr ||
                 state->cancel == nullptr || state->tooltip == nullptr) {
                 return -1;
             }
-            for (const HWND control : {state->navigation,
-                                       state->releaseResources, state->save,
-                                       state->cancel}) {
+            for (const HWND control : {state->generalNavigation,
+                                       state->performanceNavigation,
+                                       state->startup,
+                                       state->releaseResources,
+                                       state->save, state->cancel}) {
                 SetWindowSubclass(
                     control, &PerformanceSettingsControlProcedure, 1,
                     reinterpret_cast<DWORD_PTR>(state));
@@ -1614,8 +1676,27 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
                 InvalidateRect(state->releaseResources, nullptr, FALSE);
                 return 0;
             }
+            if (LOWORD(wParam) == kSettingsStartup) {
+                state->startWithWindowsEnabled =
+                    !state->startWithWindowsEnabled;
+                InvalidateRect(state->startup, nullptr, FALSE);
+                return 0;
+            }
+            if (LOWORD(wParam) == kSettingsGeneral ||
+                LOWORD(wParam) == kSettingsPerformance) {
+                state->category = LOWORD(wParam) == kSettingsGeneral
+                                      ? SettingsCategory::General
+                                      : SettingsCategory::Performance;
+                state->hoveredControl = 0;
+                LayoutPerformanceSettingsDialog(*state);
+                InvalidateRect(state->generalNavigation, nullptr, FALSE);
+                InvalidateRect(state->performanceNavigation, nullptr, FALSE);
+                return 0;
+            }
             if (LOWORD(wParam) == kSettingsSave) {
-                state->result = state->releaseResourcesEnabled;
+                state->result = ModernMainWindow::SettingsResult{
+                    state->startWithWindowsEnabled,
+                    state->releaseResourcesEnabled};
                 DestroyWindow(window);
                 return 0;
             }
@@ -1698,9 +1779,11 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
             return 1;
         case WM_NCDESTROY:
             KillTimer(window, kSettingsTooltipTimer);
-            for (const HWND control : {state->navigation,
-                                       state->releaseResources, state->save,
-                                       state->cancel}) {
+            for (const HWND control : {state->generalNavigation,
+                                       state->performanceNavigation,
+                                       state->startup,
+                                       state->releaseResources,
+                                       state->save, state->cancel}) {
                 if (control != nullptr) {
                     RemoveWindowSubclass(
                         control, &PerformanceSettingsControlProcedure, 1);
@@ -1748,14 +1831,16 @@ bool RegisterSettingsWindowClass(const HINSTANCE instance) {
            GetLastError() == ERROR_CLASS_ALREADY_EXISTS;
 }
 
-std::optional<bool> ShowPerformanceSettingsDialog(
+std::optional<ModernMainWindow::SettingsResult> ShowPerformanceSettingsDialog(
     const HWND owner, const HINSTANCE instance,
+    const bool startWithWindowsEnabled,
     const bool releaseResourcesEnabled) {
     if (!IsWindow(owner) || !RegisterSettingsWindowClass(instance)) {
         return std::nullopt;
     }
     PerformanceSettingsDialogState state;
     state.instance = instance;
+    state.startWithWindowsEnabled = startWithWindowsEnabled;
     state.releaseResourcesEnabled = releaseResourcesEnabled;
     const int clientWidth = Scale(owner, 680);
     const int clientHeight = Scale(owner, 320);
@@ -1789,7 +1874,7 @@ std::optional<bool> ShowPerformanceSettingsDialog(
     }
     ShowWindow(dialog, SW_SHOWNORMAL);
     SetForegroundWindow(dialog);
-    SetFocus(state.releaseResources);
+    SetFocus(state.startup);
     bool receivedQuit = false;
     WPARAM quitCode = 0;
     MSG message{};
@@ -3009,13 +3094,13 @@ ModernMainWindow::ChooseImportSource() {
                      GetWindowLongPtrW(parent_, GWLP_HINSTANCE)));
 }
 
-std::optional<bool> ModernMainWindow::ChoosePerformanceSettings(
-    const bool releaseResources) {
+std::optional<ModernMainWindow::SettingsResult> ModernMainWindow::ChooseSettings(
+    const bool startWithWindows, const bool releaseResources) {
     CloseTransientUi();
     return ShowPerformanceSettingsDialog(
         parent_, reinterpret_cast<HINSTANCE>(
                      GetWindowLongPtrW(parent_, GWLP_HINSTANCE)),
-        releaseResources);
+        startWithWindows, releaseResources);
 }
 
 void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {

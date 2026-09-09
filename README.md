@@ -21,6 +21,7 @@
 - **播放与界面解耦**：动态壁纸由独立播放线程驱动，打开菜单、下拉框或对话框不会阻塞桌面取帧与呈现。
 - **资源状态可见**：主界面实时显示本进程的 CPU、GPU 和内存，并把 GPU 内存区分为专用与共享。
 - **按需检查更新**：标题栏提供“检查更新”按钮，不在启动或后台自动联网；发现新版本后由用户决定是否打开 GitHub Release 下载页。
+- **可选开机启动**：可在 `设置 → 常规` 中开启；登录 Windows 后软件直接在托盘运行并恢复已保存的壁纸，不需要管理员权限。
 
 ## 下载与使用
 
@@ -31,6 +32,7 @@
 3. 双击壁纸，或右键选择“应用”。分屏显示时，可在随后出现的窗口中单选或多选目标屏幕。
 4. 关闭主窗口会隐藏到系统托盘；左键托盘图标重新打开，右键仅显示播放、声音、取消应用和退出等操作。
 5. 需要确认新版本时，点击标题栏“检查更新”；软件不会自动下载或安装更新。检查失败时会显示具体的 HTTP/WinHTTP 原因和可重试时间，并提供仓库 Release 列表作为手动下载入口。
+6. 如需登录 Windows 后自动恢复壁纸，可在 `设置 → 常规` 中开启“开机时自动启动”；开机启动不会弹出管理窗口，可从托盘图标打开。
 
 | 类型 | 支持内容 |
 | --- | --- |
@@ -77,13 +79,14 @@
 | --- | --- |
 | 壁纸库 | `%LOCALAPPDATA%\LiveWallpaperEngine\library` |
 | 设置 | `%LOCALAPPDATA%\LiveWallpaperEngine\settings.json` |
+| 开机启动项 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 中的 `LiveWallpaperEngine` |
 | 自定义排序 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.library-order.v1` |
 | 最爱与壁纸分组 | `%LOCALAPPDATA%\LiveWallpaperEngine\library\.wallpaper-groups.v1` |
 | 日志 | `%LOCALAPPDATA%\LiveWallpaperEngine\logs\LiveWallpaperEngine.log` |
 | 上次会话状态 | `%LOCALAPPDATA%\LiveWallpaperEngine\diagnostics\last-session.v1.json` |
 | 崩溃转储 | `%LOCALAPPDATA%\LiveWallpaperEngine\crashes` |
 
-崩溃转储文件名包含程序版本、UTC 时间和进程 ID，最多保留最近 10 份。上述诊断数据只保存在本机，不会自动上传。覆盖安装和卸载程序不会主动删除当前用户的壁纸库与设置。
+崩溃转储文件名包含程序版本、UTC 时间和进程 ID，最多保留最近 10 份。上述诊断数据只保存在本机，不会自动上传。覆盖安装和卸载程序不会主动删除当前用户的壁纸库与设置；卸载时会清理本软件的开机启动项。
 
 ## 技术实现
 
@@ -114,13 +117,13 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 本地构建安装包需要 [Inno Setup 6](https://jrsoftware.org/isinfo.php)：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.2.1
+.\tools\build-release.ps1 -Version 1.2.2
 ```
 
 日常开发验证使用带有明确标记的未发布安装包：
 
 ```powershell
-.\tools\build-release.ps1 -Version 1.2.1 -Unreleased
+.\tools\build-release.ps1 -Version 1.2.2 -Unreleased
 ```
 
 安装包输出到 `dist\`，默认安装到 `%LOCALAPPDATA%\Programs\Live Wallpaper Engine`。如果检测到已安装的相同 AppId，交互式安装会询问是否覆盖；选择“否”立即退出。确认覆盖后，安装器会先发送专用退出请求，让当前版本快速、完整地释放壁纸窗口和媒体资源；升级不支持该请求的旧版本时，安装器只会短暂等待，再结束经固定窗口类确认的目标进程，避免长时间停在“正在关闭应用程序”。
@@ -151,6 +154,7 @@ msbuild .\LiveWallpaperEngine.sln /m /p:Configuration=Release /p:Platform=x64
 .\tools\test-tray-controls.ps1 -Configuration Release
 .\tools\test-ui-playback-independence.ps1 -Configuration Release -VideoPath .\sample.mp4
 .\tools\test-settings-ui.ps1 -Configuration Release -VideoPath .\sample.mp4
+.\tools\test-startup-setting.ps1 -Configuration Release
 .\tools\test-update-check.ps1 -Configuration Release -ExpectedStatus Current
 .\tools\test-crash-diagnostics.ps1 -Configuration Release
 ```

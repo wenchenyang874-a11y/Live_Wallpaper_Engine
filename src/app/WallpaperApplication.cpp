@@ -29,6 +29,7 @@
 #include "core/Logger.h"
 #include "media/MediaProbe.h"
 #include "media/video/VideoOptimizer.h"
+#include "platform/StartupRegistration.h"
 
 namespace lwe::app {
 namespace {
@@ -807,11 +808,13 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
                               const std::vector<std::wstring>& testWallpapers,
                               const updates::UpdateCheckMode updateCheckMode,
                               const std::wstring_view compressedImportTestSource,
-                              std::filesystem::path testLibraryRoot) {
+                              std::filesystem::path testLibraryRoot,
+                              const bool startHidden) {
     controlledTestMode_ = testDuration.count() > 0;
     compressedImportTestActive_ =
         controlledTestMode_ && !compressedImportTestSource.empty();
     updateCheckMode_ = updateCheckMode;
+    startWithWindows_ = platform::IsStartupRegistrationEnabled();
     // Tencent DeskGo and other desktop organizers use this established signal
     // to stop painting an opaque copy of the Windows wallpaper above live
     // wallpaper hosts. The handle exists only for our application lifetime.
@@ -895,7 +898,14 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
     std::size_t nextControlledWallpaper = 1;
     int exitCode = 0;
     running_ = true;
-    ShowControlWindow();
+    if (startHidden && trayIconAdded_) {
+        ShowWindow(controlWindow_, SW_HIDE);
+        PositionUpdateButtonWindow();
+        core::LogInfo(
+            L"Started from Windows startup; the main window remains hidden in the tray.");
+    } else {
+        ShowControlWindow();
+    }
 
     MSG message{};
     while (running_) {
@@ -2946,14 +2956,36 @@ void WallpaperApplication::SetReleaseVideoResourcesOnPause(
 void WallpaperApplication::ShowSettings() {
     EnableWindow(updateButtonWindow_, FALSE);
     EnableWindow(settingsButtonWindow_, FALSE);
-    const std::optional result = mainWindow_.ChoosePerformanceSettings(
-        releaseVideoResourcesOnPause_);
+    const std::optional result = mainWindow_.ChooseSettings(
+        startWithWindows_, releaseVideoResourcesOnPause_);
     EnableWindow(updateButtonWindow_, TRUE);
     EnableWindow(settingsButtonWindow_, TRUE);
     PositionUpdateButtonWindow();
-    if (result.has_value()) {
-        SetReleaseVideoResourcesOnPause(*result);
+    if (!result.has_value()) {
+        return;
     }
+    if (result->releaseVideoResources != releaseVideoResourcesOnPause_) {
+        SetReleaseVideoResourcesOnPause(result->releaseVideoResources);
+    }
+    if (result->startWithWindows == startWithWindows_) {
+        return;
+    }
+    const HRESULT startupResult =
+        platform::SetStartupRegistrationEnabled(result->startWithWindows);
+    if (FAILED(startupResult)) {
+        core::LogError(L"Unable to update the Windows startup registration.",
+                       startupResult);
+        mainWindow_.SetStatus(
+            L"开机自动启动设置失败 · 请检查当前用户注册表权限");
+        return;
+    }
+    startWithWindows_ = result->startWithWindows;
+    core::LogInfo(startWithWindows_
+                      ? L"Windows startup registration enabled."
+                      : L"Windows startup registration disabled.");
+    mainWindow_.SetStatus(startWithWindows_
+                              ? L"开机自动启动已开启 · 下次登录后将在托盘运行"
+                              : L"开机自动启动已关闭");
 }
 
 void WallpaperApplication::ToggleManualPlaybackPause() {

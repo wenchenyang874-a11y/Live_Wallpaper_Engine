@@ -37,6 +37,7 @@ struct StartupOptions final {
     std::filesystem::path testLibraryRoot;
     bool videoOptimizerExpectSkip = false;
     bool updateCheckerSelfTest = false;
+    bool startHidden = false;
 };
 
 StartupOptions ParseStartupOptions() {
@@ -68,6 +69,10 @@ StartupOptions ParseStartupOptions() {
         const std::wstring_view argument(arguments[index]);
         if (argument == L"--test-update-check") {
             options.updateCheckerSelfTest = true;
+            continue;
+        }
+        if (argument == L"--startup") {
+            options.startHidden = true;
             continue;
         }
         if (argument == L"--test-video-optimizer-expect-skip") {
@@ -424,7 +429,8 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
         exitCode = application.Run(options.testDuration, options.testWallpapers,
                                    options.updateCheckMode,
                                    options.compressedImportTestSource.native(),
-                                   options.testLibraryRoot);
+                                   options.testLibraryRoot,
+                                   options.startHidden);
     } else {
         lwe::core::LogError(L"COM initialization failed.", comResult);
     }

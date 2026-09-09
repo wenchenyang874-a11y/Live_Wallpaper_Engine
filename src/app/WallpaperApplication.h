@@ -44,7 +44,8 @@ public:
             updates::UpdateCheckMode updateCheckMode =
                 updates::UpdateCheckMode::Live,
             std::wstring_view compressedImportTestSource = {},
-            std::filesystem::path testLibraryRoot = {});
+            std::filesystem::path testLibraryRoot = {},
+            bool startHidden = false);
 
 private:
     enum class PlaybackMode {
@@ -206,6 +207,7 @@ private:
     bool dynamicPlaybackPaused_ = false;
     bool manualPlaybackPaused_ = false;
     bool releaseVideoResourcesOnPause_ = true;
+    bool startWithWindows_ = false;
     bool pendingWallpaperReveal_ = false;
     std::atomic_int runtimeExitCode_{0};
     std::atomic_bool playbackFailurePending_{false};
