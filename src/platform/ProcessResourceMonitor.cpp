@@ -37,7 +37,59 @@ bool CounterValueIsValid(const DWORD status) {
 }  // namespace
 
 ProcessResourceMonitor::~ProcessResourceMonitor() {
+    Stop();
     Shutdown();
+}
+
+void ProcessResourceMonitor::Start() {
+    if (worker_.joinable()) {
+        return;
+    }
+    worker_ = std::jthread([this](const std::stop_token stop) {
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+        bool initialized = false;
+        std::unique_lock lock(mutex_);
+        while (!stop.stop_requested()) {
+            wake_.wait(lock, [&] { return stop.stop_requested() || visible_; });
+            if (stop.stop_requested()) {
+                break;
+            }
+            lock.unlock();
+            if (!initialized) {
+                Initialize();
+                initialized = true;
+            }
+            const auto usage = Sample();
+            lock.lock();
+            latest_ = usage;
+            wake_.wait_for(lock, std::chrono::seconds(1), [&] {
+                return stop.stop_requested() || !visible_;
+            });
+        }
+        lock.unlock();
+        Shutdown();
+    });
+}
+
+void ProcessResourceMonitor::Stop() {
+    if (worker_.joinable()) {
+        // Change the predicate under the wait mutex to avoid a lost shutdown wake.
+        {
+            const std::scoped_lock lock(mutex_);
+            worker_.request_stop();
+        }
+        wake_.notify_all();
+        worker_.join();
+    }
+}
+
+std::optional<ProcessResourceUsage> ProcessResourceMonitor::Latest(const bool visible) {
+    const std::scoped_lock lock(mutex_);
+    if (visible_ != visible) {
+        visible_ = visible;
+        wake_.notify_all();
+    }
+    return latest_;
 }
 
 bool ProcessResourceMonitor::Initialize() {

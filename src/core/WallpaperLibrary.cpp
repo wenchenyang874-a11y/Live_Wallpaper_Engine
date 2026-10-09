@@ -305,6 +305,8 @@ HRESULT WallpaperLibrary::Initialize() {
 }
 
 HRESULT WallpaperLibrary::InitializeAt(std::filesystem::path rootDirectory) {
+    const std::scoped_lock lock(scanMutex_);
+    descriptions_.clear();
     if (rootDirectory.empty() || !rootDirectory.is_absolute()) {
         return E_INVALIDARG;
     }
@@ -436,11 +438,13 @@ HRESULT WallpaperLibrary::AppendOrderEntry(
 }
 
 std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
+    const std::scoped_lock lock(scanMutex_);
     std::vector<WallpaperItem> items;
     if (rootDirectory_.empty()) {
         return items;
     }
 
+    std::unordered_set<std::wstring> present;
     std::error_code error;
     for (const auto& entry : std::filesystem::directory_iterator(rootDirectory_, error)) {
         if (error) {
@@ -463,11 +467,38 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
             continue;
         }
 
+        const auto key = entry.path().native();
+        present.insert(key);
+        const auto size = entry.file_size(error);
+        if (error) {
+            error.clear();
+            descriptions_.erase(key);
+            continue;
+        }
+        const auto modified = entry.last_write_time(error);
+        if (error) {
+            error.clear();
+            descriptions_.erase(key);
+            continue;
+        }
+        const auto cached = descriptions_.find(key);
+        if (cached != descriptions_.end() && cached->second.fileSize == size &&
+            cached->second.modifiedAt == modified) {
+            items.push_back(cached->second);
+            continue;
+        }
+        descriptions_.erase(key);
         WallpaperItem item;
         if (SUCCEEDED(DescribeFile(entry.path(), false, item))) {
+            if (item.fileSize == size && item.modifiedAt == modified) {
+                descriptions_.emplace(key, item);
+            }
             items.push_back(std::move(item));
         }
     }
+    std::erase_if(descriptions_, [&](const auto& cached) {
+        return !present.contains(cached.first);
+    });
 
     std::ranges::sort(items, [](const WallpaperItem& left, const WallpaperItem& right) {
         return CompareStringOrdinal(left.displayName.c_str(), -1, right.displayName.c_str(),
@@ -512,6 +543,7 @@ HRESULT WallpaperLibrary::DescribeFile(const std::filesystem::path& path,
     item.kind = mediaInfo.kind;
     item.formatLabel = mediaInfo.formatLabel;
     item.fileSize = size;
+    item.modifiedAt = std::filesystem::last_write_time(path, error);
     item.width = mediaInfo.width;
     item.height = mediaInfo.height;
     item.hasAudio = mediaInfo.hasAudio;

@@ -90,7 +90,8 @@ function Read-SharedBytes([string] $Path) {
     try {
         $memory = [IO.MemoryStream]::new()
         $stream.CopyTo($memory)
-        return $memory.ToArray()
+        # Return one byte[] instead of millions of pipeline objects as logs grow.
+        return ,$memory.ToArray()
     } finally {
         $stream.Dispose()
     }

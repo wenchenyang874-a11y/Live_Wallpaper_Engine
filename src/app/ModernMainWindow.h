@@ -14,6 +14,7 @@
 
 #include "core/WallpaperLibrary.h"
 #include "core/WallpaperGroupStore.h"
+#include "app/ThumbnailCache.h"
 
 namespace lwe::app {
 
@@ -104,6 +105,8 @@ public:
     HBRUSH ColorControl(HDC deviceContext, HWND control) const;
     bool HandleFilterCommand(WORD controlId, WORD notificationCode);
     void HandleAnimationTimer();
+    void ThumbnailsReady();
+    void StopThumbnailLoading();
     void CloseTransientUi();
     std::optional<std::vector<std::wstring>> ChooseDisplayTargets();
     std::optional<ImportRequest> ChooseImportSource();
@@ -221,8 +224,6 @@ private:
     void SetListHovered(HWND list, POINT clientPoint, bool hovered);
     void StartHoverAnimation();
     float ControlHoverProgress(HWND control) const;
-    HBITMAP LoadThumbnail(std::wstring_view path) const;
-    void ClearThumbnails();
     void CancelRename();
     static LRESULT CALLBACK RenameEditProcedure(HWND window, UINT message,
                                                 WPARAM wParam, LPARAM lParam,
@@ -279,7 +280,7 @@ private:
     std::wstring renamingPath_;
     std::wstring currentGroupId_ = std::wstring(AllGroupId);
     std::wstring renamingGroupId_;
-    std::unordered_map<std::wstring, HBITMAP> thumbnails_;
+    mutable ThumbnailCache thumbnails_;
     FilterKind filterKind_ = FilterKind::All;
     bool soundEnabled_ = false;
     bool spanAcrossDisplays_ = true;

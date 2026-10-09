@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <mutex>
+#include <unordered_map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -19,6 +21,7 @@ struct WallpaperItem final {
     media::WallpaperKind kind = media::WallpaperKind::StaticImage;
     std::wstring formatLabel;
     std::uint64_t fileSize = 0;
+    std::filesystem::file_time_type modifiedAt{};
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     bool hasAudio = false;
@@ -59,6 +62,9 @@ private:
     void CleanupLegacyOptimizedVideos() const;
 
     std::filesystem::path rootDirectory_;
+    // Only successful descriptions are cached; Scan prunes deleted files.
+    mutable std::mutex scanMutex_;
+    mutable std::unordered_map<std::wstring, WallpaperItem> descriptions_;
 };
 
 }  // namespace lwe::core

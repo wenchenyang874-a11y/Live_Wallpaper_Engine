@@ -213,6 +213,10 @@ try {
     $endPoint.X = $dragX
     $endPoint.Y = $dragEndY
     [void][LweLibraryManagementProbe]::ScreenToClient($library, [ref]$endPoint)
+    # Keep the physical pointer at the synthetic drag destination. Async thumbnail
+    # paints can otherwise enqueue WM_MOUSEMOVE at the old cursor position and
+    # move the captured thumb back before the following button-up is processed.
+    [void][LweLibraryManagementProbe]::SetCursorPos($dragX, $dragEndY)
     [void][LweLibraryManagementProbe]::SendMessage(
         $library, 0x0200, [IntPtr]1,
         [LweLibraryManagementProbe]::Point($endPoint.X, $endPoint.Y)) # WM_MOUSEMOVE/MK_LBUTTON

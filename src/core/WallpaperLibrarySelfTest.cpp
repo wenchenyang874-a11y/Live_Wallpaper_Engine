@@ -132,6 +132,57 @@ HRESULT ModifyByte(const std::filesystem::path& path, const std::uint64_t offset
     return S_OK;
 }
 
+bool TestDescriptionCache(const std::filesystem::path& root) {
+    WallpaperLibrary library;
+    if (FAILED(library.InitializeAt(root))) return false;
+    const auto path = root / L"cache.bmp";
+    const auto writeBitmap = [&](const LONG width, const LONG height) {
+        BITMAPFILEHEADER file{};
+        BITMAPINFOHEADER info{};
+        const std::array<std::uint32_t, 8> pixels{};
+        file.bfType = 0x4D42;
+        file.bfOffBits = sizeof(file) + sizeof(info);
+        file.bfSize = file.bfOffBits + sizeof(pixels);
+        info.biSize = sizeof(info);
+        info.biWidth = width;
+        info.biHeight = height;
+        info.biPlanes = 1;
+        info.biBitCount = 32;
+        const HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return false;
+        DWORD written = 0;
+        const bool ok = WriteFile(handle, &file, sizeof(file), &written, nullptr) &&
+                        written == sizeof(file) &&
+                        WriteFile(handle, &info, sizeof(info), &written, nullptr) &&
+                        written == sizeof(info) &&
+                        WriteFile(handle, pixels.data(), sizeof(pixels), &written, nullptr) &&
+                        written == sizeof(pixels);
+        CloseHandle(handle);
+        return ok;
+    };
+    if (!writeBitmap(2, 4)) return false;
+    const auto first = library.Scan();
+    if (first.size() != 1 || first.front().width != 2) return false;
+    const auto started = GetTickCount64();
+    for (int iteration = 0; iteration < 100; ++iteration) {
+        const auto cached = library.Scan();
+        if (cached.size() != 1 || cached.front().height != 4) return false;
+    }
+    LogInfo(L"LIBRARY_CACHED_SCAN_100_MS=" + std::to_wstring(GetTickCount64() - started));
+    if (!writeBitmap(4, 2)) return false;
+    std::error_code error;
+    std::filesystem::last_write_time(path, first.front().modifiedAt + std::chrono::seconds(2), error);
+    if (error) return false;
+    const auto changed = library.Scan();
+    if (changed.size() != 1 || changed.front().width != 4 ||
+        changed.front().height != 2 || changed.front().fileSize != first.front().fileSize) return false;
+    if (!DeleteFileW(path.c_str()) || !library.Scan().empty()) return false;
+    if (FAILED(library.InitializeAt(root / L"other")) || !library.Scan().empty()) return false;
+    LogInfo(L"SELF_TEST_LIBRARY_CACHE_INVALIDATION=True");
+    return true;
+}
+
 }  // namespace
 
 int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
@@ -370,6 +421,11 @@ int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
         return 1;
     }
     LogInfo(L"SELF_TEST_LIBRARY_NO_ORPHANS=True");
+    if (!TestDescriptionCache(temporaryRoot / L"cache-test")) {
+        LogError(L"Library metadata cache invalidation self-test failed.");
+        cleanup();
+        return 1;
+    }
     cleanup();
     return 0;
 }

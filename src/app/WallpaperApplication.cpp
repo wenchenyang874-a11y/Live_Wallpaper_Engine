@@ -860,7 +860,7 @@ int WallpaperApplication::Run(const std::chrono::seconds testDuration,
     }
     InitializePlaybackPolicy();
     StartPlaybackRenderThread();
-    resourceMonitor_.Initialize();
+    resourceMonitor_.Start();
     SetTimer(controlWindow_, kResourceUsageTimer, 1000, nullptr);
     UpdateResourceUsage();
 
@@ -3421,8 +3421,11 @@ WallpaperApplication::WallpaperSession* WallpaperApplication::FindSession(
 }
 
 void WallpaperApplication::UpdateResourceUsage() {
-    const platform::ProcessResourceUsage usage = resourceMonitor_.Sample();
-    mainWindow_.SetResourceUsage(FormatResourceUsage(usage));
+    const bool visible = IsWindowVisible(controlWindow_) && !IsIconic(controlWindow_);
+    const auto usage = resourceMonitor_.Latest(visible);
+    if (visible && usage.has_value()) {
+        mainWindow_.SetResourceUsage(FormatResourceUsage(*usage));
+    }
 }
 
 void WallpaperApplication::InitializePlaybackPolicy() {
@@ -3897,6 +3900,8 @@ void WallpaperApplication::Shutdown() {
     running_ = false;
     StopUpdateCheck();
     StopVideoOptimizationThread();
+    resourceMonitor_.Stop();
+    mainWindow_.StopThumbnailLoading();
     if (controlWindow_ != nullptr) {
         KillTimer(controlWindow_, kPlaybackPolicyTimer);
         KillTimer(controlWindow_, kExplorerRecoveryTimer);
@@ -3984,6 +3989,9 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
 
     if (window == controlWindow_) {
         switch (message) {
+            case ThumbnailCache::ReadyMessage:
+                mainWindow_.ThumbnailsReady();
+                return 0;
             case WM_COMMAND: {
                 const WORD identifier = LOWORD(wParam);
                 const WORD notification = HIWORD(wParam);

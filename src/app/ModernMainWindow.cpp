@@ -1931,7 +1931,7 @@ ModernMainWindow::~ModernMainWindow() {
                                  &ModernMainWindow::InteractiveControlProcedure, 2);
         }
     }
-    ClearThumbnails();
+    StopThumbnailLoading();
     for (const HFONT font :
          {titleFont_, headingFont_, bodyFont_, smallFont_, badgeFont_}) {
         if (font != nullptr) {
@@ -1958,6 +1958,7 @@ bool ModernMainWindow::Create(const HWND parent, const HINSTANCE instance) {
     if (!IsWindow(parent_)) {
         return false;
     }
+    thumbnails_.Initialize(parent_);
 
     Gdiplus::GdiplusStartupInput gdiplusInput;
     if (Gdiplus::GdiplusStartup(&gdiplusToken_, &gdiplusInput, nullptr) !=
@@ -2714,10 +2715,10 @@ void ModernMainWindow::DrawWallpaperCard(
               contentLeft + Scale(parent_, 82), card.bottom - Scale(parent_, 9)};
     FillRoundedRectangle(draw.hDC, icon, RGB(10, 12, 17), kBorder,
                          Scale(parent_, 8));
-    const auto thumbnail = thumbnails_.find(item.path.native());
-    if (thumbnail != thumbnails_.end() && thumbnail->second != nullptr) {
+    const auto thumbnail = thumbnails_.Get(item, {Scale(parent_, 160), Scale(parent_, 90)});
+    if (thumbnail && thumbnail->handle) {
         BITMAP bitmap{};
-        if (GetObjectW(thumbnail->second, sizeof(bitmap), &bitmap) == sizeof(bitmap) &&
+        if (GetObjectW(thumbnail->handle, sizeof(bitmap), &bitmap) == sizeof(bitmap) &&
             bitmap.bmWidth > 0 && bitmap.bmHeight > 0) {
             const int boxWidth = icon.right - icon.left - Scale(parent_, 4);
             const int boxHeight = icon.bottom - icon.top - Scale(parent_, 4);
@@ -2730,7 +2731,7 @@ void ModernMainWindow::DrawWallpaperCard(
             const int drawLeft = icon.left + (icon.right - icon.left - drawWidth) / 2;
             const int drawTop = icon.top + (icon.bottom - icon.top - drawHeight) / 2;
             const HDC source = CreateCompatibleDC(draw.hDC);
-            const HGDIOBJ previous = SelectObject(source, thumbnail->second);
+            const HGDIOBJ previous = SelectObject(source, thumbnail->handle);
             SetStretchBltMode(draw.hDC, HALFTONE);
             StretchBlt(draw.hDC, drawLeft, drawTop, drawWidth, drawHeight,
                        source, 0, 0, bitmap.bmWidth, bitmap.bmHeight, SRCCOPY);
@@ -3108,26 +3109,11 @@ void ModernMainWindow::SetItems(std::vector<core::WallpaperItem> items) {
     for (const core::WallpaperItem& item : items) {
         currentPaths.insert(item.path.native());
     }
-    for (auto thumbnail = thumbnails_.begin(); thumbnail != thumbnails_.end();) {
-        if (!currentPaths.contains(thumbnail->first)) {
-            if (thumbnail->second != nullptr) {
-                DeleteObject(thumbnail->second);
-            }
-            thumbnail = thumbnails_.erase(thumbnail);
-        } else {
-            ++thumbnail;
-        }
-    }
+    thumbnails_.Prune(items);
     std::erase_if(exportSelectedPaths_, [&](const std::wstring& path) {
         return !currentPaths.contains(path);
     });
     items_ = std::move(items);
-    for (const core::WallpaperItem& item : items_) {
-        const std::wstring key = item.path.native();
-        if (!thumbnails_.contains(key)) {
-            thumbnails_.emplace(key, LoadThumbnail(key));
-        }
-    }
     RefreshVisibleItems();
     RefreshActiveItems();
     UpdateExportSelectionControls();
@@ -3563,36 +3549,30 @@ std::uint64_t ModernMainWindow::MainFullPaintCount() const noexcept {
     return mainFullPaintCount_;
 }
 
-HBITMAP ModernMainWindow::LoadThumbnail(const std::wstring_view path) const {
-    Microsoft::WRL::ComPtr<IShellItem> item;
-    const std::wstring filePath(path);
-    HRESULT result = SHCreateItemFromParsingName(filePath.c_str(), nullptr,
-                                                 IID_PPV_ARGS(&item));
-    Microsoft::WRL::ComPtr<IShellItemImageFactory> imageFactory;
-    if (SUCCEEDED(result)) {
-        result = item.As(&imageFactory);
-    }
-    HBITMAP bitmap = nullptr;
-    const SIZE size{Scale(parent_, 160), Scale(parent_, 90)};
-    if (SUCCEEDED(result)) {
-        result = imageFactory->GetImage(
-            size, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, &bitmap);
-    }
-    if (FAILED(result) && imageFactory) {
-        imageFactory->GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK,
-                               &bitmap);
-    }
-    return bitmap;
+void ModernMainWindow::ThumbnailsReady() {
+    const auto ready = thumbnails_.TakeReady();
+    const auto refresh = [&](const HWND list, const std::vector<std::size_t>& indices) {
+        if (!IsWindowVisible(list)) return;
+        const LRESULT top = SendMessageW(list, LB_GETTOPINDEX, 0, 0);
+        if (top == LB_ERR) return;
+        RECT client{};
+        GetClientRect(list, &client);
+        for (std::size_t row = static_cast<std::size_t>(top); row < indices.size(); ++row) {
+            RECT bounds{};
+            if (SendMessageW(list, LB_GETITEMRECT, row,
+                             reinterpret_cast<LPARAM>(&bounds)) == LB_ERR ||
+                bounds.top >= client.bottom) break;
+            if (std::ranges::find(ready, items_[indices[row]].path.native()) != ready.end()) {
+                InvalidateRect(list, &bounds, FALSE);
+            }
+        }
+    };
+    refresh(library_, visibleIndices_);
+    refresh(activeList_, activeVisibleIndices_);
 }
 
-void ModernMainWindow::ClearThumbnails() {
-    for (const auto& [path, bitmap] : thumbnails_) {
-        static_cast<void>(path);
-        if (bitmap != nullptr) {
-            DeleteObject(bitmap);
-        }
-    }
-    thumbnails_.clear();
+void ModernMainWindow::StopThumbnailLoading() {
+    thumbnails_.Stop();
 }
 
 void ModernMainWindow::CancelRename() {

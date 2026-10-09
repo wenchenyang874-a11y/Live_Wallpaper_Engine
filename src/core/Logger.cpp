@@ -14,6 +14,7 @@ namespace {
 
 std::mutex g_logMutex;
 HANDLE g_logFile = INVALID_HANDLE_VALUE;
+ULONGLONG g_lastFlush = 0;
 
 std::wstring Timestamp() {
     SYSTEMTIME value{};
@@ -58,7 +59,13 @@ void Write(std::wstring_view level, std::wstring_view message) {
 
     DWORD written = 0;
     WriteFile(g_logFile, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
-    FlushFileBuffers(g_logFile);
+    // Write every message immediately, but do not force a disk barrier for each
+    // INFO event during startup/switching. Errors and normal shutdown still flush.
+    const ULONGLONG now = GetTickCount64();
+    if (level != L"INFO" || now - g_lastFlush >= 2000) {
+        FlushFileBuffers(g_logFile);
+        g_lastFlush = now;
+    }
 }
 
 std::filesystem::path LogDirectory() {
