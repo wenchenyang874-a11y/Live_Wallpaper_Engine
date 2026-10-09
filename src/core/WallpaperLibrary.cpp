@@ -12,9 +12,13 @@
 
 #include <bcrypt.h>
 #include <shlobj.h>
+#include <shobjidl.h>
+#include <shellapi.h>
+#include <wrl/client.h>
 
 #include "core/Logger.h"
 #include "core/ShareArchive.h"
+#include "core/OperationProgress.h"
 #include "media/MediaProbe.h"
 
 namespace lwe::core {
@@ -200,6 +204,8 @@ HRESULT HashAndCopyPayload(const HANDLE input, const HANDLE output,
     std::vector<std::uint8_t> buffer(kIoBufferBytes);
     std::uint64_t remaining = bytesToCopy;
     while (remaining > 0) {
+        if (FAILED(OperationProgress::Check())) return OperationProgress::Check();
+        OperationProgress::Report(static_cast<int>((bytesToCopy - remaining) * 100 / std::max<std::uint64_t>(1, bytesToCopy)));
         const DWORD request = static_cast<DWORD>(
             std::min<std::uint64_t>(remaining, buffer.size()));
         DWORD read = 0;
@@ -446,12 +452,15 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
 
     std::unordered_set<std::wstring> present;
     std::error_code error;
-    for (const auto& entry : std::filesystem::directory_iterator(rootDirectory_, error)) {
+    std::filesystem::directory_iterator iterator(rootDirectory_, error), end;
+    for (; !error && iterator != end; iterator.increment(error)) {
+        const auto& entry = *iterator;
         if (error) {
             break;
         }
-        if (!entry.is_regular_file(error) || error) {
-            error.clear();
+        std::error_code statusError;
+        const bool regularFile = entry.is_regular_file(statusError);
+        if (!regularFile && !statusError) {
             continue;
         }
 
@@ -469,16 +478,32 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
 
         const auto key = entry.path().native();
         present.insert(key);
+        const auto unavailable = [&](const HRESULT failure) {
+            WallpaperItem item;
+            if (const auto previous = descriptions_.find(key); previous != descriptions_.end()) {
+                item = previous->second;
+            }
+            item.path = entry.path();
+            item.displayName = entry.path().filename().native();
+            item.readError = failure;
+            item.formatLabel = L"读取失败 · 右键重试";
+            items.push_back(std::move(item));
+            descriptions_.erase(key);
+        };
+        if (statusError) {
+            unavailable(HRESULT_FROM_WIN32(statusError.value()));
+            continue;
+        }
         const auto size = entry.file_size(error);
         if (error) {
+            unavailable(HRESULT_FROM_WIN32(error.value()));
             error.clear();
-            descriptions_.erase(key);
             continue;
         }
         const auto modified = entry.last_write_time(error);
         if (error) {
+            unavailable(HRESULT_FROM_WIN32(error.value()));
             error.clear();
-            descriptions_.erase(key);
             continue;
         }
         const auto cached = descriptions_.find(key);
@@ -489,11 +514,14 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
         }
         descriptions_.erase(key);
         WallpaperItem item;
-        if (SUCCEEDED(DescribeFile(entry.path(), false, item))) {
+        const HRESULT described = DescribeFile(entry.path(), false, item);
+        if (SUCCEEDED(described)) {
             if (item.fileSize == size && item.modifiedAt == modified) {
                 descriptions_.emplace(key, item);
             }
             items.push_back(std::move(item));
+        } else {
+            unavailable(described);
         }
     }
     std::erase_if(descriptions_, [&](const auto& cached) {
@@ -522,6 +550,11 @@ std::vector<WallpaperItem> WallpaperLibrary::Scan() const {
         return leftRank->second < rightRank->second;
     });
     return items;
+}
+
+void WallpaperLibrary::InvalidateDescriptions() {
+    const std::scoped_lock lock(scanMutex_);
+    descriptions_.clear();
 }
 
 HRESULT WallpaperLibrary::DescribeFile(const std::filesystem::path& path,
@@ -604,9 +637,17 @@ HRESULT WallpaperLibrary::ImportFileAs(
     }
     const std::filesystem::path temporary = destination.native() + L".importing";
 
-    if (!CopyFileW(source.c_str(), temporary.c_str(), TRUE)) {
+    const auto copyProgress = [](LARGE_INTEGER total, LARGE_INTEGER copied,
+        LARGE_INTEGER, LARGE_INTEGER, DWORD, DWORD, HANDLE, HANDLE, LPVOID) -> DWORD {
+        if (OperationProgress::Cancelled()) return PROGRESS_CANCEL;
+        OperationProgress::Report(total.QuadPart > 0 ? static_cast<int>(copied.QuadPart * 100 / total.QuadPart) : 0);
+        return PROGRESS_CONTINUE;
+    };
+    if (FAILED(OperationProgress::Check())) return OperationProgress::Check();
+    if (!CopyFileExW(source.c_str(), temporary.c_str(), copyProgress, nullptr, nullptr, COPY_FILE_FAIL_IF_EXISTS)) {
         return LastErrorResult();
     }
+    if (OperationProgress::Cancelled()) { DeleteFileW(temporary.c_str()); return OperationProgress::Check(); }
     if (!MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_WRITE_THROUGH)) {
         result = LastErrorResult();
         DeleteFileW(temporary.c_str());
@@ -894,6 +935,9 @@ HRESULT WallpaperLibrary::ExportArchive(
     std::unordered_set<std::wstring> usedNames;
     entries.reserve(items.size());
     for (std::size_t index = 0; index < items.size(); ++index) {
+        if (OperationProgress::Cancelled()) { cleanup(); return OperationProgress::Check(); }
+        OperationProgress::Report(0, L"封装 " + std::to_wstring(index + 1) + L" / " +
+            std::to_wstring(items.size()) + L" · " + items[index].displayName);
         std::wstring stem = items[index].path.stem().native();
         if (stem.size() > 180) {
             stem.resize(180);
@@ -916,7 +960,8 @@ HRESULT WallpaperLibrary::ExportArchive(
         entries.push_back(ShareArchiveEntry{package, std::move(entryName)});
     }
 
-    result = CreateShareArchive(entries, destinationPath);
+    OperationProgress::Report(0, L"正在打包 ZIP 分享文件");
+    result = OperationProgress::Cancelled() ? OperationProgress::Check() : CreateShareArchive(entries, destinationPath);
     cleanup();
     if (SUCCEEDED(result)) {
         LogInfo(L"Exported a ZIP wallpaper share archive containing " +
@@ -949,7 +994,11 @@ HRESULT WallpaperLibrary::ImportArchive(
 
     std::vector<std::filesystem::path> packages;
     result = ExtractShareArchive(archivePath, temporaryRoot, packages);
+    std::size_t packageIndex = 0;
     for (const std::filesystem::path& package : packages) {
+        OperationProgress::Report(0, L"导入分享包 " + std::to_wstring(++packageIndex) + L" / " +
+            std::to_wstring(packages.size()) + L"\r\n" + package.filename().native());
+        if (OperationProgress::Cancelled()) result = OperationProgress::Check();
         if (FAILED(result)) {
             break;
         }
@@ -977,6 +1026,32 @@ HRESULT WallpaperLibrary::ImportArchive(
                 std::wstring(archivePath));
     }
     return result;
+}
+
+HRESULT WallpaperLibrary::Recycle(const WallpaperItem& item, const HWND owner) const {
+    if(rootDirectory_.empty() || item.external || item.path.parent_path()!=rootDirectory_) return E_INVALIDARG;
+    Microsoft::WRL::ComPtr<IFileOperation> operation;
+    HRESULT result=CoCreateInstance(CLSID_FileOperation,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&operation));
+    if(FAILED(result)) return result;
+    operation->SetOwnerWindow(owner);
+    // WANTNUKEWARNING requires explicit system confirmation if recycling cannot
+    // be honored. Never pass NOCONFIRMATION or silently fall back to DeleteFile.
+    result=operation->SetOperationFlags(FOFX_RECYCLEONDELETE|FOFX_ADDUNDORECORD|
+        FOF_WANTNUKEWARNING|FOF_NOERRORUI|FOFX_EARLYFAILURE);
+    Microsoft::WRL::ComPtr<IShellItem> shellItem;
+    if(SUCCEEDED(result)) result=SHCreateItemFromParsingName(item.path.c_str(),nullptr,IID_PPV_ARGS(&shellItem));
+    if(SUCCEEDED(result)) result=operation->DeleteItem(shellItem.Get(),nullptr);
+    if(SUCCEEDED(result)) result=operation->PerformOperations();
+    BOOL aborted=FALSE;
+    if(SUCCEEDED(result)) result=operation->GetAnyOperationsAborted(&aborted);
+    if(SUCCEEDED(result) && aborted) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    if(FAILED(result)) return result;
+    std::error_code error;
+    if(std::filesystem::exists(item.path,error) || error) return E_FAIL;
+    auto order=LoadOrder();
+    std::erase_if(order,[&](const auto& name){return _wcsicmp(name.c_str(),item.path.filename().c_str())==0;});
+    if(FAILED(SaveOrder(order))) LogWarning(L"Recycled wallpaper; stale order will be ignored on reload.");
+    return S_OK;
 }
 
 HRESULT WallpaperLibrary::Remove(const WallpaperItem& item) const {

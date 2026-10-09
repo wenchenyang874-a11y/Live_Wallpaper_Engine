@@ -413,7 +413,9 @@ int WINAPI wWinMain(const HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     lwe::core::CrashDiagnostics crashDiagnostics;
-    if (crashDiagnostics.Initialize()) {
+    if (options.testDuration.count() > 0) {
+        lwe::core::LogInfo(L"Controlled run does not overwrite the user's session diagnostics.");
+    } else if (crashDiagnostics.Initialize()) {
         lwe::core::LogPreviousSession(crashDiagnostics.PreviousSession());
     } else {
         lwe::core::LogWarning(

@@ -29,40 +29,18 @@ bool IsSupportedContainer(const GUID& container) {
            IsEqualGUID(container, GUID_ContainerFormatBmp);
 }
 
-WICRect CalculateFillCrop(const UINT sourceWidth, const UINT sourceHeight,
-                          const UINT targetWidth, const UINT targetHeight) {
-    WICRect crop{0, 0, static_cast<INT>(sourceWidth), static_cast<INT>(sourceHeight)};
-    const std::uint64_t sourceScaled =
-        static_cast<std::uint64_t>(sourceWidth) * targetHeight;
-    const std::uint64_t targetScaled =
-        static_cast<std::uint64_t>(targetWidth) * sourceHeight;
-
-    if (sourceScaled > targetScaled) {
-        const UINT croppedWidth = std::max<UINT>(
-            1, static_cast<UINT>(static_cast<std::uint64_t>(sourceHeight) * targetWidth /
-                                 targetHeight));
-        crop.X = static_cast<INT>((sourceWidth - croppedWidth) / 2U);
-        crop.Width = static_cast<INT>(croppedWidth);
-    } else if (sourceScaled < targetScaled) {
-        const UINT croppedHeight = std::max<UINT>(
-            1, static_cast<UINT>(static_cast<std::uint64_t>(sourceWidth) * targetHeight /
-                                 targetWidth));
-        crop.Y = static_cast<INT>((sourceHeight - croppedHeight) / 2U);
-        crop.Height = static_cast<INT>(croppedHeight);
-    }
-    return crop;
-}
-
 HRESULT ScaleSource(IWICImagingFactory* factory, IWICBitmapSource* source,
                     const UINT sourceWidth, const UINT sourceHeight,
                     const UINT targetWidth, const UINT targetHeight,
-                    DecodedImage& image) {
+                    DecodedImage& image, const core::WallpaperOptions& options) {
     Microsoft::WRL::ComPtr<IWICBitmapClipper> clipper;
     HRESULT result = factory->CreateBitmapClipper(&clipper);
     if (FAILED(result)) {
         return result;
     }
-    WICRect crop = CalculateFillCrop(sourceWidth, sourceHeight, targetWidth, targetHeight);
+    const auto placement = core::CalculatePlacement(sourceWidth, sourceHeight, targetWidth, targetHeight, options);
+    WICRect crop{static_cast<INT>(placement.x), static_cast<INT>(placement.y),
+                 static_cast<INT>(placement.width), static_cast<INT>(placement.height)};
     result = clipper->Initialize(source, &crop);
     if (FAILED(result)) {
         return result;
@@ -73,7 +51,7 @@ HRESULT ScaleSource(IWICImagingFactory* factory, IWICBitmapSource* source,
     if (FAILED(result)) {
         return result;
     }
-    result = scaler->Initialize(clipper.Get(), targetWidth, targetHeight,
+    result = scaler->Initialize(clipper.Get(), placement.outputWidth, placement.outputHeight,
                                 WICBitmapInterpolationModeFant);
     if (FAILED(result)) {
         return result;
@@ -103,8 +81,13 @@ HRESULT ScaleSource(IWICImagingFactory* factory, IWICBitmapSource* source,
     image.height = targetHeight;
     image.stride = static_cast<UINT>(stride);
     image.pixels.resize(static_cast<std::size_t>(byteCount));
-    result = converter->CopyPixels(nullptr, image.stride, static_cast<UINT>(byteCount),
-                                   image.pixels.data());
+    if (placement.outputWidth != targetWidth || placement.outputHeight != targetHeight) {
+        std::fill(image.pixels.begin(), image.pixels.end(), std::uint8_t{0});
+        for (std::size_t alpha = 3; alpha < image.pixels.size(); alpha += 4) image.pixels[alpha] = 255;
+    }
+    const UINT offset = placement.top * image.stride + placement.left * 4;
+    result = converter->CopyPixels(nullptr, image.stride, static_cast<UINT>(byteCount) - offset,
+                                   image.pixels.data() + offset);
     if (FAILED(result)) {
         image = {};
     }
@@ -114,7 +97,7 @@ HRESULT ScaleSource(IWICImagingFactory* factory, IWICBitmapSource* source,
 }  // namespace
 
 HRESULT WicImageLoader::LoadFill(const std::wstring_view imagePath, const UINT targetWidth,
-                                 const UINT targetHeight, DecodedImage& image) const {
+                                 const UINT targetHeight, DecodedImage& image, const core::WallpaperOptions& options) const {
     image = {};
     if (imagePath.empty() || targetWidth == 0 || targetHeight == 0) {
         return E_INVALIDARG;
@@ -165,7 +148,7 @@ HRESULT WicImageLoader::LoadFill(const std::wstring_view imagePath, const UINT t
     }
 
     result = ScaleSource(factory.Get(), frame.Get(), sourceWidth, sourceHeight, targetWidth,
-                         targetHeight, image);
+                         targetHeight, image, options);
     if (FAILED(result)) {
         return result;
     }
@@ -177,7 +160,7 @@ HRESULT WicImageLoader::LoadFill(const std::wstring_view imagePath, const UINT t
 HRESULT WicImageLoader::ScaleFillBgra(
     const std::span<const std::uint8_t> sourcePixels, const UINT sourceWidth,
     const UINT sourceHeight, const UINT sourceStride, const UINT targetWidth,
-    const UINT targetHeight, DecodedImage& image) const {
+    const UINT targetHeight, DecodedImage& image, const core::WallpaperOptions& options) const {
     image = {};
     const std::uint64_t sourceBytes =
         static_cast<std::uint64_t>(sourceStride) * sourceHeight;
@@ -201,7 +184,7 @@ HRESULT WicImageLoader::ScaleFillBgra(
         return result;
     }
     return ScaleSource(factory.Get(), bitmap.Get(), sourceWidth, sourceHeight, targetWidth,
-                       targetHeight, image);
+                       targetHeight, image, options);
 }
 
 }  // namespace lwe::media::image

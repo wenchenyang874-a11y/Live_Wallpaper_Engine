@@ -220,8 +220,8 @@ std::optional<std::wstring> ParseStringField(const std::wstring_view json,
     return std::nullopt;
 }
 
-std::optional<std::uint32_t> ParseVersionField(const std::wstring_view json) {
-    const std::optional start = FindValueStart(json, L"version");
+std::optional<std::uint32_t> ParseVersionField(const std::wstring_view json, const std::wstring_view key = L"version") {
+    const std::optional start = FindValueStart(json, key);
     if (!start.has_value()) {
         return std::nullopt;
     }
@@ -485,6 +485,20 @@ std::optional<AppSettings> SettingsStore::Load() const {
     }
 
     AppSettings settings;
+    if (const auto objects = ParseObjectArray(json, L"wallpaperPreferences")) {
+        for (const auto object : *objects) {
+            const auto preferencePath = ParseStringField(object, L"path");
+            if (!preferencePath || preferencePath->empty()) continue;
+            WallpaperOptions options;
+            const auto fit = ParseVersionField(object, L"fit").value_or(0);
+            options.fit = fit <= 3 ? static_cast<FitMode>(fit) : FitMode::Fill;
+            options.focusX = std::min(100U, ParseVersionField(object, L"focusX").value_or(50));
+            options.focusY = std::min(100U, ParseVersionField(object, L"focusY").value_or(50));
+            options.volume = std::min(100U, ParseVersionField(object, L"volume").value_or(100));
+            options.audioAllowed = ParseBooleanField(object, L"audioAllowed").value_or(true);
+            settings.wallpaperPreferences.push_back({*preferencePath, options});
+        }
+    }
     settings.schemaVersion = AppSettings::kCurrentSchemaVersion;
     if (*version >= 4) {
         const auto assignments = ParseAssignments(json);
@@ -544,6 +558,11 @@ HRESULT SettingsStore::Save(const AppSettings& settings) const {
     if (settings.schemaVersion != AppSettings::kCurrentSchemaVersion) {
         return E_INVALIDARG;
     }
+    for (const auto& preference : settings.wallpaperPreferences) {
+        const auto& o = preference.options;
+        if (preference.path.empty() || static_cast<unsigned>(o.fit) > 3 ||
+            o.focusX > 100 || o.focusY > 100 || o.volume > 100) return E_INVALIDARG;
+    }
     for (const WallpaperAssignmentSetting& assignment : settings.assignments) {
         if (assignment.wallpaperKind == WallpaperSelectionKind::DynamicTest ||
             assignment.wallpaperPath.empty() ||
@@ -552,7 +571,7 @@ HRESULT SettingsStore::Save(const AppSettings& settings) const {
         }
     }
 
-    std::wstring json = L"{\r\n  \"version\": 5,\r\n  \"soundEnabled\": ";
+    std::wstring json = L"{\r\n  \"version\": 6,\r\n  \"soundEnabled\": ";
     json += settings.soundEnabled ? L"true" : L"false";
     json += L",\r\n  \"releaseVideoResourcesOnPause\": ";
     json += settings.releaseVideoResourcesOnPause ? L"true" : L"false";
@@ -576,6 +595,18 @@ HRESULT SettingsStore::Save(const AppSettings& settings) const {
     }
     if (!settings.assignments.empty()) {
         json += L"\r\n  ";
+    }
+    json += L"],\r\n  \"wallpaperPreferences\": [";
+    for (std::size_t i = 0; i < settings.wallpaperPreferences.size(); ++i) {
+        const auto& p = settings.wallpaperPreferences[i];
+        const auto& o = p.options;
+        json += i ? L",\r\n" : L"\r\n";
+        json += L"    {\"path\": \"" + EscapeJsonString(p.path) +
+            L"\", \"fit\": " + std::to_wstring(static_cast<unsigned>(o.fit)) +
+            L", \"focusX\": " + std::to_wstring(o.focusX) +
+            L", \"focusY\": " + std::to_wstring(o.focusY) +
+            L", \"volume\": " + std::to_wstring(o.volume) +
+            L", \"audioAllowed\": " + (o.audioAllowed ? L"true" : L"false") + L"}";
     }
     json += L"]\r\n}\r\n";
 

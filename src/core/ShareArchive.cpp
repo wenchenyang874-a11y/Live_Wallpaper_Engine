@@ -1,4 +1,5 @@
 #include "core/ShareArchive.h"
+#include "core/OperationProgress.h"
 
 #include <algorithm>
 #include <array>
@@ -91,6 +92,7 @@ HRESULT ReadExact(const HANDLE file, void* destination, const std::size_t bytes)
     auto* output = static_cast<std::uint8_t*>(destination);
     std::size_t offset = 0;
     while (offset < bytes) {
+        if (OperationProgress::Cancelled()) return OperationProgress::Check();
         const DWORD request = static_cast<DWORD>(std::min<std::size_t>(
             bytes - offset, std::numeric_limits<DWORD>::max()));
         DWORD read = 0;
@@ -109,6 +111,7 @@ HRESULT WriteExact(const HANDLE file, const void* source, const std::size_t byte
     const auto* input = static_cast<const std::uint8_t*>(source);
     std::size_t offset = 0;
     while (offset < bytes) {
+        if (OperationProgress::Cancelled()) return OperationProgress::Check();
         const DWORD request = static_cast<DWORD>(std::min<std::size_t>(
             bytes - offset, std::numeric_limits<DWORD>::max()));
         DWORD written = 0;
@@ -235,6 +238,8 @@ HRESULT ComputeCrc32(const HANDLE input, const std::uint64_t bytes,
     std::uint64_t remaining = bytes;
     std::uint32_t crc = 0xffffffffU;
     while (remaining > 0) {
+        if (OperationProgress::Cancelled()) return OperationProgress::Check();
+        OperationProgress::Report(static_cast<int>((bytes-remaining)*100/std::max<std::uint64_t>(1,bytes)));
         const DWORD request = static_cast<DWORD>(
             std::min<std::uint64_t>(remaining, buffer.size()));
         DWORD read = 0;
@@ -258,6 +263,8 @@ HRESULT CopyBytes(const HANDLE input, const HANDLE output,
     std::uint64_t remaining = bytes;
     std::uint32_t crc = 0xffffffffU;
     while (remaining > 0) {
+        if (OperationProgress::Cancelled()) return OperationProgress::Check();
+        OperationProgress::Report(static_cast<int>((bytes-remaining)*100/std::max<std::uint64_t>(1,bytes)));
         const DWORD request = static_cast<DWORD>(
             std::min<std::uint64_t>(remaining, buffer.size()));
         DWORD read = 0;
@@ -440,6 +447,7 @@ HRESULT CreateShareArchive(const std::span<const ShareArchiveEntry> entries,
     }
     CloseHandle(output);
 
+    if (SUCCEEDED(result) && OperationProgress::Cancelled()) result = OperationProgress::Check();
     if (SUCCEEDED(result) &&
         !MoveFileExW(temporary.c_str(), destination.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {

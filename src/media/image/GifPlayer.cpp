@@ -212,6 +212,19 @@ bool GifPlayer::PresentDue(render::D3DRenderer& renderer,
         return false;
     }
 
+    if (!Recompose(renderer)) return false;
+
+    nextFrameIndex_ = (nextFrameIndex_ + 1U) % frameCount_;
+    nextFrameAt_ = now + std::chrono::milliseconds(delayMilliseconds);
+    if (presentedFrames_ == 0) {
+        playbackStartedAt_ = now;
+    }
+    ++presentedFrames_;
+    return true;
+}
+
+bool GifPlayer::Recompose(render::D3DRenderer& renderer) {
+    if (!IsLoaded() || canvas_.empty()) return false;
     const std::vector<RECT> fallback{
         RECT{0, 0, static_cast<LONG>(targetWidth_), static_cast<LONG>(targetHeight_)}};
     const std::vector<RECT>& destinations =
@@ -229,7 +242,7 @@ bool GifPlayer::PresentDue(render::D3DRenderer& renderer,
         DecodedImage scaled;
         scaleResult = scaler_.ScaleFillBgra(
             canvas_, canvasWidth_, canvasHeight_, canvasStride,
-            static_cast<UINT>(width), static_cast<UINT>(height), scaled);
+            static_cast<UINT>(width), static_cast<UINT>(height), scaled, options_);
         if (FAILED(scaleResult)) {
             break;
         }
@@ -250,12 +263,6 @@ bool GifPlayer::PresentDue(render::D3DRenderer& renderer,
         return false;
     }
 
-    nextFrameIndex_ = (nextFrameIndex_ + 1U) % frameCount_;
-    nextFrameAt_ = now + std::chrono::milliseconds(delayMilliseconds);
-    if (presentedFrames_ == 0) {
-        playbackStartedAt_ = now;
-    }
-    ++presentedFrames_;
     return true;
 }
 

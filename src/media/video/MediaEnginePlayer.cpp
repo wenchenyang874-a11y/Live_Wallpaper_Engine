@@ -209,7 +209,7 @@ HRESULT MediaEnginePlayer::Open(ID3D11Device* const device,
 
 HRESULT MediaEnginePlayer::PresentFrame(
     render::D3DRenderer& renderer, const std::span<const RECT> destinations,
-    const bool present) {
+    const bool present, const core::WallpaperOptions& options) {
     if (!engine_ || !playing_ || destinations.empty()) {
         return S_FALSE;
     }
@@ -253,7 +253,7 @@ HRESULT MediaEnginePlayer::PresentFrame(
     if (maximumDestinationWidth == 0 || maximumDestinationHeight == 0) {
         return E_INVALIDARG;
     }
-    const double transferScale = std::min(
+    const double transferScale = options.fit == core::FitMode::Center ? 1.0 : std::min(
         1.0, std::max(static_cast<double>(maximumDestinationWidth) / nativeWidth_,
                       static_cast<double>(maximumDestinationHeight) / nativeHeight_));
     const UINT transferWidth = std::max(
@@ -296,7 +296,7 @@ HRESULT MediaEnginePlayer::PresentFrame(
     }
     if (!renderer.CommitVideoTransferSurface(
             transferSourceView_.Get(), destinations, nativeWidth_, nativeHeight_,
-            present)) {
+            present, options)) {
         failed_ = true;
         return E_FAIL;
     }
@@ -304,6 +304,33 @@ HRESULT MediaEnginePlayer::PresentFrame(
     hasPresentationTime_ = true;
     ++transferredFrameCount_;
     return S_OK;
+}
+
+HRESULT MediaEnginePlayer::Recompose(render::D3DRenderer& renderer,
+    const std::span<const RECT> destinations, const core::WallpaperOptions& options) {
+    if (!transferSourceView_) return S_FALSE;
+    if (options.fit == core::FitMode::Center && engine_ && transferSurface_) {
+        D3D11_TEXTURE2D_DESC description{};
+        transferSurface_->GetDesc(&description);
+        if (description.Width != nativeWidth_ || description.Height != nativeHeight_) {
+            Microsoft::WRL::ComPtr<ID3D11Texture2D> surface;
+            Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> view;
+            HRESULT result = renderer.CreateVideoTransferSurface(nativeWidth_, nativeHeight_, surface, view);
+            const MFVideoNormalizedRect source{0,0,1,1};
+            const RECT target{0,0,static_cast<LONG>(nativeWidth_),static_cast<LONG>(nativeHeight_)};
+            const MFARGB border{0,0,0,255};
+            if (SUCCEEDED(result)) result = engine_->TransferVideoFrame(surface.Get(), &source, &target, &border);
+            if (FAILED(result)) return result;
+            transferSurface_ = std::move(surface);
+            transferSourceView_ = std::move(view);
+        }
+    }
+    return renderer.CommitVideoTransferSurface(transferSourceView_.Get(), destinations,
+        nativeWidth_, nativeHeight_, true, options) ? S_OK : E_FAIL;
+}
+
+HRESULT MediaEnginePlayer::SetVolume(const unsigned volume) {
+    return engine_ ? engine_->SetVolume(std::min(volume, 100U) / 100.0) : S_FALSE;
 }
 
 void MediaEnginePlayer::HandleEvent(const DWORD eventCode,

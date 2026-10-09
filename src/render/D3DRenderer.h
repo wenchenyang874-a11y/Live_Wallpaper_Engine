@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/WallpaperOptions.h"
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -45,7 +46,8 @@ public:
     bool CommitVideoTransferSurface(
         ID3D11ShaderResourceView* sourceView,
         std::span<const RECT> destinations, UINT sourceWidth,
-        UINT sourceHeight, bool present = true);
+        UINT sourceHeight, bool present = true,
+        const core::WallpaperOptions& options = {});
     bool PresentCurrentFrame(bool synchronize = true);
     [[nodiscard]] std::optional<std::uint64_t> VideoMemoryUsage() const;
     void Shutdown();
@@ -60,7 +62,7 @@ private:
     bool CreateVideoCompositionPipeline();
     bool UpdateVideoVertices(std::span<const RECT> destinations,
                              UINT sourceWidth, UINT sourceHeight,
-                             UINT targetWidth, UINT targetHeight);
+                             UINT targetWidth, UINT targetHeight, const core::WallpaperOptions& options);
 
     Microsoft::WRL::ComPtr<ID3D11Device> device_;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context_;

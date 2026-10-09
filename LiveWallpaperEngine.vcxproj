@@ -97,6 +97,8 @@
     <ClCompile Include="src\app\main.cpp" />
     <ClCompile Include="src\app\ModernMainWindow.cpp" />
     <ClCompile Include="src\app\ThumbnailCache.cpp" />
+    <ClCompile Include="src\app\TaskWindow.cpp" />
+    <ClCompile Include="src\app\FeatureDialogs.cpp" />
     <ClCompile Include="src\app\UpdateChecker.cpp" />
     <ClCompile Include="src\app\WallpaperApplication.cpp" />
     <ClCompile Include="src\core\InstanceCoordinator.cpp" />
@@ -121,6 +123,10 @@
     <ClInclude Include="src\app\WallpaperApplication.h" />
     <ClInclude Include="src\app\ModernMainWindow.h" />
     <ClInclude Include="src\app\ThumbnailCache.h" />
+    <ClInclude Include="src\app\TaskWindow.h" />
+    <ClInclude Include="src\app\FeatureDialogs.h" />
+    <ClInclude Include="src\core\WallpaperOptions.h" />
+    <ClInclude Include="src\core\OperationProgress.h" />
     <ClInclude Include="src\app\UpdateChecker.h" />
     <ClInclude Include="src\core\InstanceCoordinator.h" />
     <ClInclude Include="src\core\CrashDiagnostics.h" />

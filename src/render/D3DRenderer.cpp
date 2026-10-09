@@ -37,6 +37,7 @@ PixelInput VSMain(VertexInput input) {
 }
 
 float4 PSMain(PixelInput input) : SV_TARGET {
+    if (input.uv.x < 0.0) return float4(0, 0, 0, 1);
     float3 rgb = videoTexture.Sample(videoSampler, input.uv).rgb;
     return float4(rgb, 1.0);
 }
@@ -412,53 +413,34 @@ HRESULT D3DRenderer::CreateVideoTransferSurface(
 
 bool D3DRenderer::UpdateVideoVertices(
     const std::span<const RECT> destinations, const UINT sourceWidth,
-    const UINT sourceHeight, const UINT targetWidth, const UINT targetHeight) {
+    const UINT sourceHeight, const UINT targetWidth, const UINT targetHeight,
+    const core::WallpaperOptions& options) {
     std::vector<VideoVertex> vertices;
     vertices.reserve(destinations.size() * 6U);
-    const float sourceAspect =
-        static_cast<float>(sourceWidth) / static_cast<float>(sourceHeight);
+    const auto quad = [&](const RECT& r, float u0, float v0, float u1, float v1) {
+        const float l = float(r.left) * 2 / targetWidth - 1;
+        const float rgt = float(r.right) * 2 / targetWidth - 1;
+        const float t = 1 - float(r.top) * 2 / targetHeight;
+        const float btm = 1 - float(r.bottom) * 2 / targetHeight;
+        vertices.insert(vertices.end(), {{l,t,u0,v0},{rgt,t,u1,v0},{rgt,btm,u1,v1},
+                                         {l,t,u0,v0},{rgt,btm,u1,v1},{l,btm,u0,v1}});
+    };
     for (const RECT& destination : destinations) {
-        const LONG destinationWidth = destination.right - destination.left;
-        const LONG destinationHeight = destination.bottom - destination.top;
-        if (destinationWidth <= 0 || destinationHeight <= 0 ||
-            destination.left < 0 || destination.top < 0 ||
+        const LONG w = destination.right - destination.left;
+        const LONG h = destination.bottom - destination.top;
+        if (w <= 0 || h <= 0 || destination.left < 0 || destination.top < 0 ||
             destination.right > static_cast<LONG>(targetWidth) ||
-            destination.bottom > static_cast<LONG>(targetHeight)) {
-            return false;
-        }
-        const float destinationAspect =
-            static_cast<float>(destinationWidth) /
-            static_cast<float>(destinationHeight);
-        float u0 = 0.0F;
-        float v0 = 0.0F;
-        float u1 = 1.0F;
-        float v1 = 1.0F;
-        if (sourceAspect > destinationAspect) {
-            const float visibleWidth = destinationAspect / sourceAspect;
-            u0 = (1.0F - visibleWidth) * 0.5F;
-            u1 = u0 + visibleWidth;
-        } else if (sourceAspect < destinationAspect) {
-            const float visibleHeight = sourceAspect / destinationAspect;
-            v0 = (1.0F - visibleHeight) * 0.5F;
-            v1 = v0 + visibleHeight;
-        }
-
-        const float left = static_cast<float>(destination.left) * 2.0F /
-                               static_cast<float>(targetWidth) -
-                           1.0F;
-        const float right = static_cast<float>(destination.right) * 2.0F /
-                                static_cast<float>(targetWidth) -
-                            1.0F;
-        const float top = 1.0F - static_cast<float>(destination.top) * 2.0F /
-                                     static_cast<float>(targetHeight);
-        const float bottom =
-            1.0F - static_cast<float>(destination.bottom) * 2.0F /
-                       static_cast<float>(targetHeight);
-        vertices.insert(vertices.end(), {
-            {left, top, u0, v0}, {right, top, u1, v0},
-            {right, bottom, u1, v1}, {left, top, u0, v0},
-            {right, bottom, u1, v1}, {left, bottom, u0, v1},
-        });
+            destination.bottom > static_cast<LONG>(targetHeight)) return false;
+        const auto p = core::CalculatePlacement(sourceWidth, sourceHeight, w, h, options);
+        // Clear only this session's region. Never erase another screen's frame.
+        if (p.outputWidth != static_cast<UINT>(w) || p.outputHeight != static_cast<UINT>(h))
+            quad(destination, -1, -1, -1, -1);
+        const RECT image{destination.left + static_cast<LONG>(p.left),
+                         destination.top + static_cast<LONG>(p.top),
+                         destination.left + static_cast<LONG>(p.left + p.outputWidth),
+                         destination.top + static_cast<LONG>(p.top + p.outputHeight)};
+        quad(image, float(p.x) / sourceWidth, float(p.y) / sourceHeight,
+             float(p.x + p.width) / sourceWidth, float(p.y + p.height) / sourceHeight);
     }
     if (vertices.empty()) {
         return false;
@@ -503,7 +485,7 @@ bool D3DRenderer::UpdateVideoVertices(
 bool D3DRenderer::CommitVideoTransferSurface(
     ID3D11ShaderResourceView* const sourceView,
     const std::span<const RECT> destinations, const UINT sourceWidth,
-    const UINT sourceHeight, const bool present) {
+    const UINT sourceHeight, const bool present, const core::WallpaperOptions& options) {
     if (sourceView == nullptr || !context_ || destinations.empty()) {
         return false;
     }
@@ -516,7 +498,7 @@ bool D3DRenderer::CommitVideoTransferSurface(
     D3D11_TEXTURE2D_DESC targetDescription{};
     backBuffer->GetDesc(&targetDescription);
     if (!UpdateVideoVertices(destinations, sourceWidth, sourceHeight,
-                             targetDescription.Width, targetDescription.Height)) {
+                             targetDescription.Width, targetDescription.Height, options)) {
         return false;
     }
 

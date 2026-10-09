@@ -228,6 +228,18 @@ try {
         throw 'Split mode did not show the screen-selection dialog when applying.'
     }
     $screenList = [LweDisplayModeProbe]::GetDlgItem($dialog, 3100)
+    $identify = [LweDisplayModeProbe]::GetDlgItem($dialog, 3103)
+    if ($identify -eq [IntPtr]::Zero) { throw 'Identify screens button is missing.' }
+    [void][LweDisplayModeProbe]::PostMessage($dialog, 0x0111, [IntPtr]3103, $identify)
+    Start-Sleep -Milliseconds 250
+    if ([LweDisplayModeProbe]::Find([uint32]$process.Id, 'LiveWallpaperEngine.ScreenMarker') -eq [IntPtr]::Zero) {
+        throw 'Screen identifiers did not appear.'
+    }
+    Start-Sleep -Milliseconds 2800
+    if ([LweDisplayModeProbe]::Find([uint32]$process.Id, 'LiveWallpaperEngine.ScreenMarker') -ne [IntPtr]::Zero) {
+        throw 'Screen identifiers did not automatically close.'
+    }
+    'SCREEN_IDENTIFICATION_AUTO_CLOSE=True'
     $screenCount = [int][LweDisplayModeProbe]::SendMessage(
         $screenList, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero)
     if ($screenCount -ne $screens.Count) {

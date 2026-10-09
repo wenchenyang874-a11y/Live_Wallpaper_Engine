@@ -27,6 +27,8 @@ public:
     void Resize(UINT targetWidth, UINT targetHeight);
     void SetTargetRects(std::vector<RECT> targetRects);
     void Reset();
+    void SetOptions(const core::WallpaperOptions& options) { options_ = options; }
+    bool Recompose(render::D3DRenderer& renderer);
 
     [[nodiscard]] bool IsLoaded() const noexcept;
     [[nodiscard]] std::uint32_t FrameCount() const noexcept;
@@ -64,6 +66,7 @@ private:
     std::chrono::steady_clock::time_point playbackStartedAt_{};
     std::uint64_t presentedFrames_ = 0;
     WicImageLoader scaler_;
+    core::WallpaperOptions options_;
 };
 
 }  // namespace lwe::media::image

@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 
 #include "core/Logger.h"
+#include "core/OperationProgress.h"
 #include "media/MediaProbe.h"
 
 namespace lwe::media::video {
@@ -112,11 +113,16 @@ HRESULT CreateAudioAttributes(ComPtr<IMFAttributes>& attributes) {
 }
 
 HRESULT WaitForTranscode(IMFMediaSession* session,
-                         const std::stop_token stopToken) {
+                         const std::stop_token stopToken, const UINT64 duration) {
     bool started = false;
     bool closing = false;
     HRESULT completion = E_FAIL;
+    auto closingAt=std::chrono::steady_clock::time_point{};
     for (;;) {
+        if(closing) {
+            if(closingAt==std::chrono::steady_clock::time_point{}) closingAt=std::chrono::steady_clock::now();
+            if(std::chrono::steady_clock::now()-closingAt>std::chrono::seconds(5)) return completion;
+        }
         if (stopToken.stop_requested() && !closing) {
             completion = HRESULT_FROM_WIN32(ERROR_CANCELLED);
             session->Close();
@@ -126,6 +132,15 @@ HRESULT WaitForTranscode(IMFMediaSession* session,
         ComPtr<IMFMediaEvent> event;
         const HRESULT eventResult = session->GetEvent(MF_EVENT_FLAG_NO_WAIT, &event);
         if (eventResult == MF_E_NO_EVENTS_AVAILABLE) {
+            if(started && !closing && duration>0) {
+                ComPtr<IMFClock> clock;
+                ComPtr<IMFPresentationClock> presentation;
+                MFTIME position=0;
+                if(SUCCEEDED(session->GetClock(&clock)) && SUCCEEDED(clock.As(&presentation)) &&
+                    SUCCEEDED(presentation->GetTime(&position)) && position>=0) {
+                    core::OperationProgress::Report(static_cast<int>(std::min<UINT64>(99,static_cast<UINT64>(position)*100/duration)));
+                }
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
             continue;
         }
@@ -300,7 +315,10 @@ HRESULT OptimizeVideo(const std::wstring_view sourcePath,
     if (SUCCEEDED(result)) {
         core::LogInfo(L"Started local video optimization: " +
                       std::wstring(sourcePath));
-        result = WaitForTranscode(session.Get(), stopToken);
+        ComPtr<IMFPresentationDescriptor> descriptor;
+        UINT64 duration=0;
+        if(SUCCEEDED(source->CreatePresentationDescriptor(&descriptor))) descriptor->GetUINT64(MF_PD_DURATION,&duration);
+        result = WaitForTranscode(session.Get(), stopToken, duration);
     }
     if (session) {
         session->Shutdown();

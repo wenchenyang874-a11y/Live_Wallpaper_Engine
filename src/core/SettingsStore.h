@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <windows.h>
+#include "core/WallpaperOptions.h"
 
 namespace lwe::core {
 
@@ -24,10 +25,11 @@ struct WallpaperAssignmentSetting final {
 };
 
 struct AppSettings final {
-    static constexpr std::uint32_t kCurrentSchemaVersion = 5;
+    static constexpr std::uint32_t kCurrentSchemaVersion = 6;
 
     std::uint32_t schemaVersion = kCurrentSchemaVersion;
     std::vector<WallpaperAssignmentSetting> assignments;
+    std::vector<WallpaperPreference> wallpaperPreferences;
     // These fields describe the current UI target selection, not an applied
     // wallpaper. Each applied wallpaper stores its own targets above.
     std::wstring displayTargets;

@@ -1,4 +1,5 @@
 #include "app/ModernMainWindow.h"
+#include "app/FeatureDialogs.h"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +35,7 @@ constexpr wchar_t kScreenSelectionWindowClass[] =
 constexpr int kScreenSelectionList = 3100;
 constexpr int kScreenSelectionApply = 3101;
 constexpr int kScreenSelectionCancel = 3102;
+constexpr int kScreenIdentify = 3103;
 constexpr wchar_t kImportChoiceWindowClass[] =
     L"LiveWallpaperEngine.ImportChoice";
 constexpr wchar_t kSettingsWindowClass[] = L"LiveWallpaperEngine.Settings";
@@ -42,6 +44,8 @@ constexpr wchar_t kSettingsTooltipWindowClass[] =
 constexpr int kImportChoiceMedia = 3200;
 constexpr int kImportChoicePackage = 3201;
 constexpr int kImportChoiceCompression = 3202;
+constexpr int kImportChoiceApply = 3203;
+constexpr int kImportChoiceGroup = 3204;
 constexpr int kSettingsPerformance = 3300;
 constexpr int kSettingsReleaseResources = 3301;
 constexpr int kSettingsSave = 3302;
@@ -49,6 +53,8 @@ constexpr int kSettingsCancel = 3303;
 constexpr UINT_PTR kSettingsTooltipTimer = 3304;
 constexpr int kSettingsGeneral = 3305;
 constexpr int kSettingsStartup = 3306;
+constexpr int kSettingsDiagnostics = 3307;
+constexpr int kDiagnosticsLogs = 3308, kDiagnosticsLast = 3309, kDiagnosticsExport = 3310;
 constexpr UINT kSettingsTooltipDelayMilliseconds = 280;
 
 Gdiplus::Color GdiPlusColor(const COLORREF color, const BYTE alpha = 255) {
@@ -281,6 +287,7 @@ struct ScreenSelectionDialogState final {
     HWND list = nullptr;
     HWND apply = nullptr;
     HWND cancel = nullptr;
+    HWND identify = nullptr;
     const std::vector<ModernMainWindow::DisplayOption>* options = nullptr;
     std::vector<std::wstring> result;
     HFONT headingFont = nullptr;
@@ -315,7 +322,7 @@ void RecreateScreenSelectionFonts(ScreenSelectionDialogState& state) {
         -MulDiv(12, dpi, 96), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
-    for (const HWND control : {state.list, state.apply, state.cancel}) {
+    for (const HWND control : {state.list, state.apply, state.cancel, state.identify}) {
         SetControlFont(control, state.bodyFont);
     }
 }
@@ -361,6 +368,7 @@ void LayoutScreenSelectionDialog(ScreenSelectionDialogState& state) {
                std::max(1, static_cast<int>(client.bottom) - listTop -
                                footerHeight),
                TRUE);
+    MoveWindow(state.identify, margin, client.bottom - margin - buttonHeight, Scale(state.window, 108), buttonHeight, TRUE);
     MoveWindow(state.cancel,
                client.right - margin - applyWidth - gap - cancelWidth,
                client.bottom - margin - buttonHeight, cancelWidth, buttonHeight,
@@ -515,6 +523,9 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
             }
             SetWindowTheme(state->list, L"DarkMode_Explorer", nullptr);
             state->panelBrush = CreateSolidBrush(kPanel);
+            if (!state->identify) state->identify = CreateWindowExW(0, L"BUTTON", L"识别屏幕",
+                WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW, 0,0,1,1,window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kScreenIdentify)), state->instance, nullptr);
             RecreateScreenSelectionFonts(*state);
             for (std::size_t index = 0; index < state->options->size(); ++index) {
                 SendMessageW(state->list, LB_ADDSTRING, 0,
@@ -547,6 +558,11 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
         }
         case WM_COMMAND: {
             const int identifier = LOWORD(wParam);
+            if (identifier == kScreenIdentify) {
+                std::vector<std::wstring> ids;
+                for (const auto& option : *state->options) ids.push_back(option.id);
+                IdentifyScreens(ids); return 0;
+            }
             if (identifier == kScreenSelectionApply) {
                 state->result.clear();
                 for (std::size_t index = 0; index < state->options->size(); ++index) {
@@ -593,7 +609,7 @@ LRESULT CALLBACK ScreenSelectionWindowProcedure(const HWND window,
                 return TRUE;
             }
             if (draw.CtlID == kScreenSelectionApply ||
-                draw.CtlID == kScreenSelectionCancel) {
+                draw.CtlID == kScreenSelectionCancel || draw.CtlID == kScreenIdentify) {
                 DrawScreenSelectionButton(draw, *state);
                 return TRUE;
             }
@@ -759,6 +775,8 @@ struct ImportChoiceDialogState final {
     HWND media = nullptr;
     HWND package = nullptr;
     HWND compression = nullptr;
+    HWND applyAfter = nullptr;
+    HWND addGroup = nullptr;
     HWND compressionTooltip = nullptr;
     HFONT headingFont = nullptr;
     HFONT bodyFont = nullptr;
@@ -766,6 +784,8 @@ struct ImportChoiceDialogState final {
     int hoveredControl = 0;
     bool available = true;
     bool selected = false;
+    bool applyAfterSelected = false;
+    bool addGroupSelected = true;
     std::optional<ModernMainWindow::ImportRequest> result;
     bool complete = false;
 };
@@ -792,6 +812,8 @@ void RecreateImportChoiceFonts(ImportChoiceDialogState& state) {
     SetControlFont(state.media, state.bodyFont);
     SetControlFont(state.package, state.bodyFont);
     SetControlFont(state.compression, state.bodyFont);
+    SetControlFont(state.applyAfter, state.bodyFont);
+    SetControlFont(state.addGroup, state.bodyFont);
 }
 
 void LayoutImportChoiceDialog(ImportChoiceDialogState& state) {
@@ -807,6 +829,10 @@ void LayoutImportChoiceDialog(ImportChoiceDialogState& state) {
     MoveWindow(state.package, margin + width + gap, top,
                client.right - (margin + width + gap) - margin, height, TRUE);
     MoveWindow(state.compression, margin, top + height + gap,
+               client.right - margin * 2, Scale(state.window, 44), TRUE);
+    MoveWindow(state.addGroup, margin, top + height + gap + Scale(state.window, 52),
+               client.right - margin * 2, Scale(state.window, 44), TRUE);
+    MoveWindow(state.applyAfter, margin, top + height + gap + Scale(state.window, 104),
                client.right - margin * 2, Scale(state.window, 44), TRUE);
 }
 
@@ -886,20 +912,23 @@ void DrawImportChoiceButton(const DRAWITEMSTRUCT& draw,
 
 void DrawImportCompressionOption(const DRAWITEMSTRUCT& draw,
                                  const ImportChoiceDialogState& state) {
+    const bool selected = draw.CtlID==kImportChoiceApply ? state.applyAfterSelected :
+        (draw.CtlID==kImportChoiceGroup ? state.addGroupSelected : state.selected);
     FillRectangle(draw.hDC, draw.rcItem, kBackground);
     const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
     const bool hovered = state.available &&
-                         state.hoveredControl == kImportChoiceCompression;
+                         state.hoveredControl == static_cast<int>(draw.CtlID);
     RECT card = draw.rcItem;
     InflateRect(&card, -1, -1);
     const COLORREF fill = pressed && state.available
                               ? RGB(40, 51, 76)
                               : (hovered ? kPanelHover : kPanel);
     FillRoundedRectangle(draw.hDC, card, fill,
-                         state.selected ? kAccent : kBorder,
+                         selected ? kAccent : kBorder,
                          Scale(state.window, 10));
 
-    constexpr wchar_t labelText[] = L"压缩到屏幕分辨率大小";
+    const wchar_t* labelText = draw.CtlID==kImportChoiceApply ? L"导入后应用第一张壁纸" :
+        (draw.CtlID==kImportChoiceGroup ? L"同时加入当前分组" : L"压缩到屏幕分辨率大小");
     RECT label{card.left + Scale(state.window, 16), card.top,
                card.right - Scale(state.window, 72), card.bottom};
     const COLORREF labelColor = state.available ? kTextPrimary
@@ -909,7 +938,7 @@ void DrawImportCompressionOption(const DRAWITEMSTRUCT& draw,
     SIZE labelSize{};
     const HGDIOBJ oldFont = SelectObject(draw.hDC, state.bodyFont);
     GetTextExtentPoint32W(draw.hDC, labelText,
-                          static_cast<int>(std::size(labelText) - 1),
+                          lstrlenW(labelText),
                           &labelSize);
     SelectObject(draw.hDC, oldFont);
     const int helpDiameter = Scale(state.window, 16);
@@ -923,9 +952,11 @@ void DrawImportCompressionOption(const DRAWITEMSTRUCT& draw,
               helpCenterY + helpDiameter / 2};
     const COLORREF helpColor = state.available ? kTextSecondary
                                                : RGB(92, 100, 118);
-    DrawAntialiasedCircle(draw.hDC, help, helpColor);
-    DrawTextLine(draw.hDC, L"?", help, state.detailFont, helpColor,
-                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if(draw.CtlID==kImportChoiceCompression) {
+        DrawAntialiasedCircle(draw.hDC, help, helpColor);
+        DrawTextLine(draw.hDC, L"?", help, state.detailFont, helpColor,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 
     const int switchWidth = Scale(state.window, 42);
     const int switchHeight = Scale(state.window, 22);
@@ -933,7 +964,7 @@ void DrawImportCompressionOption(const DRAWITEMSTRUCT& draw,
                card.top + (card.bottom - card.top - switchHeight) / 2,
                card.right - Scale(state.window, 14),
                card.top + (card.bottom - card.top + switchHeight) / 2};
-    const COLORREF trackFill = state.selected
+    const COLORREF trackFill = selected
                                    ? (hovered ? kAccentHover : kAccent)
                                    : (state.available
                                           ? (hovered ? RGB(70, 80, 104)
@@ -941,7 +972,7 @@ void DrawImportCompressionOption(const DRAWITEMSTRUCT& draw,
                                           : RGB(43, 49, 64));
     const int knobDiameter = Scale(state.window, 16);
     const int knobMargin = (switchHeight - knobDiameter) / 2;
-    const int knobLeft = state.selected
+    const int knobLeft = selected
                              ? track.right - knobMargin - knobDiameter
                              : track.left + knobMargin;
     RECT knob{knobLeft, track.top + knobMargin, knobLeft + knobDiameter,
@@ -963,6 +994,8 @@ LRESULT CALLBACK ImportChoiceButtonProcedure(
             InvalidateRect(state->media, nullptr, FALSE);
             InvalidateRect(state->package, nullptr, FALSE);
             InvalidateRect(state->compression, nullptr, FALSE);
+            InvalidateRect(state->applyAfter, nullptr, FALSE);
+            InvalidateRect(state->addGroup, nullptr, FALSE);
         }
         TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, window, 0};
         TrackMouseEvent(&tracking);
@@ -1019,9 +1052,15 @@ LRESULT CALLBACK ImportChoiceWindowProcedure(const HWND window,
                 WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
                 CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr,
                 state->instance, nullptr);
+            state->applyAfter = CreateWindowExW(0,L"BUTTON",L"导入后应用第一张壁纸",
+                WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,0,0,1,1,window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kImportChoiceApply)),state->instance,nullptr);
+            state->addGroup = CreateWindowExW(0,L"BUTTON",L"同时加入当前分组",
+                WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,0,0,1,1,window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kImportChoiceGroup)),state->instance,nullptr);
             if (state->media == nullptr || state->package == nullptr ||
                 state->compression == nullptr ||
-                state->compressionTooltip == nullptr) {
+                state->compressionTooltip == nullptr || !state->applyAfter || !state->addGroup) {
                 return -1;
             }
             TOOLINFOW compressionTip{};
@@ -1039,7 +1078,7 @@ LRESULT CALLBACK ImportChoiceWindowProcedure(const HWND window,
             SendMessageW(state->compressionTooltip, TTM_SETMAXTIPWIDTH, 0,
                          Scale(window, 320));
             for (const HWND control :
-                 {state->media, state->package, state->compression}) {
+                 {state->media, state->package, state->compression, state->applyAfter, state->addGroup}) {
                 SetWindowSubclass(control, &ImportChoiceButtonProcedure, 1,
                                   reinterpret_cast<DWORD_PTR>(state));
             }
@@ -1062,6 +1101,11 @@ LRESULT CALLBACK ImportChoiceWindowProcedure(const HWND window,
             return 0;
         }
         case WM_COMMAND:
+            if(HIWORD(wParam)==BN_CLICKED && (LOWORD(wParam)==kImportChoiceApply || LOWORD(wParam)==kImportChoiceGroup)) {
+                if(LOWORD(wParam)==kImportChoiceApply) state->applyAfterSelected=!state->applyAfterSelected;
+                else state->addGroupSelected=!state->addGroupSelected;
+                InvalidateRect(reinterpret_cast<HWND>(lParam),nullptr,FALSE); return 0;
+            }
             if (HIWORD(wParam) == BN_CLICKED &&
                 LOWORD(wParam) == kImportChoiceCompression) {
                 state->selected = !state->selected;
@@ -1075,7 +1119,7 @@ LRESULT CALLBACK ImportChoiceWindowProcedure(const HWND window,
                     LOWORD(wParam) == kImportChoiceMedia
                         ? ModernMainWindow::ImportChoice::MediaFiles
                         : ModernMainWindow::ImportChoice::SharePackage,
-                    state->selected};
+                    state->selected,state->applyAfterSelected,state->addGroupSelected};
                 DestroyWindow(window);
                 return 0;
             }
@@ -1087,7 +1131,7 @@ LRESULT CALLBACK ImportChoiceWindowProcedure(const HWND window,
                 DrawImportChoiceButton(draw, *state);
                 return TRUE;
             }
-            if (draw.CtlID == kImportChoiceCompression) {
+            if (draw.CtlID == kImportChoiceCompression || draw.CtlID == kImportChoiceApply || draw.CtlID == kImportChoiceGroup) {
                 DrawImportCompressionOption(draw, *state);
                 return TRUE;
             }
@@ -1122,7 +1166,7 @@ LRESULT CALLBACK ImportChoiceWindowProcedure(const HWND window,
             return 0;
         case WM_NCDESTROY:
             for (const HWND control :
-                 {state->media, state->package, state->compression}) {
+                 {state->media, state->package, state->compression, state->applyAfter, state->addGroup}) {
                 if (control != nullptr) {
                     RemoveWindowSubclass(control, &ImportChoiceButtonProcedure, 1);
                 }
@@ -1167,7 +1211,7 @@ std::optional<ModernMainWindow::ImportRequest> ShowImportChoiceDialog(
     ImportChoiceDialogState state;
     state.instance = instance;
     const int clientWidth = Scale(owner, 620);
-    const int clientHeight = Scale(owner, 278);
+    const int clientHeight = Scale(owner, 382);
     RECT outer{0, 0, clientWidth, clientHeight};
     AdjustWindowRectExForDpi(&outer, WS_POPUP | WS_CAPTION | WS_SYSMENU, FALSE,
                              WS_EX_DLGMODALFRAME, GetDpiForWindow(owner));
@@ -1224,6 +1268,7 @@ std::optional<ModernMainWindow::ImportRequest> ShowImportChoiceDialog(
 enum class SettingsCategory {
     General,
     Performance,
+    Diagnostics,
 };
 
 struct PerformanceSettingsDialogState final {
@@ -1231,6 +1276,7 @@ struct PerformanceSettingsDialogState final {
     HWND window = nullptr;
     HWND generalNavigation = nullptr;
     HWND performanceNavigation = nullptr;
+    HWND diagnosticsNavigation = nullptr, logs = nullptr, lastSession = nullptr, exportDiagnostics = nullptr;
     HWND startup = nullptr;
     HWND releaseResources = nullptr;
     HWND save = nullptr;
@@ -1269,7 +1315,7 @@ void RecreatePerformanceSettingsFonts(PerformanceSettingsDialogState& state) {
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Variable Text");
     for (const HWND control : {state.generalNavigation,
-                               state.performanceNavigation, state.startup,
+                               state.performanceNavigation, state.diagnosticsNavigation, state.logs, state.lastSession, state.exportDiagnostics, state.startup,
                                state.releaseResources, state.save,
                                state.cancel}) {
         SetControlFont(control, state.bodyFont);
@@ -1288,7 +1334,15 @@ void LayoutPerformanceSettingsDialog(PerformanceSettingsDialogState& state) {
     MoveWindow(state.performanceNavigation, navigationLeft,
                Scale(state.window, 114), navigationItemWidth,
                Scale(state.window, 42), TRUE);
+    MoveWindow(state.diagnosticsNavigation, navigationLeft, Scale(state.window, 164), navigationItemWidth, Scale(state.window, 42), TRUE);
     const int contentLeft = navigationWidth + Scale(state.window, 24);
+    const bool diagnostics = state.category == SettingsCategory::Diagnostics;
+    int diagnosticY = 36;
+    for (const HWND control : {state.logs, state.lastSession, state.exportDiagnostics}) {
+        MoveWindow(control, contentLeft, Scale(state.window, diagnosticY),
+                   client.right - contentLeft - Scale(state.window, 24), Scale(state.window, 46), TRUE);
+        ShowWindow(control, diagnostics ? SW_SHOW : SW_HIDE); diagnosticY += 58;
+    }
     MoveWindow(state.startup, contentLeft, Scale(state.window, 36),
                client.right - contentLeft - Scale(state.window, 24),
                Scale(state.window, 76), TRUE);
@@ -1310,8 +1364,8 @@ void LayoutPerformanceSettingsDialog(PerformanceSettingsDialogState& state) {
     }
     const bool general = state.category == SettingsCategory::General;
     ShowWindow(state.startup, general ? SW_SHOW : SW_HIDE);
-    ShowWindow(state.releaseResources, general ? SW_HIDE : SW_SHOW);
-    if (general) {
+    ShowWindow(state.releaseResources, state.category == SettingsCategory::Performance ? SW_SHOW : SW_HIDE);
+    if (state.category != SettingsCategory::Performance) {
         KillTimer(state.window, kSettingsTooltipTimer);
         state.pointerOverReleaseResources = false;
         ShowWindow(state.tooltip, SW_HIDE);
@@ -1330,7 +1384,7 @@ void LayoutPerformanceSettingsDialog(PerformanceSettingsDialogState& state) {
 void DrawPerformanceSettingsControl(const DRAWITEMSTRUCT& draw,
                                     const PerformanceSettingsDialogState& state) {
     const bool navigation = draw.CtlID == kSettingsGeneral ||
-                            draw.CtlID == kSettingsPerformance;
+                            draw.CtlID == kSettingsPerformance || draw.CtlID == kSettingsDiagnostics;
     FillRectangle(draw.hDC, draw.rcItem,
                   navigation ? kSidebar : kBackground);
     const bool pressed = (draw.itemState & ODS_SELECTED) != 0;
@@ -1343,7 +1397,8 @@ void DrawPerformanceSettingsControl(const DRAWITEMSTRUCT& draw,
             (draw.CtlID == kSettingsGeneral &&
              state.category == SettingsCategory::General) ||
             (draw.CtlID == kSettingsPerformance &&
-             state.category == SettingsCategory::Performance);
+             state.category == SettingsCategory::Performance) ||
+            (draw.CtlID == kSettingsDiagnostics && state.category == SettingsCategory::Diagnostics);
         const COLORREF fill = selected
                                   ? (hovered ? RGB(43, 52, 72)
                                              : RGB(38, 45, 62))
@@ -1352,7 +1407,7 @@ void DrawPerformanceSettingsControl(const DRAWITEMSTRUCT& draw,
                              selected ? kAccent : kSidebar,
                              Scale(state.window, 9));
         DrawTextLine(draw.hDC,
-                     draw.CtlID == kSettingsGeneral ? L"常规" : L"性能优化",
+                     draw.CtlID == kSettingsGeneral ? L"常规" : draw.CtlID == kSettingsPerformance ? L"性能优化" : L"诊断",
                      card, state.bodyFont, kTextPrimary,
                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
@@ -1415,7 +1470,9 @@ void DrawPerformanceSettingsControl(const DRAWITEMSTRUCT& draw,
                                          : (hovered ? kPanelHover : kPanel));
     FillRoundedRectangle(draw.hDC, card, fill,
                          primary ? fill : kBorder, Scale(state.window, 9));
-    DrawTextLine(draw.hDC, primary ? L"保存" : L"取消", card,
+    wchar_t label[80]{};
+    GetWindowTextW(draw.hwndItem, label, 80);
+    DrawTextLine(draw.hDC, label, card,
                  state.bodyFont, kTextPrimary,
                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
@@ -1521,7 +1578,7 @@ LRESULT CALLBACK PerformanceSettingsControlProcedure(
         GetClientRect(window, &client);
         const int identifier = GetDlgCtrlID(window);
         const bool navigation = identifier == kSettingsGeneral ||
-                                identifier == kSettingsPerformance;
+                                identifier == kSettingsPerformance || identifier == kSettingsDiagnostics;
         FillRectangle(reinterpret_cast<HDC>(wParam), client,
                       navigation ? kSidebar : kBackground);
         return 1;
@@ -1537,6 +1594,10 @@ LRESULT CALLBACK PerformanceSettingsControlProcedure(
                         return state->generalNavigation;
                     case kSettingsPerformance:
                         return state->performanceNavigation;
+                    case kSettingsDiagnostics: return state->diagnosticsNavigation;
+                    case kDiagnosticsLogs: return state->logs;
+                    case kDiagnosticsLast: return state->lastSession;
+                    case kDiagnosticsExport: return state->exportDiagnostics;
                     case kSettingsStartup:
                         return state->startup;
                     case kSettingsReleaseResources:
@@ -1610,6 +1671,10 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
                 createButton(kSettingsGeneral, L"常规");
             state->performanceNavigation =
                 createButton(kSettingsPerformance, L"性能优化");
+            state->diagnosticsNavigation = createButton(kSettingsDiagnostics, L"诊断");
+            state->logs = createButton(kDiagnosticsLogs, L"打开日志文件夹");
+            state->lastSession = createButton(kDiagnosticsLast, L"查看上次运行记录");
+            state->exportDiagnostics = createButton(kDiagnosticsExport, L"导出诊断报告…");
             state->startup = createButton(
                 kSettingsStartup, L"开机时自动启动");
             state->releaseResources = createButton(
@@ -1629,7 +1694,7 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
                 return -1;
             }
             for (const HWND control : {state->generalNavigation,
-                                       state->performanceNavigation,
+                                       state->performanceNavigation, state->diagnosticsNavigation, state->logs, state->lastSession, state->exportDiagnostics,
                                        state->startup,
                                        state->releaseResources,
                                        state->save, state->cancel}) {
@@ -1670,6 +1735,9 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
             if (HIWORD(wParam) != BN_CLICKED) {
                 break;
             }
+            if (LOWORD(wParam) >= kDiagnosticsLogs && LOWORD(wParam) <= kDiagnosticsExport) {
+                ShowDiagnostics(window, LOWORD(wParam) - kDiagnosticsLogs); return 0;
+            }
             if (LOWORD(wParam) == kSettingsReleaseResources) {
                 state->releaseResourcesEnabled =
                     !state->releaseResourcesEnabled;
@@ -1683,14 +1751,15 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
                 return 0;
             }
             if (LOWORD(wParam) == kSettingsGeneral ||
-                LOWORD(wParam) == kSettingsPerformance) {
+                LOWORD(wParam) == kSettingsPerformance || LOWORD(wParam) == kSettingsDiagnostics) {
                 state->category = LOWORD(wParam) == kSettingsGeneral
                                       ? SettingsCategory::General
-                                      : SettingsCategory::Performance;
+                                      : LOWORD(wParam) == kSettingsPerformance ? SettingsCategory::Performance : SettingsCategory::Diagnostics;
                 state->hoveredControl = 0;
                 LayoutPerformanceSettingsDialog(*state);
                 InvalidateRect(state->generalNavigation, nullptr, FALSE);
                 InvalidateRect(state->performanceNavigation, nullptr, FALSE);
+                InvalidateRect(state->diagnosticsNavigation, nullptr, FALSE);
                 return 0;
             }
             if (LOWORD(wParam) == kSettingsSave) {
@@ -1780,7 +1849,7 @@ LRESULT CALLBACK PerformanceSettingsWindowProcedure(
         case WM_NCDESTROY:
             KillTimer(window, kSettingsTooltipTimer);
             for (const HWND control : {state->generalNavigation,
-                                       state->performanceNavigation,
+                                       state->performanceNavigation, state->diagnosticsNavigation, state->logs, state->lastSession, state->exportDiagnostics,
                                        state->startup,
                                        state->releaseResources,
                                        state->save, state->cancel}) {

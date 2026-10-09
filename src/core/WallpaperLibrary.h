@@ -26,6 +26,7 @@ struct WallpaperItem final {
     std::uint32_t height = 0;
     bool hasAudio = false;
     bool external = false;
+    HRESULT readError = S_OK;
 };
 
 class WallpaperLibrary final {
@@ -33,6 +34,7 @@ public:
     HRESULT Initialize();
     HRESULT InitializeAt(std::filesystem::path rootDirectory);
     std::vector<WallpaperItem> Scan() const;
+    void InvalidateDescriptions();
 
     HRESULT ImportFile(std::wstring_view sourcePath, WallpaperItem& imported) const;
     HRESULT ImportFileAs(std::wstring_view sourcePath,
@@ -48,6 +50,7 @@ public:
     HRESULT Rename(const WallpaperItem& item, std::wstring_view newDisplayName,
                    WallpaperItem& renamed) const;
     HRESULT Remove(const WallpaperItem& item) const;
+    HRESULT Recycle(const WallpaperItem& item, HWND owner) const;
     HRESULT Reorder(std::span<const WallpaperItem> items) const;
 
     [[nodiscard]] const std::filesystem::path& RootDirectory() const noexcept;

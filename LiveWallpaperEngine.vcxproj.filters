@@ -11,6 +11,8 @@
     <Filter Include="platform"><UniqueIdentifier>{798A4B97-9BCA-48F6-B265-6D29F01749A7}</UniqueIdentifier></Filter>
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="src\app\TaskWindow.cpp"><Filter>app</Filter></ClCompile>
+    <ClCompile Include="src\app\FeatureDialogs.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\main.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\ModernMainWindow.cpp"><Filter>app</Filter></ClCompile>
     <ClCompile Include="src\app\ThumbnailCache.cpp"><Filter>app</Filter></ClCompile>
@@ -35,6 +37,10 @@
     <ClCompile Include="src\platform\StartupRegistration.cpp"><Filter>platform</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\app\TaskWindow.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="src\app\FeatureDialogs.h"><Filter>app</Filter></ClInclude>
+    <ClInclude Include="src\core\OperationProgress.h"><Filter>core</Filter></ClInclude>
+    <ClInclude Include="src\core\WallpaperOptions.h"><Filter>core</Filter></ClInclude>
     <ClInclude Include="src\app\WallpaperApplication.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\app\ModernMainWindow.h"><Filter>app</Filter></ClInclude>
     <ClInclude Include="src\app\ThumbnailCache.h"><Filter>app</Filter></ClInclude>

@@ -28,6 +28,8 @@ public:
     struct ImportRequest final {
         ImportChoice choice = ImportChoice::MediaFiles;
         bool compressToDisplay = false;
+        bool applyAfterImport = false;
+        bool addToCurrentGroup = true;
     };
 
     struct SettingsResult final {

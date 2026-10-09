@@ -1,4 +1,5 @@
 #include "app/WallpaperApplication.h"
+#include "app/FeatureDialogs.h"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,8 @@
 #include <wrl/client.h>
 
 #include "core/Logger.h"
+#include "core/OperationProgress.h"
+#include "app/TaskWindow.h"
 #include "media/MediaProbe.h"
 #include "media/video/VideoOptimizer.h"
 #include "platform/StartupRegistration.h"
@@ -46,7 +49,6 @@ constexpr UINT kRevealWallpaperMessage = WM_APP + 5;
 constexpr UINT kUpdateCheckResultMessage = WM_APP + 6;
 constexpr UINT kBeginUpdateCheckMessage = WM_APP + 7;
 constexpr UINT kInstallerShutdownMessage = WM_APP + 8;
-constexpr UINT kVideoOptimizationResultMessage = WM_APP + 9;
 constexpr UINT kShowSettingsMessage = WM_APP + 10;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT_PTR kExplorerRecoveryTimer = 1;
@@ -1170,6 +1172,7 @@ bool WallpaperApplication::RestoreSavedWallpaperSelection() {
     if (!settings.has_value()) {
         return false;
     }
+    wallpaperPreferences_ = settings->wallpaperPreferences;
     soundEnabled_ = settings->soundEnabled;
     releaseVideoResourcesOnPause_ =
         settings->releaseVideoResourcesOnPause;
@@ -1204,6 +1207,18 @@ void WallpaperApplication::RefreshLibrary() {
     validFileNames.reserve(items.size());
     for (const core::WallpaperItem& item : items) {
         validFileNames.push_back(item.path.filename().native());
+    }
+    // Media decoding is not an existence check. Keep references on access or
+    // enumeration errors; only confirmed missing files may be pruned.
+    const auto preserveExisting = [&](const std::wstring& fileName) {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(
+            wallpaperLibrary_.RootDirectory() / fileName, error);
+        if (exists || error) validFileNames.push_back(fileName);
+    };
+    for (const auto& fileName : groupStore_.Favorites()) preserveExisting(fileName);
+    for (const auto& group : groupStore_.Groups()) {
+        for (const auto& fileName : group.fileNames) preserveExisting(fileName);
     }
     const HRESULT pruneResult = groupStore_.Prune(validFileNames);
     if (FAILED(pruneResult)) {
@@ -1410,30 +1425,39 @@ void WallpaperApplication::DeleteWallpapers(
     }
     const std::wstring question = L"确定从“全部壁纸”中删除选中的 " +
                                   std::to_wstring(localItems.size()) +
-                                  L" 张壁纸吗？\r\n\r\n只删除软件本地库中的副本，源文件不受影响。";
+                                  L" 张壁纸并移入回收站吗？\r\n\r\n只处理本地库副本，源文件不受影响。无法回收时 Windows 会另行确认，绝不会静默永久删除。";
     if (MessageBoxW(controlWindow_, question.c_str(), kApplicationTitle,
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
         return;
     }
     std::size_t removed = 0;
+    std::wstring failures;
     for (const auto& item : localItems) {
         if (std::ranges::any_of(assignments_, [&](const auto& assignment) {
                 return SamePath(assignment.wallpaperPath, item.path.native());
             })) {
             CancelWallpaper(item, true);
         }
-        if (SUCCEEDED(wallpaperLibrary_.Remove(item))) {
-            groupStore_.RemoveWallpaperKey(item.path.filename().native());
+        const HRESULT removal=wallpaperLibrary_.Recycle(item,controlWindow_);
+        if (SUCCEEDED(removal)) {
+            if (FAILED(groupStore_.RemoveWallpaperKey(item.path.filename().native())))
+                failures += item.displayName + L" · 文件已回收，但分组信息保存失败。\r\n";
+            std::erase_if(wallpaperPreferences_, [&](const auto& p){return SamePath(p.path,item.path.native());});
             ++removed;
+        } else {
+            failures+=item.displayName+L"\r\n"+core::HResultMessage(removal)+L"\r\n";
         }
     }
+    if (!controlledTestMode_ && FAILED(SaveCurrentSelection())) failures += L"画面偏好清理未能保存。\r\n";
     mainWindow_.EndExportSelection();
     RefreshLibrary();
     mainWindow_.SetStatus(L"已从本地壁纸库删除 " + std::to_wstring(removed) +
                           L" 张壁纸");
+    if(!failures.empty()) ShowDetailsWindow(controlWindow_,L"删除结果",L"已删除 "+std::to_wstring(removed)+L" 项。处理明细：\r\n\r\n"+failures);
 }
 
 void WallpaperApplication::ChooseImport() {
+    if (operationInProgress_) return;
     const std::optional request = mainWindow_.ChooseImportSource();
     if (!request.has_value()) {
         return;
@@ -1511,405 +1535,123 @@ void WallpaperApplication::ChooseImport() {
         CoTaskMemFree(path);
     }
     if (SUCCEEDED(result)) {
-        ImportPaths(paths, request->compressToDisplay);
+        ImportPaths(paths, request->compressToDisplay, request->applyAfterImport, request->addToCurrentGroup);
     }
 }
 
 void WallpaperApplication::ImportPaths(const std::vector<std::wstring>& paths,
-                                       const bool compressToDisplay) {
-    std::vector<core::WallpaperItem> importedItems;
-    std::vector<std::wstring> videosToCompress;
-    std::size_t failedCount = 0;
-    bool importedArchive = false;
-    std::optional<bool> firstImportedItemIsCompressed;
-    for (const std::wstring& path : paths) {
-        if (compressToDisplay && !IsArchivePath(path) &&
-            !IsPackagePath(path)) {
-            media::MediaInfo sourceInfo;
-            if (SUCCEEDED(media::ProbeMediaFile(path, sourceInfo)) &&
-                sourceInfo.kind == media::WallpaperKind::Video) {
-                videosToCompress.push_back(path);
-                if (!firstImportedItemIsCompressed.has_value()) {
-                    firstImportedItemIsCompressed = true;
-                }
-                continue;
-            }
-        }
-
-        HRESULT result = S_OK;
-        if (IsArchivePath(path)) {
-            std::vector<core::WallpaperItem> archiveItems;
-            result = wallpaperLibrary_.ImportArchive(path, archiveItems);
-            if (SUCCEEDED(result)) {
-                importedArchive = true;
-                importedItems.insert(importedItems.end(),
-                                     std::make_move_iterator(archiveItems.begin()),
-                                     std::make_move_iterator(archiveItems.end()));
-            }
-        } else {
-            core::WallpaperItem item;
-            result = IsPackagePath(path)
-                         ? wallpaperLibrary_.ImportPackage(path, item)
-                         : wallpaperLibrary_.ImportFile(path, item);
-            if (SUCCEEDED(result)) {
-                importedItems.push_back(std::move(item));
-                if (!firstImportedItemIsCompressed.has_value()) {
-                    firstImportedItemIsCompressed = false;
-                }
-            }
-        }
-        if (FAILED(result)) {
-            ++failedCount;
-            core::LogError(L"Wallpaper import failed: " + path, result);
-        }
+                                       const bool compressToDisplay,
+                                       const bool applyAfterImport,
+                                       const bool addToCurrentGroup) {
+    if (operationInProgress_ || paths.empty()) return;
+    operationInProgress_ = true;
+    const std::wstring targetGroup = addToCurrentGroup ? mainWindow_.CurrentGroupId() : L"all";
+    UINT maximumWidth = 0, maximumHeight = 0;
+    RefreshDisplayTargets(true);
+    for (const auto& display : displayTargets_) {
+        maximumWidth = std::max(maximumWidth, static_cast<UINT>(display.clientBounds.right-display.clientBounds.left));
+        maximumHeight = std::max(maximumHeight, static_cast<UINT>(display.clientBounds.bottom-display.clientBounds.top));
     }
-
-    const bool applyCompressedResult =
-        !controlledTestMode_ && !importedArchive &&
-        firstImportedItemIsCompressed.value_or(false);
-    if (!importedItems.empty() && !importedArchive &&
-        !applyCompressedResult) {
-        ApplyWallpaperWithTargetPrompt(importedItems.front().path.native(), true,
-                                       true);
+    if (spanAcrossDisplays_ && !displayTargets_.empty()) {
+        RECT bounds = displayTargets_.front().clientBounds;
+        for (const auto& display : displayTargets_) UnionRect(&bounds,&bounds,&display.clientBounds);
+        maximumWidth=static_cast<UINT>(bounds.right-bounds.left);
+        maximumHeight=static_cast<UINT>(bounds.bottom-bounds.top);
+    }
+    if (compressedImportTestActive_) {maximumWidth=1920; maximumHeight=1080;}
+    if (!maximumWidth || !maximumHeight) {maximumWidth=1920; maximumHeight=1080;}
+    std::vector<core::WallpaperItem> imported;
+    std::size_t failures=0;
+    bool cancelled=false;
+    const bool taskSucceeded=RunTaskWindow(controlWindow_,L"导入壁纸",
+        [&](std::stop_token stop) {
+            std::wstring details;
+            for (std::size_t index=0; index<paths.size(); ++index) {
+                if (stop.stop_requested()) {cancelled=true; break;}
+                const auto& path=paths[index];
+                const auto name=std::filesystem::path(path).filename().native();
+                core::OperationProgress::Report(0,L"导入 "+std::to_wstring(index+1)+L" / "+
+                    std::to_wstring(paths.size())+L"\r\n"+name);
+                HRESULT hr=S_OK;
+                std::wstring note;
+                if(IsArchivePath(path)) {
+                    std::vector<core::WallpaperItem> batch;
+                    hr=wallpaperLibrary_.ImportArchive(path,batch);
+                    imported.insert(imported.end(),batch.begin(),batch.end());
+                } else {
+                    core::WallpaperItem item;
+                    if(IsPackagePath(path)) hr=wallpaperLibrary_.ImportPackage(path,item);
+                    else {
+                        media::MediaInfo info;
+                        hr=media::ProbeMediaFile(path,info);
+                        std::filesystem::path temporary;
+                        bool compressed=false;
+                        if(SUCCEEDED(hr) && compressToDisplay && info.kind==media::WallpaperKind::Video) {
+                            media::video::VideoOptimizationPlan plan;
+                            hr=media::video::PlanVideoOptimization(path,maximumWidth,maximumHeight,plan);
+                            if(SUCCEEDED(hr) && plan.needed) {
+                                hr=CreateTemporaryMp4Path(temporary);
+                                if(SUCCEEDED(hr)) {
+                                    core::OperationProgress::Report(-1,L"压缩 "+std::to_wstring(index+1)+L" / "+
+                                        std::to_wstring(paths.size())+L"\r\n"+name+L"\r\n保留源文件和原始帧率");
+                                    hr=media::video::OptimizeVideo(path,temporary.native(),plan,stop);
+                                }
+                                media::MediaInfo output;
+                                if(SUCCEEDED(hr)) hr=media::ProbeMediaFile(temporary.native(),output);
+                                if(SUCCEEDED(hr) && (output.width!=plan.outputWidth || output.height!=plan.outputHeight ||
+                                    output.hasAudio!=plan.hasAudio ||
+                                    static_cast<std::uint64_t>(output.frameRateNumerator)*plan.frameRateDenominator !=
+                                    static_cast<std::uint64_t>(plan.frameRateNumerator)*output.frameRateDenominator)) hr=E_FAIL;
+                                compressed=SUCCEEDED(hr);
+                                if(compressed) note=L"已压缩";
+                            } else if(SUCCEEDED(hr)) {
+                                note=L"导入的壁纸分辨率小于或等于屏幕分辨率，没有执行压缩。";
+                            }
+                            if(FAILED(hr) && !stop.stop_requested()) {
+                                note=L"压缩失败，导入原文件："+core::HResultMessage(hr);
+                                hr=S_OK;
+                            }
+                        }
+                        if(stop.stop_requested()) hr=HRESULT_FROM_WIN32(ERROR_CANCELLED);
+                        if(SUCCEEDED(hr)) {
+                            core::OperationProgress::Report(0,L"保存到本地库\r\n"+name);
+                            if(compressed) {
+                                auto destinationName=std::filesystem::path(name); destinationName.replace_extension(L".mp4");
+                                hr=wallpaperLibrary_.ImportFileAs(temporary.native(),destinationName.native(),item);
+                                if(SUCCEEDED(hr)) core::LogInfo(L"Imported a compressed wallpaper: "+item.path.native()+
+                                    L", resolution="+std::to_wstring(item.width)+L"x"+std::to_wstring(item.height));
+                            } else hr=wallpaperLibrary_.ImportFile(path,item);
+                        }
+                        if(!temporary.empty()) DeleteFileW(temporary.c_str());
+                    }
+                    if(SUCCEEDED(hr)) imported.push_back(std::move(item));
+                }
+                if(hr==HRESULT_FROM_WIN32(ERROR_CANCELLED) || stop.stop_requested()) {
+                    cancelled=true; details+=name+L" · 已取消\r\n"; break;
+                }
+                if(FAILED(hr)) {++failures; details+=L"失败 · "+name+L"\r\n"+core::HResultMessage(hr)+L"\r\n";
+                    core::LogError(L"Wallpaper import failed: "+path,hr);}
+                else details+=L"完成 · "+name+(note.empty()?L"":L" · "+note)+L"\r\n";
+            }
+            return (cancelled?L"任务已取消，已经导入的完整文件保留。\r\n":L"导入完成\r\n")+
+                std::wstring(L"成功 ")+std::to_wstring(imported.size())+L" 项，失败 "+std::to_wstring(failures)+
+                L" 项\r\n\r\n"+details;
+        },controlledTestMode_);
+    operationInProgress_=false;
+    if (!taskSucceeded) {++failures; cancelled=true;}
+    if (shuttingDown_ || !IsWindow(controlWindow_)) return;
+    std::vector<std::wstring> fileNames;
+    for(const auto& item:imported) fileNames.push_back(item.path.filename().native());
+    HRESULT groupResult=S_OK;
+    if(!fileNames.empty()) {
+        if(targetGroup==ModernMainWindow::FavoritesGroupId) groupResult=groupStore_.SetFavorites(fileNames,true);
+        else if(targetGroup!=ModernMainWindow::AllGroupId) groupResult=groupStore_.AddToGroup(targetGroup,fileNames);
     }
     RefreshLibrary();
-
-    std::wstring status = L"已导入 " + std::to_wstring(importedItems.size()) + L" 项";
-    if (failedCount > 0) {
-        status += L" · " + std::to_wstring(failedCount) + L" 项不受支持或校验失败";
-        MessageBoxW(controlWindow_, status.c_str(), kApplicationTitle,
-                    MB_OK | MB_ICONWARNING);
-    }
-    mainWindow_.SetStatus(std::move(status));
-    if (!videosToCompress.empty()) {
-        QueueVideoOptimizations(videosToCompress, applyCompressedResult);
-    }
-}
-
-void WallpaperApplication::QueueVideoOptimizations(
-    const std::span<const std::wstring> sourcePaths,
-    const bool applyFirstImported) {
-    UINT maximumWidth = 0;
-    UINT maximumHeight = 0;
-    for (const shell::DisplayTarget& display : displayTargets_) {
-        maximumWidth = std::max(
-            maximumWidth,
-            static_cast<UINT>(std::max(
-                0L, display.clientBounds.right - display.clientBounds.left)));
-        maximumHeight = std::max(
-            maximumHeight,
-            static_cast<UINT>(std::max(
-                0L, display.clientBounds.bottom - display.clientBounds.top)));
-    }
-    if (spanAcrossDisplays_ && displayTargets_.size() > 1) {
-        RECT desktopBounds = displayTargets_.front().clientBounds;
-        for (const shell::DisplayTarget& display : displayTargets_) {
-            desktopBounds.left = std::min(desktopBounds.left,
-                                          display.clientBounds.left);
-            desktopBounds.top = std::min(desktopBounds.top,
-                                         display.clientBounds.top);
-            desktopBounds.right = std::max(desktopBounds.right,
-                                           display.clientBounds.right);
-            desktopBounds.bottom = std::max(desktopBounds.bottom,
-                                            display.clientBounds.bottom);
-        }
-        maximumWidth = static_cast<UINT>(
-            std::max(0L, desktopBounds.right - desktopBounds.left));
-        maximumHeight = static_cast<UINT>(
-            std::max(0L, desktopBounds.bottom - desktopBounds.top));
-    }
-    if (compressedImportTestActive_) {
-        maximumWidth = 1920;
-        maximumHeight = 1080;
-    }
-    if (maximumWidth == 0 || maximumHeight == 0) {
-        maximumWidth = 1920;
-        maximumHeight = 1080;
-    }
-
-    std::size_t queued = 0;
-    {
-        const std::scoped_lock lock(videoOptimizationMutex_);
-        if (videoOptimizationQueue_.empty() && !videoOptimizationJobActive_ &&
-            pendingVideoOptimizationResults_.empty()) {
-            videoOptimizationBatchOptimized_ = 0;
-            videoOptimizationBatchSkipped_ = 0;
-            videoOptimizationBatchFailed_ = 0;
-            videoOptimizationBatchImportFailed_ = 0;
-            videoOptimizationBatchApplyFirst_ = applyFirstImported;
-        } else if (applyFirstImported) {
-            videoOptimizationBatchApplyFirst_ = true;
-        }
-        for (const std::wstring& sourcePath : sourcePaths) {
-            const bool alreadyQueued = std::ranges::any_of(
-                videoOptimizationQueue_, [&](const VideoOptimizationJob& job) {
-                    return SamePath(job.sourcePath, sourcePath);
-                });
-            if (alreadyQueued) {
-                continue;
-            }
-            videoOptimizationQueue_.push_back(VideoOptimizationJob{
-                sourcePath, maximumWidth, maximumHeight});
-            ++queued;
-        }
-    }
-    if (queued == 0) {
-        return;
-    }
-    StartVideoOptimizationThread();
-    videoOptimizationWake_.notify_all();
-    mainWindow_.SetStatus(
-        L"正在后台压缩并导入 " + std::to_wstring(queued) +
-        L" 个视频 · 保留源文件和原始帧率");
-}
-
-void WallpaperApplication::StartVideoOptimizationThread() {
-    if (videoOptimizationThread_.joinable()) {
-        return;
-    }
-    const HWND notificationWindow = controlWindow_;
-    videoOptimizationThread_ = std::jthread(
-        [this, notificationWindow](const std::stop_token stopToken) {
-            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-            const HRESULT comResult =
-                CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-            while (!stopToken.stop_requested()) {
-                VideoOptimizationJob job;
-                {
-                    std::unique_lock lock(videoOptimizationMutex_);
-                    if (!videoOptimizationWake_.wait(
-                            lock, stopToken, [&] {
-                                return !videoOptimizationQueue_.empty();
-                            })) {
-                        break;
-                    }
-                    job = std::move(videoOptimizationQueue_.front());
-                    videoOptimizationQueue_.pop_front();
-                    videoOptimizationJobActive_ = true;
-                }
-
-                VideoOptimizationResult completed;
-                completed.sourcePath = job.sourcePath;
-                media::video::VideoOptimizationPlan plan;
-                completed.status = media::video::PlanVideoOptimization(
-                    job.sourcePath, job.displayWidth, job.displayHeight,
-                    plan);
-                if (SUCCEEDED(completed.status) && !plan.needed) {
-                    completed.skipped = true;
-                } else if (SUCCEEDED(completed.status)) {
-                    std::filesystem::path temporaryPath;
-                    completed.status = CreateTemporaryMp4Path(temporaryPath);
-                    if (SUCCEEDED(completed.status)) {
-                        completed.outputPath = temporaryPath.native();
-                        completed.status = media::video::OptimizeVideo(
-                            job.sourcePath, completed.outputPath, plan,
-                            stopToken);
-                    }
-                    media::MediaInfo optimizedInfo;
-                    if (SUCCEEDED(completed.status)) {
-                        completed.status = media::ProbeMediaFile(
-                            completed.outputPath, optimizedInfo);
-                    }
-                    if (SUCCEEDED(completed.status) &&
-                        (optimizedInfo.kind != media::WallpaperKind::Video ||
-                         optimizedInfo.width != plan.outputWidth ||
-                         optimizedInfo.height != plan.outputHeight ||
-                         optimizedInfo.frameRateDenominator == 0 ||
-                         static_cast<std::uint64_t>(
-                             optimizedInfo.frameRateNumerator) *
-                                 plan.frameRateDenominator !=
-                             static_cast<std::uint64_t>(
-                                 plan.frameRateNumerator) *
-                                 optimizedInfo.frameRateDenominator ||
-                         (plan.hasAudio && !optimizedInfo.hasAudio))) {
-                        completed.status = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-                    }
-                    if (FAILED(completed.status)) {
-                        if (!completed.outputPath.empty()) {
-                            DeleteFileW(completed.outputPath.c_str());
-                            completed.outputPath.clear();
-                        }
-                    } else {
-                        completed.optimized = true;
-                    }
-                }
-
-                {
-                    const std::scoped_lock lock(videoOptimizationMutex_);
-                    videoOptimizationJobActive_ = false;
-                    if (stopToken.stop_requested()) {
-                        if (!completed.outputPath.empty()) {
-                            DeleteFileW(completed.outputPath.c_str());
-                        }
-                    } else {
-                        pendingVideoOptimizationResults_.push_back(
-                            std::move(completed));
-                    }
-                }
-                if (stopToken.stop_requested()) {
-                    break;
-                }
-                if (IsWindow(notificationWindow)) {
-                    PostMessageW(notificationWindow,
-                                 kVideoOptimizationResultMessage, 0, 0);
-                }
-            }
-            if (SUCCEEDED(comResult)) {
-                CoUninitialize();
-            }
-        });
-}
-
-void WallpaperApplication::StopVideoOptimizationThread() {
-    if (videoOptimizationThread_.joinable()) {
-        videoOptimizationThread_.request_stop();
-        videoOptimizationWake_.notify_all();
-        videoOptimizationThread_.join();
-    }
-    const std::scoped_lock lock(videoOptimizationMutex_);
-    videoOptimizationQueue_.clear();
-    for (const VideoOptimizationResult& result :
-         pendingVideoOptimizationResults_) {
-        if (!result.outputPath.empty()) {
-            DeleteFileW(result.outputPath.c_str());
-        }
-    }
-    pendingVideoOptimizationResults_.clear();
-    videoOptimizationJobActive_ = false;
-    videoOptimizationBatchOptimized_ = 0;
-    videoOptimizationBatchSkipped_ = 0;
-    videoOptimizationBatchFailed_ = 0;
-    videoOptimizationBatchImportFailed_ = 0;
-    videoOptimizationBatchApplyFirst_ = false;
-}
-
-void WallpaperApplication::CompleteVideoOptimizations() {
-    std::deque<VideoOptimizationResult> completed;
-    bool batchComplete = false;
-    {
-        const std::scoped_lock lock(videoOptimizationMutex_);
-        completed.swap(pendingVideoOptimizationResults_);
-        batchComplete = videoOptimizationQueue_.empty() &&
-                        !videoOptimizationJobActive_;
-    }
-    if (completed.empty()) {
-        return;
-    }
-
-    std::size_t optimizedCount = 0;
-    std::size_t skippedCount = 0;
-    std::size_t failedCount = 0;
-    std::size_t importFailedCount = 0;
-    std::vector<core::WallpaperItem> importedItems;
-    for (VideoOptimizationResult& result : completed) {
-        core::WallpaperItem imported;
-        HRESULT importResult = E_FAIL;
-        if (result.optimized) {
-            std::filesystem::path destinationName(result.sourcePath);
-            destinationName = destinationName.filename();
-            destinationName.replace_extension(L".mp4");
-            importResult = wallpaperLibrary_.ImportFileAs(
-                result.outputPath, destinationName.native(), imported);
-            DeleteFileW(result.outputPath.c_str());
-            result.outputPath.clear();
-            if (SUCCEEDED(importResult)) {
-                ++optimizedCount;
-                core::LogInfo(
-                    L"Imported a compressed wallpaper: " +
-                    imported.path.native() + L", resolution=" +
-                    std::to_wstring(imported.width) + L"x" +
-                    std::to_wstring(imported.height));
-            } else {
-                core::LogError(
-                    L"The compressed video could not be imported; importing "
-                    L"the source file instead: " + result.sourcePath,
-                    importResult);
-                importResult =
-                    wallpaperLibrary_.ImportFile(result.sourcePath, imported);
-                if (SUCCEEDED(importResult)) {
-                    ++failedCount;
-                }
-            }
-        } else {
-            if (!result.skipped) {
-                core::LogError(
-                    L"Wallpaper video compression failed; importing the source "
-                    L"file instead: " + result.sourcePath,
-                    result.status);
-            }
-            importResult =
-                wallpaperLibrary_.ImportFile(result.sourcePath, imported);
-            if (SUCCEEDED(importResult)) {
-                result.skipped ? ++skippedCount : ++failedCount;
-            }
-        }
-        if (SUCCEEDED(importResult)) {
-            importedItems.push_back(std::move(imported));
-        } else {
-            ++importFailedCount;
-            core::LogError(L"Wallpaper import failed after compression: " +
-                               result.sourcePath,
-                           importResult);
-        }
-    }
-    videoOptimizationBatchOptimized_ += optimizedCount;
-    videoOptimizationBatchSkipped_ += skippedCount;
-    videoOptimizationBatchFailed_ += failedCount;
-    videoOptimizationBatchImportFailed_ += importFailedCount;
-    if (!importedItems.empty()) {
-        RefreshLibrary();
-        if (videoOptimizationBatchApplyFirst_) {
-            videoOptimizationBatchApplyFirst_ = false;
-            ApplyWallpaperWithTargetPrompt(importedItems.front().path.native(),
-                                           true, true);
-        }
-    }
-    if (!batchComplete) {
-        return;
-    }
-
-    std::wstring status;
-    if (videoOptimizationBatchOptimized_ > 0) {
-        status = L"已压缩并导入 " +
-                 std::to_wstring(videoOptimizationBatchOptimized_) +
-                 L" 项 · 保留原始帧率";
-        if (videoOptimizationBatchSkipped_ > 0) {
-            status += L" · " +
-                      std::to_wstring(videoOptimizationBatchSkipped_) +
-                      L" 项无需压缩";
-        }
-    }
-    if (videoOptimizationBatchSkipped_ > 0) {
-        const wchar_t* message =
-            L"导入的壁纸分辨率小于或等于屏幕分辨率，没有执行压缩。";
-        if (status.empty()) {
-            status = message;
-        }
-        MessageBoxW(controlWindow_, message, kApplicationTitle,
-                    MB_OK | MB_ICONINFORMATION);
-    }
-    if (videoOptimizationBatchFailed_ > 0) {
-        if (!status.empty()) {
-            status += L" · ";
-        }
-        status += std::to_wstring(videoOptimizationBatchFailed_) +
-                  L" 项压缩失败，已导入源文件";
-    }
-    if (videoOptimizationBatchImportFailed_ > 0) {
-        if (!status.empty()) {
-            status += L" · ";
-        }
-        status += std::to_wstring(videoOptimizationBatchImportFailed_) +
-                  L" 项导入失败";
-    }
-    if (!status.empty()) {
-        mainWindow_.SetStatus(std::move(status));
-    }
-    videoOptimizationBatchOptimized_ = 0;
-    videoOptimizationBatchSkipped_ = 0;
-    videoOptimizationBatchFailed_ = 0;
-    videoOptimizationBatchImportFailed_ = 0;
-    videoOptimizationBatchApplyFirst_ = false;
+    if(FAILED(groupResult)) ShowDetailsWindow(controlWindow_,L"分组未保存",L"文件已导入全部壁纸，但加入分组失败。\r\n"+core::HResultMessage(groupResult));
+    mainWindow_.SetStatus((cancelled?L"已取消 · ":L"")+std::wstring(L"已导入 ")+std::to_wstring(imported.size())+L" 项");
+    if(applyAfterImport && !cancelled && !imported.empty() && !controlledTestMode_)
+        ApplyWallpaperWithTargetPrompt(imported.front().path.native(),true,true);
 }
 
 void WallpaperApplication::ChooseExport() {
@@ -1924,6 +1666,7 @@ void WallpaperApplication::ChooseExport() {
 
 void WallpaperApplication::ExportWallpapers(
     const std::vector<core::WallpaperItem>& items) {
+    if (operationInProgress_) return;
     if (items.empty()) {
         MessageBoxW(controlWindow_, L"请至少选择一张壁纸。", kApplicationTitle,
                     MB_OK | MB_ICONINFORMATION);
@@ -1967,15 +1710,21 @@ void WallpaperApplication::ExportWallpapers(
         result = destinationItem->GetDisplayName(SIGDN_FILESYSPATH, &destination);
     }
     if (SUCCEEDED(result) && destination != nullptr) {
-        result = wallpaperLibrary_.ExportArchive(items, destination);
+        const std::wstring output(destination);
+        operationInProgress_=true;
+        result=E_ABORT;
+        RunTaskWindow(controlWindow_,L"导出分享包",[&](std::stop_token) {
+            result=wallpaperLibrary_.ExportArchive(items,output);
+            if(result==HRESULT_FROM_WIN32(ERROR_CANCELLED)) return std::wstring(L"已取消导出，未完成的分享包已清理。");
+            if(FAILED(result)) return L"导出失败\r\n"+core::HResultMessage(result);
+            return L"已导出 "+std::to_wstring(items.size())+L" 张壁纸\r\n"+output;
+        },controlledTestMode_);
+        operationInProgress_=false;
     }
     CoTaskMemFree(destination);
 
     if (FAILED(result)) {
-        std::wstring message = L"ZIP 壁纸分享包导出失败。\r\n\r\n";
-        message += core::HResultMessage(result);
-        MessageBoxW(controlWindow_, message.c_str(), kApplicationTitle,
-                    MB_OK | MB_ICONERROR);
+        mainWindow_.SetStatus(result==HRESULT_FROM_WIN32(ERROR_CANCELLED)?L"已取消导出":L"分享包导出失败");
         return;
     }
     mainWindow_.EndExportSelection();
@@ -2050,7 +1799,7 @@ void WallpaperApplication::RemoveWallpaperFromLibrary(
     if (active) {
         question += L"该壁纸正在使用，删除前会先取消应用。\r\n";
     }
-    question += L"只删除软件本地壁纸库中的副本，不影响最初导入的源文件。";
+    question += L"优先移入回收站，不影响最初导入的源文件。无法回收时 Windows 会另行确认，绝不会静默永久删除。";
     if (MessageBoxW(controlWindow_, question.c_str(), kApplicationTitle,
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
         return;
@@ -2058,7 +1807,7 @@ void WallpaperApplication::RemoveWallpaperFromLibrary(
     if (active) {
         CancelWallpaper(item, true);
     }
-    const HRESULT result = wallpaperLibrary_.Remove(item);
+    const HRESULT result = wallpaperLibrary_.Recycle(item,controlWindow_);
     if (FAILED(result)) {
         std::wstring message = L"无法从“全部壁纸”中删除该壁纸。\r\n\r\n";
         message += core::HResultMessage(result);
@@ -2074,6 +1823,8 @@ void WallpaperApplication::RemoveWallpaperFromLibrary(
                        groupResult);
     }
     RefreshLibrary();
+    std::erase_if(wallpaperPreferences_, [&](const auto& p){return SamePath(p.path,item.path.native());});
+    if (!controlledTestMode_ && FAILED(SaveCurrentSelection())) core::LogWarning(L"Wallpaper preferences deletion could not be saved.");
     mainWindow_.SetStatus(L"已从“全部壁纸”中删除 · " + item.displayName);
 }
 
@@ -2120,6 +1871,9 @@ void WallpaperApplication::CommitWallpaperRename() {
                     MB_OK | MB_ICONERROR);
         return;
     }
+    for (auto& p : wallpaperPreferences_) {
+        if (SamePath(p.path, source.path.native())) p.path = renamed.path.native();
+    }
     const HRESULT groupResult = groupStore_.ReplaceWallpaperKey(
         source.path.filename().native(), renamed.path.filename().native());
     if (FAILED(groupResult)) {
@@ -2139,6 +1893,8 @@ void WallpaperApplication::CommitWallpaperRename() {
         }
     }
     RefreshLibrary();
+    if (!wasActive && !controlledTestMode_ && FAILED(SaveCurrentSelection()))
+        core::LogWarning(L"Wallpaper preferences rename could not be saved.");
     mainWindow_.SetStatus(L"壁纸已重命名 · " + renamed.displayName);
 }
 
@@ -2167,6 +1923,8 @@ void WallpaperApplication::ShowLibraryContextMenu(POINT screenPoint) {
         return;
     }
     AppendMenuW(menu, MF_STRING, kLibraryPreviewCommand, L"预览壁纸");
+    AppendMenuW(menu, MF_STRING, 4900, L"重新读取壁纸信息");
+    AppendMenuW(menu, MF_STRING, 4901, L"画面与声音…");
     AppendMenuW(menu, MF_STRING | (selected->external ? MF_GRAYED : 0),
                 kLibraryRenameCommand, L"重命名");
     AppendMenuW(menu, MF_STRING, kLibraryOpenLocationCommand,
@@ -2217,7 +1975,14 @@ void WallpaperApplication::ShowLibraryContextMenu(POINT screenPoint) {
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, screenPoint.x,
         screenPoint.y, 0, controlWindow_, nullptr);
     DestroyMenu(menu);
-    if (command == kLibraryPreviewCommand) {
+    if (command == 4901) {
+        ChangeWallpaperOptions(*selected);
+    } else if (command == 4900) {
+        wallpaperLibrary_.InvalidateDescriptions();
+        RefreshLibrary();
+        if (const auto item = mainWindow_.SelectedItem(); item && FAILED(item->readError))
+            ShowDetailsWindow(controlWindow_, L"壁纸仍无法读取", item->path.native() + L"\r\n\r\n" + core::HResultMessage(item->readError));
+    } else if (command == kLibraryPreviewCommand) {
         PreviewSelectedWallpaper();
     } else if (command == kLibraryRenameCommand) {
         mainWindow_.BeginRenameSelected();
@@ -2382,6 +2147,7 @@ void WallpaperApplication::ShowActiveWallpaperContextMenu(POINT screenPoint) {
         return;
     }
     AppendMenuW(menu, MF_STRING, kActivePreviewCommand, L"预览壁纸");
+    AppendMenuW(menu, MF_STRING, 4901, L"画面与声音…");
     AppendMenuW(menu, MF_STRING | (selected->external ? MF_GRAYED : 0),
                 kActiveRenameCommand, L"重命名");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -2390,7 +2156,9 @@ void WallpaperApplication::ShowActiveWallpaperContextMenu(POINT screenPoint) {
         menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, screenPoint.x,
         screenPoint.y, 0, controlWindow_, nullptr);
     DestroyMenu(menu);
-    if (command == kActivePreviewCommand) {
+    if (command == 4901) {
+        ChangeWallpaperOptions(*selected);
+    } else if (command == kActivePreviewCommand) {
         PreviewWallpaper(*selected);
     } else if (command == kActiveRenameCommand) {
         mainWindow_.BeginRenameActiveSelected();
@@ -2742,12 +2510,13 @@ bool WallpaperApplication::RebuildPlaybackSessions(const bool showErrors) {
 }
 
 HRESULT WallpaperApplication::StartWallpaperSession(WallpaperSession& session) {
+    session.options = OptionsFor(session.assignment.wallpaperPath);
     if (session.destinations.empty()) {
         return E_INVALIDARG;
     }
     if (session.kind == media::WallpaperKind::StaticImage) {
         const HRESULT result = RenderStaticImage(
-            session.assignment.wallpaperPath, session.destinations);
+            session.assignment.wallpaperPath, session.destinations, session.options);
         if (SUCCEEDED(result)) {
             core::LogInfo(L"Static wallpaper session presented one frame.");
         }
@@ -2759,6 +2528,7 @@ HRESULT WallpaperApplication::StartWallpaperSession(WallpaperSession& session) {
             return HRESULT_FROM_WIN32(GetLastError());
         }
         session.gifPlayer = std::make_unique<media::image::GifPlayer>();
+        session.gifPlayer->SetOptions(session.options);
         HRESULT result = session.gifPlayer->Load(
             session.assignment.wallpaperPath, static_cast<UINT>(client.right),
             static_cast<UINT>(client.bottom));
@@ -2780,13 +2550,15 @@ HRESULT WallpaperApplication::StartWallpaperSession(WallpaperSession& session) {
     session.videoPlayer = std::make_unique<media::video::MediaEnginePlayer>();
     const HRESULT result = session.videoPlayer->Open(
         renderer_.Device(), controlWindow_, kMediaEngineEventMessage,
-        session.assignment.wallpaperPath, soundEnabled_, session.token);
+        session.assignment.wallpaperPath, soundEnabled_ && session.options.audioAllowed, session.token);
+    if (SUCCEEDED(result)) session.videoPlayer->SetVolume(session.options.volume);
     session.videoResourcesReleased = false;
     return result;
 }
 
 HRESULT WallpaperApplication::RenderStaticImage(
-    const std::wstring_view path, const std::span<const RECT> destinations) {
+    const std::wstring_view path, const std::span<const RECT> destinations,
+    const core::WallpaperOptions& options) {
     if (!renderer_.IsInitialized() || wallpaperWindow_ == nullptr) {
         return E_UNEXPECTED;
     }
@@ -2801,7 +2573,7 @@ HRESULT WallpaperApplication::RenderStaticImage(
         }
         media::image::DecodedImage image;
         result = imageLoader_.LoadFill(path, static_cast<UINT>(width),
-                                       static_cast<UINT>(height), image);
+                                       static_cast<UINT>(height), image, options);
         if (FAILED(result)) {
             return result;
         }
@@ -2897,13 +2669,67 @@ bool WallpaperApplication::RemoveFailedPlaybackSessions() {
     return true;
 }
 
+core::WallpaperOptions WallpaperApplication::OptionsFor(std::wstring_view path) const {
+    for (const auto& p : wallpaperPreferences_) if (SamePath(p.path, path)) return p.options;
+    return {};
+}
+
+void WallpaperApplication::ChangeWallpaperOptions(const core::WallpaperItem& item) {
+    if (operationInProgress_) return;
+    const auto chosen = EditWallpaperOptions(controlWindow_, item.displayName,
+        OptionsFor(item.path.native()), item.hasAudio);
+    if (!chosen || shuttingDown_) return;
+    const auto previous = wallpaperPreferences_;
+    bool found = false;
+    for (auto& p : wallpaperPreferences_) {
+        if (SamePath(p.path, item.path.native())) {p.options = chosen->options; found = true;}
+
+    }
+    if (!found) wallpaperPreferences_.push_back({item.path.native(), chosen->options});
+    if (chosen->solo) {
+        for (const auto& assignment : assignments_) {
+            if (SamePath(assignment.wallpaperPath, item.path.native())) continue;
+            auto options = OptionsFor(assignment.wallpaperPath); options.audioAllowed = false;
+            auto match = std::find_if(wallpaperPreferences_.begin(), wallpaperPreferences_.end(),
+                [&](const auto& p) {return SamePath(p.path, assignment.wallpaperPath);});
+            if (match == wallpaperPreferences_.end()) wallpaperPreferences_.push_back({assignment.wallpaperPath, options});
+            else match->options = options;
+        }
+    }
+    if (!controlledTestMode_ && FAILED(SaveCurrentSelection())) {
+        wallpaperPreferences_ = previous;
+        MessageBoxW(controlWindow_, L"无法保存画面与声音设置，本次修改未应用。", kApplicationTitle, MB_OK|MB_ICONERROR);
+        return;
+    }
+    bool failed = false;
+    {
+        const std::scoped_lock lock(playbackMutex_);
+        for (const auto& session : playbackSessions_) {
+            session->options = OptionsFor(session->assignment.wallpaperPath);
+            if (session->videoPlayer) {
+                failed |= FAILED(session->videoPlayer->SetVolume(session->options.volume));
+                failed |= FAILED(session->videoPlayer->SetSoundEnabled(soundEnabled_ && session->options.audioAllowed));
+                if (SamePath(session->assignment.wallpaperPath, item.path.native()))
+                    failed |= FAILED(session->videoPlayer->Recompose(renderer_, session->destinations, session->options));
+            } else if (SamePath(session->assignment.wallpaperPath, item.path.native())) {
+                if (session->gifPlayer) {
+                    session->gifPlayer->SetOptions(session->options);
+                    failed |= !session->gifPlayer->Recompose(renderer_);
+                } else failed |= FAILED(RenderStaticImage(session->assignment.wallpaperPath, session->destinations, session->options));
+            }
+        }
+    }
+    WakePlaybackRenderThread();
+    if (failed) MessageBoxW(controlWindow_, L"设置已保存，但当前播放更新失败，请重新应用该壁纸。", kApplicationTitle, MB_OK|MB_ICONWARNING);
+}
+
 void WallpaperApplication::ToggleSound() {
-    const std::scoped_lock playbackLock(playbackMutex_);
+    std::unique_lock playbackLock(playbackMutex_);
     soundEnabled_ = !soundEnabled_;
     bool failed = false;
     for (const auto& session : playbackSessions_) {
         if (session->videoPlayer &&
-            FAILED(session->videoPlayer->SetSoundEnabled(soundEnabled_))) {
+            FAILED(session->videoPlayer->SetSoundEnabled(soundEnabled_ && session->options.audioAllowed))) {
             failed = true;
         }
     }
@@ -2911,15 +2737,17 @@ void WallpaperApplication::ToggleSound() {
         soundEnabled_ = !soundEnabled_;
         for (const auto& session : playbackSessions_) {
             if (session->videoPlayer) {
-                session->videoPlayer->SetSoundEnabled(soundEnabled_);
+                session->videoPlayer->SetSoundEnabled(soundEnabled_ && session->options.audioAllowed);
             }
         }
+        playbackLock.unlock();
         MessageBoxW(controlWindow_, L"无法更改当前视频的声音状态。",
                     kApplicationTitle, MB_OK | MB_ICONERROR);
         return;
     }
+    playbackLock.unlock();
     mainWindow_.SetSoundEnabled(soundEnabled_);
-    if (!controlledTestMode_ && !assignments_.empty()) {
+    if (!controlledTestMode_) {
         SaveCurrentSelection();
         mainWindow_.SetStatus(ActivePlaybackStatus());
     } else {
@@ -2954,6 +2782,7 @@ void WallpaperApplication::SetReleaseVideoResourcesOnPause(
 }
 
 void WallpaperApplication::ShowSettings() {
+    if(operationInProgress_) return;
     EnableWindow(updateButtonWindow_, FALSE);
     EnableWindow(settingsButtonWindow_, FALSE);
     const std::optional result = mainWindow_.ChooseSettings(
@@ -3000,6 +2829,7 @@ void WallpaperApplication::ToggleManualPlaybackPause() {
 HRESULT WallpaperApplication::SaveCurrentSelection() const {
     core::AppSettings settings;
     settings.assignments = assignments_;
+    settings.wallpaperPreferences = wallpaperPreferences_;
     settings.soundEnabled = soundEnabled_;
     settings.releaseVideoResourcesOnPause = releaseVideoResourcesOnPause_;
     settings.displayTargets = JoinDisplayIds(selectedDisplayIds_);
@@ -3330,7 +3160,7 @@ bool WallpaperApplication::RenderPlaybackFrame() {
             continue;
         }
         const HRESULT frameResult = session->videoPlayer->PresentFrame(
-            renderer_, session->destinations, false);
+            renderer_, session->destinations, false, session->options);
         if (FAILED(frameResult)) {
             if (!playbackFailurePending_.exchange(true)) {
                 PostMessageW(controlWindow_, kPlaybackFailureMessage, 0, 0);
@@ -3877,7 +3707,7 @@ void WallpaperApplication::ResizeRendererToWindow() {
         session->destinations = DestinationsForAssignment(session->assignment);
         if (session->kind == media::WallpaperKind::StaticImage) {
             RenderStaticImage(session->assignment.wallpaperPath,
-                              session->destinations);
+                              session->destinations, session->options);
         } else if (session->gifPlayer) {
             session->gifPlayer->Resize(width, height);
             session->gifPlayer->SetTargetRects(session->destinations);
@@ -3899,7 +3729,6 @@ void WallpaperApplication::Shutdown() {
     shuttingDown_ = true;
     running_ = false;
     StopUpdateCheck();
-    StopVideoOptimizationThread();
     resourceMonitor_.Stop();
     mainWindow_.StopThumbnailLoading();
     if (controlWindow_ != nullptr) {
@@ -3995,6 +3824,10 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
             case WM_COMMAND: {
                 const WORD identifier = LOWORD(wParam);
                 const WORD notification = HIWORD(wParam);
+                if (controlledTestMode_ && identifier == 2192) {
+                    if (const auto item = mainWindow_.SelectedItem()) ChangeWallpaperOptions(*item);
+                    return 0;
+                }
                 if (identifier == kTrayPauseCommand) {
                     ToggleManualPlaybackPause();
                     return 0;
@@ -4363,9 +4196,6 @@ LRESULT WallpaperApplication::HandleWindowMessage(const HWND window,
                 CompleteUpdateCheck();
                 return 0;
 
-            case kVideoOptimizationResultMessage:
-                CompleteVideoOptimizations();
-                return 0;
 
             case kBeginUpdateCheckMessage:
                 BeginUpdateCheck();

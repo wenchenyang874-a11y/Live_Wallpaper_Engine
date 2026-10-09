@@ -11,6 +11,9 @@
 #include "core/Logger.h"
 #include "core/WallpaperGroupStore.h"
 #include "core/WallpaperLibrary.h"
+#include "core/OperationProgress.h"
+#include "core/WallpaperOptions.h"
+#include "media/image/WicImageLoader.h"
 
 namespace lwe::core {
 namespace {
@@ -177,6 +180,27 @@ bool TestDescriptionCache(const std::filesystem::path& root) {
     const auto changed = library.Scan();
     if (changed.size() != 1 || changed.front().width != 4 ||
         changed.front().height != 2 || changed.front().fileSize != first.front().fileSize) return false;
+    library.InvalidateDescriptions();
+    WallpaperGroupStore retainedGroups;
+    std::wstring retainedGroupId;
+    const std::array<std::wstring,1> retainedNames{path.filename().native()};
+    if (FAILED(retainedGroups.InitializeAt(root)) ||
+        FAILED(retainedGroups.CreateGroup(L"读取失败保留测试",retainedGroupId)) ||
+        FAILED(retainedGroups.AddToGroup(retainedGroupId,retainedNames)) ||
+        FAILED(retainedGroups.SetFavorites(retainedNames,true))) return false;
+    const HANDLE locked = CreateFileW(path.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (locked == INVALID_HANDLE_VALUE) return false;
+    const auto unavailable = library.Scan();
+    CloseHandle(locked);
+    if (unavailable.size() != 1 || SUCCEEDED(unavailable.front().readError)) return false;
+    if (FAILED(retainedGroups.Prune(retainedNames)) ||
+        !retainedGroups.IsFavorite(retainedNames.front()) ||
+        !retainedGroups.IsInGroup(retainedGroupId,retainedNames.front())) return false;
+    LogInfo(L"SELF_TEST_UNREADABLE_GROUP_MEMBERSHIP=True");
+    library.InvalidateDescriptions();
+    const auto restored = library.Scan();
+    if (restored.size() != 1 || FAILED(restored.front().readError) || restored.front().width != 4) return false;
+    LogInfo(L"SELF_TEST_UNREADABLE_ITEM_RETRY=True");
     if (!DeleteFileW(path.c_str()) || !library.Scan().empty()) return false;
     if (FAILED(library.InitializeAt(root / L"other")) || !library.Scan().empty()) return false;
     LogInfo(L"SELF_TEST_LIBRARY_CACHE_INVALIDATION=True");
@@ -186,6 +210,28 @@ bool TestDescriptionCache(const std::filesystem::path& root) {
 }  // namespace
 
 int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
+    WallpaperOptions placementOptions;
+    const auto fill = CalculatePlacement(3840,2160,1000,1000,placementOptions);
+    if (fill.width != 2160 || fill.x != 840 || fill.outputWidth != 1000) return 1;
+    placementOptions.focusX = 100;
+    if (CalculatePlacement(3840,2160,1000,1000,placementOptions).x != 1680) return 1;
+    placementOptions.fit = FitMode::Fit;
+    const auto fit = CalculatePlacement(3840,2160,1920,1200,placementOptions);
+    if (fit.outputHeight != 1080 || fit.top != 60 || fit.width != 3840) return 1;
+    placementOptions.fit = FitMode::Center;
+    const auto center = CalculatePlacement(100,60,200,200,placementOptions);
+    if (center.left != 50 || center.top != 70 || center.outputWidth != 100) return 1;
+    placementOptions.fit = FitMode::Stretch;
+    const auto stretch = CalculatePlacement(100,60,200,200,placementOptions);
+    if (stretch.width != 100 || stretch.outputHeight != 200 || stretch.top != 0) return 1;
+    const std::array<std::uint8_t,8> red{0,0,255,255,0,0,255,255};
+    media::image::WicImageLoader loader;
+    media::image::DecodedImage composed;
+    placementOptions.fit = FitMode::Fit;
+    if (FAILED(loader.ScaleFillBgra(red,2,1,8,4,4,composed,placementOptions)) ||
+        composed.pixels[2] != 0 || composed.pixels[3] != 255 || composed.pixels[18] != 255 ||
+        composed.pixels[50] != 0) return 1;
+    LogInfo(L"SELF_TEST_IMAGE_PLACEMENT=True");
     std::filesystem::path temporaryRoot;
     HRESULT result = CreateTemporaryDirectory(temporaryRoot);
     if (FAILED(result)) {
@@ -383,6 +429,44 @@ int RunWallpaperLibrarySelfTest(const std::wstring_view sourcePath) {
         return 1;
     }
     LogInfo(L"SELF_TEST_LIBRARY_ZIP_ROUNDTRIP=True");
+    {
+        std::stop_source cancellation;
+        cancellation.request_stop();
+        OperationProgress progress{cancellation.get_token(), {}};
+        OperationScope scope(progress);
+        const auto cancelledPackage = temporaryRoot / L"cancelled.lwewall";
+        const auto cancelledZip = temporaryRoot / L"cancelled.zip";
+        WallpaperItem cancelledItem;
+        std::vector<WallpaperItem> cancelledItems;
+        if (SUCCEEDED(sourceLibrary.ExportArchive(persistedOrder, cancelledZip.native())) ||
+            SUCCEEDED(destinationLibrary.ImportFile(sourcePath, cancelledItem)) ||
+            SUCCEEDED(archiveDestinationLibrary.ImportArchive(archive.native(), cancelledItems)) ||
+            std::filesystem::exists(cancelledZip) || !cancelledItems.empty()) {
+            LogError(L"Cancellation transaction self-test failed."); cleanup(); return 1;
+        }
+    }
+    LogInfo(L"SELF_TEST_TASK_CANCELLATION=True");
+    {
+        std::stop_source cancellation;
+        OperationProgress progress{cancellation.get_token(), [&](int, std::wstring_view) { cancellation.request_stop(); }};
+        OperationScope scope(progress);
+        const auto output = temporaryRoot / L"cancel-in-progress.zip";
+        if (SUCCEEDED(sourceLibrary.ExportArchive(persistedOrder, output.native())) ||
+            std::filesystem::exists(output)) {cleanup(); return 1;}
+    }
+    {
+        WallpaperLibrary isolated;
+        if (FAILED(isolated.InitializeAt(temporaryRoot / L"cancel-copy"))) {cleanup(); return 1;}
+        std::stop_source cancellation;
+        OperationProgress progress{cancellation.get_token(), [&](int, std::wstring_view) { cancellation.request_stop(); }};
+        OperationScope scope(progress);
+        WallpaperItem item;
+        if (SUCCEEDED(isolated.ImportFile(sourcePath, item)) || !isolated.Scan().empty()) {cleanup(); return 1;}
+        for (const auto& entry : std::filesystem::directory_iterator(isolated.RootDirectory())) {
+            if (entry.path().extension() == L".importing") {cleanup(); return 1;}
+        }
+    }
+    LogInfo(L"SELF_TEST_TASK_MID_CANCEL_NO_ORPHANS=True");
 
     if (!CopyFileW(archive.c_str(), corruptedArchive.c_str(), TRUE) ||
         FAILED(ModifyByte(corruptedArchive, 0, true)) ||

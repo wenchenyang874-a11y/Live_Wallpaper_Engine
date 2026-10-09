@@ -6,6 +6,7 @@
 #include <vector>
 
 #include <windows.h>
+#include "core/WallpaperOptions.h"
 
 namespace lwe::media::image {
 
@@ -19,10 +20,10 @@ struct DecodedImage final {
 class WicImageLoader final {
 public:
     HRESULT LoadFill(std::wstring_view imagePath, UINT targetWidth, UINT targetHeight,
-                     DecodedImage& image) const;
+                     DecodedImage& image, const core::WallpaperOptions& options = {}) const;
     HRESULT ScaleFillBgra(std::span<const std::uint8_t> sourcePixels,
                           UINT sourceWidth, UINT sourceHeight, UINT sourceStride,
-                          UINT targetWidth, UINT targetHeight, DecodedImage& image) const;
+                          UINT targetWidth, UINT targetHeight, DecodedImage& image, const core::WallpaperOptions& options = {}) const;
 };
 
 }  // namespace lwe::media::image

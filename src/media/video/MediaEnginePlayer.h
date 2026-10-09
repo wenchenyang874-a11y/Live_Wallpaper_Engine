@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/WallpaperOptions.h"
 #include <atomic>
 #include <chrono>
 #include <span>
@@ -30,8 +31,11 @@ public:
                  bool soundEnabled, std::uint32_t notificationToken = 0);
     HRESULT PresentFrame(render::D3DRenderer& renderer,
                          std::span<const RECT> destinations,
-                         bool present = true);
+                         bool present = true, const core::WallpaperOptions& options = {});
     void HandleEvent(DWORD eventCode, std::uint32_t generation);
+    HRESULT Recompose(render::D3DRenderer& renderer, std::span<const RECT> destinations,
+                      const core::WallpaperOptions& options);
+    HRESULT SetVolume(unsigned volume);
     HRESULT SetSoundEnabled(bool enabled);
     HRESULT SetPaused(bool paused);
     void Shutdown();

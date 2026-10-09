@@ -57,25 +57,12 @@ private:
     struct WallpaperSession final {
         std::uint32_t token = 0;
         core::WallpaperAssignmentSetting assignment;
+        core::WallpaperOptions options;
         media::WallpaperKind kind = media::WallpaperKind::StaticImage;
         std::vector<RECT> destinations;
         std::unique_ptr<media::image::GifPlayer> gifPlayer;
         std::unique_ptr<media::video::MediaEnginePlayer> videoPlayer;
         bool videoResourcesReleased = false;
-    };
-
-    struct VideoOptimizationJob final {
-        std::wstring sourcePath;
-        std::uint32_t displayWidth = 0;
-        std::uint32_t displayHeight = 0;
-    };
-
-    struct VideoOptimizationResult final {
-        std::wstring sourcePath;
-        std::wstring outputPath;
-        HRESULT status = S_OK;
-        bool optimized = false;
-        bool skipped = false;
     };
 
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wParam,
@@ -86,6 +73,8 @@ private:
     bool CreateControlWindow();
     bool CreateUpdateButtonWindow();
     void ShowSettings();
+    void ChangeWallpaperOptions(const core::WallpaperItem& item);
+    core::WallpaperOptions OptionsFor(std::wstring_view path) const;
     bool CreateWallpaperWindow();
     bool EnsureRenderer();
     bool ReattachToDesktop();
@@ -111,12 +100,8 @@ private:
     void DeleteWallpapers(std::span<const core::WallpaperItem> items);
     void ChooseImport();
     void ImportPaths(const std::vector<std::wstring>& paths,
-                     bool compressToDisplay = false);
-    void QueueVideoOptimizations(std::span<const std::wstring> sourcePaths,
-                                 bool applyFirstImported);
-    void StartVideoOptimizationThread();
-    void StopVideoOptimizationThread();
-    void CompleteVideoOptimizations();
+                     bool compressToDisplay = false, bool applyAfterImport = false,
+                     bool addToCurrentGroup = true);
     void ChooseExport();
     void ExportWallpapers(const std::vector<core::WallpaperItem>& items);
     void OpenWallpaperLocation(const core::WallpaperItem& item);
@@ -140,7 +125,7 @@ private:
     bool RebuildPlaybackSessions(bool showErrors);
     HRESULT StartWallpaperSession(WallpaperSession& session);
     HRESULT RenderStaticImage(std::wstring_view path,
-                              std::span<const RECT> destinations);
+                              std::span<const RECT> destinations, const core::WallpaperOptions& options = {});
     void StopAllPlayback();
     bool RemoveFailedPlaybackSessions();
     void ToggleSound();
@@ -220,6 +205,7 @@ private:
     std::vector<shell::DisplayTarget> displayTargets_;
     std::vector<std::wstring> selectedDisplayIds_;
     std::vector<core::WallpaperAssignmentSetting> assignments_;
+    std::vector<core::WallpaperPreference> wallpaperPreferences_;
     std::vector<std::unique_ptr<WallpaperSession>> playbackSessions_;
     mutable std::recursive_mutex playbackMutex_;
     std::condition_variable_any playbackWake_;
@@ -227,17 +213,7 @@ private:
     std::jthread updateCheckThread_;
     std::mutex updateCheckMutex_;
     std::optional<updates::UpdateCheckResult> pendingUpdateResult_;
-    std::jthread videoOptimizationThread_;
-    std::mutex videoOptimizationMutex_;
-    std::condition_variable_any videoOptimizationWake_;
-    std::deque<VideoOptimizationJob> videoOptimizationQueue_;
-    std::deque<VideoOptimizationResult> pendingVideoOptimizationResults_;
-    bool videoOptimizationJobActive_ = false;
-    std::size_t videoOptimizationBatchOptimized_ = 0;
-    std::size_t videoOptimizationBatchSkipped_ = 0;
-    std::size_t videoOptimizationBatchFailed_ = 0;
-    std::size_t videoOptimizationBatchImportFailed_ = 0;
-    bool videoOptimizationBatchApplyFirst_ = false;
+    bool operationInProgress_ = false;
     updates::UpdateCheckMode updateCheckMode_ = updates::UpdateCheckMode::Live;
     std::uint32_t nextSessionToken_ = 1;
     bool spanAcrossDisplays_ = true;
